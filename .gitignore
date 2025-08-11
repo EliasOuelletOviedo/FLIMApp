@@ -1,0 +1,17 @@
+# System
+.DS_Store
+Thumbs.db
+
+# Julia
+*.jl.cov
+
+# VSCode
+.vscode/
+
+# Manifest? (we recommend committing Manifest; omit if you choose not to)
+# Uncomment below to ignore Manifest:
+# Manifest.toml
+
+# Binary data
+*.sdt
+*.raw

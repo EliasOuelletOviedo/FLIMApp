@@ -1,0 +1,7 @@
+[deps]
+JuliaFormatter = "98e50ef6-434e-11e9-1051-2b60c6c9e899"
+LibSerialPort = "a05a14c7-6e3b-5ba9-90a2-45558833e1df"
+Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+Observables = "510215fc-4207-5dde-b226-833fc4488ee2"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
