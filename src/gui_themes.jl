@@ -1,6 +1,26 @@
-using Colors
+"""
+gui_themes.jl
 
-DARK_MODE = Dict{Symbol, Any}(
+UI Theme definitions and styling constants for Makie-based GUI.
+
+Provides:
+- Color palettes (dark and light modes)
+- Widget attribute dictionaries (buttons, axes, text boxes, etc.)
+- Typography settings
+- Layout constants
+
+All color definitions are RGB{Float64} for Makie compatibility.
+"""
+
+using Colors
+using GLMakie
+
+"""
+    DARK_MODE::Dict
+
+Dark mode color scheme and typography.
+"""
+const DARK_MODE = Dict{Symbol, Any}(
     :theme   => Dict{Symbol, Any}(
         :backgroundcolor => :gray12,
         :textcolor       => :gray80,
@@ -17,9 +37,13 @@ DARK_MODE = Dict{Symbol, Any}(
     :color_5 => :gray50,
     :text    => :white
 )
-# println(RGB{Float64}(colorant"gray14"))
 
-LIGHT_MODE = Dict{Symbol, Any}(
+"""
+    LIGHT_MODE::Dict
+
+Light mode color scheme and typography.
+"""
+const LIGHT_MODE = Dict{Symbol, Any}(
     :theme   => Dict{Symbol, Any}(
         :backgroundcolor => :gray88,
         :textcolor       => :gray20,
@@ -37,21 +61,14 @@ LIGHT_MODE = Dict{Symbol, Any}(
     :text    => :black
 )
 
-if dark
-    COLOR_1 = parse(RGB{Float64}, DARK_MODE[:color_1])
-    COLOR_2 = parse(RGB{Float64}, DARK_MODE[:color_2])
-    COLOR_3 = parse(RGB{Float64}, DARK_MODE[:color_3])
-    COLOR_4 = parse(RGB{Float64}, DARK_MODE[:color_4])
-    COLOR_5 = parse(RGB{Float64}, DARK_MODE[:color_5])
-    TEXT    = parse(RGB{Float64}, DARK_MODE[:text])
-else
-    COLOR_1 = parse(RGB{Float64}, LIGHT_MODE[:color_1])
-    COLOR_2 = parse(RGB{Float64}, LIGHT_MODE[:color_2])
-    COLOR_3 = parse(RGB{Float64}, LIGHT_MODE[:color_3])
-    COLOR_4 = parse(RGB{Float64}, LIGHT_MODE[:color_4])
-    COLOR_5 = parse(RGB{Float64}, LIGHT_MODE[:color_5])
-    TEXT    = parse(RGB{Float64}, LIGHT_MODE[:text])
-end
+# Initialize with dark mode by default
+# (Will be updated dynamically by GUI when user switches themes)
+const COLOR_1 = parse(RGB{Float64}, DARK_MODE[:color_1])
+const COLOR_2 = parse(RGB{Float64}, DARK_MODE[:color_2])
+const COLOR_3 = parse(RGB{Float64}, DARK_MODE[:color_3])
+const COLOR_4 = parse(RGB{Float64}, DARK_MODE[:color_4])
+const COLOR_5 = parse(RGB{Float64}, DARK_MODE[:color_5])
+const TEXT    = parse(RGB{Float64}, DARK_MODE[:text])
 
 AXIS_PLOTS_ATTRS = Dict{Symbol, Any}(
     # :alignmode          => Outside(10),
@@ -188,7 +205,7 @@ AXIS_PLOTS_ATTRS = Dict{Symbol, Any}(
     :ytrimspine         => false,
     :yzoomkey           => Makie.Keyboard.x,
     :yzoomlock          => false,
-    :zoombutton         => true,
+    # :zoombutton         => true,
 )
 
 AXIS_COUNTS_ATTRS = Dict{Symbol, Any}(
@@ -325,7 +342,7 @@ AXIS_COUNTS_ATTRS = Dict{Symbol, Any}(
     :ytrimspine         => false,
     :yzoomkey           => Makie.Keyboard.x,
     :yzoomlock          => false,
-    :zoombutton         => true,
+    # :zoombutton         => true,
 )
 
 BUTTON_ATTRS = Dict{Symbol, Any}(
@@ -434,7 +451,7 @@ MENU_ATTRS = Dict{Symbol, Any}(
     :width                         => nothing
 )
 
-SPINNER_BOX_ATTRS  = Dict(
+SPINNER_BOX_ATTRS  = Dict{Symbol, Any}(
     :alignmode     => Inside(),
     :color         => :transparent,
     :cornerradius  => 0,
@@ -557,25 +574,6 @@ TOGGLE_ATTRS = Dict{Symbol, Any}(
     :width              => 20
 )
 
-# TABLE_ATTRS = Dict{Symbol, Any}(
-#     :bordercolor               => COLOR_3,
-#     :bordercolor_focused       => COLOR_3,
-#     :bordercolor_focused_invalid => COLOR_3,
-#     :bordercolor_hover         => COLOR_3,
-#     :borderwidth               => 1,
-#     :boxcolor                  => COLOR_1,
-#     :boxcolor_focused          => COLOR_2,
-#     :boxcolor_focused_invalid  => RGBf(0.22, 0.11, 0.11),
-#     :boxcolor_hover            => :gray12,
-#     :cornerradius              => 0,
-#     :halign                    => :right,
-#     :height                    => 24,
-#     :placeholder               => " ",
-#     :textcolor_placeholder     => :gray25,
-#     :textpadding               => (10, 8, 8, 4),
-#     :width                     => nothing,
-# )
-
 PATH_TEXT_ATTRS = Dict{Symbol, Any}(
     :borderwidth                 => 0,
     :boxcolor                    => COLOR_2,
@@ -592,7 +590,7 @@ PATH_TEXT_ATTRS = Dict{Symbol, Any}(
     :width                       => 242 - 24
 )
 
-PATH_BOX_ATTRS  = Dict(
+PATH_BOX_ATTRS  = Dict{Symbol, Any}(
     :alignmode     => Inside(),
     :color         => :transparent,
     :cornerradius  => 0,
@@ -633,14 +631,3 @@ PATH_BUTTON_ATTRS = Dict{Symbol, Any}(
     :valign             => :center, 
     :width              => 24
 )
-
-# POP_UP_BUTTON_ATTRS = Dict{Symbol, Any}(
-#     :buttoncolor         => COLOR_3,
-#     :buttoncolor_active  => COLOR_1,
-#     :buttoncolor_hover   => COLOR_2,
-#     :cornerradius        => 4,
-#     :fontsize            => 16,
-#     :height              => 24,
-#     :labelcolor_hover    => :white,
-#     :width               => 96
-# )

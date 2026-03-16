@@ -108,7 +108,7 @@ function open_SDT_file(filepath)
     end
 end
 
-function test(ch::Channel{Tuple{Float64,Float64,UInt32}}, running::Threads.Atomic{Bool}; dt=0.05)
+function test(ch::Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,UInt32}}, running::Threads.Atomic{Bool}; dt=0.05)
     try
         @info "Worker Test started on thread $(threadid())"
         t = 0.0
@@ -116,19 +116,18 @@ function test(ch::Channel{Tuple{Float64,Float64,UInt32}}, running::Threads.Atomi
         all_files = readdir(path)
         files = filter(f -> occursin(".sdt", f), all_files)
         nb_files = length(files)
-        cum_time = 0.0
+        timestamps = 0.0
         vectors = zeros(100, 256)
         n_vectors = size(vectors, 1)
 
         params = [5.0, 0, 5.0e-5]
 
-        i = UInt32(1)
+        i = UInt32(0)
 
         while running[]   # produit tant que flag true
             file = files[mod1(i, nb_files)]
             filepath = joinpath(path, file)
             vector, histogram_resolution, time = open_SDT_file(filepath)
-            cum_time += time
             # vector2 = reshape(vector, (1, :))
 
             # if i == 1
@@ -147,8 +146,17 @@ function test(ch::Channel{Tuple{Float64,Float64,UInt32}}, running::Threads.Atomi
                 params = params_raw
             end
 
-            put!(ch, (cum_time, params_raw[1], i))
+            histogram = data[2]
+            photons = sum(histogram)
+            fit = conv_irf_data(data[1], Tuple(params), irf, histogram_resolution=histogram_resolution)*photons
+            lifetime = params[1]
+            concentration = params[2]
+            timestamps += time
             i += 1
+
+            # println("Types : ", typeof(histogram), ", ", typeof(photons), ", ", typeof(lifetime), ", ", typeof(concentration), ", ", typeof(timestamps), ", ", typeof(i))
+
+            put!(ch, (histogram, fit, photons, lifetime, concentration, timestamps, i))
             sleep(0.0001)
         end
     catch e

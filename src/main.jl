@@ -1,102 +1,182 @@
+"""
+main.jl
+
+FLIM Application - Fluorescence Lifetime Imaging Microscopy
+
+Main entry point for the application. Handles:
+- Package imports and dependencies
+- Application initialization
+- State management (persistence and runtime)
+- GUI creation and event binding
+- Application lifecycle (start/stop)
+
+Usage:
+    julia> include("src/main.jl")
+    julia> run_app()
+"""
+
+# =============================================================================
+# DEPENDENCIES
+# =============================================================================
+
 using Serialization
 using Observables
 using ZipFile
 
-JULIA_NUM_THREADS = 2
+# =============================================================================
+# MODULE INITIALIZATION - LOAD IN DEPENDENCY ORDER
+# =============================================================================
 
-mutable struct AppState
-    dark::Bool
-    current_panel::Symbol
-    layout::Dict{Symbol, Any}
-    controller::Dict{Symbol, Any}
-    # protocol::Dict{Symbol, Any}
-    # console::Dict{Symbol, Any}
-end
+# Configuration must come first (defines constants)
+include("config.jl")
 
-mutable struct AppRun
-    channel::Union{Channel{Tuple{Float64,Float64,UInt32}}, Nothing}
-    worker_task::Union{Task, Nothing}
-    consumer_task::Union{Task, Nothing}
-    running::Threads.Atomic{Bool}
-    lifetime::Observable{Vector{Float64}}
-    timestamps::Observable{Vector{Float64}}
-    i::Observable{UInt32}
-end
+# Data structures depend on config
+include("data_types.jl")
 
-dark = true
+# GUI themes (colors and styling)
+include("gui_themes.jl")
 
-current_panel = :layout
+# Analysis algorithms (lifetime fitting)
+include("lifetime_analysis.jl")
 
-layout = Dict{Symbol, Any}(
-    :time_range => 60,
-    :binning    => 1,
-    :smoothing  => 0,
-    :plot1      => "Lifetime",
-    :plot2      => "Ion concentration"
-)
+# File I/O and worker tasks (depends on lifetime_analysis via vec_to_lifetime and conv_irf_data)
+include("data_processing.jl")
 
-controller = Dict{Symbol, Any}(
-    :ch1_inv => false,
-    :ch1_on  => false,
-    :ch1_out => "Out 1",
-    :ch1_mode=> "Digital",
-    :P1         => 0,
-    :I1         => 0,
-    :D1         => 0,
-    :ch2_inv => false,
-    :ch2_on  => false,
-    :ch2_out => "Out 2",
-    :ch2_mode=> "Digital",
-    :P2         => 0,
-    :I2         => 0,
-    :D2         => 0,
-)
+# Background task management
+include("runtime.jl")
 
+# Event handlers (depends on runtime)
+include("handlers.jl")
+
+# GUI construction (depends on handlers and runtime)
 include("GUI.jl")
 
-const STATE_FILE = joinpath("docs", "AppState.jls")
+# =============================================================================
+# STATE PERSISTENCE
+# =============================================================================
 
-mkpath(dirname(STATE_FILE))
+"""
+    save_state(state::AppState; path::String)
 
-function save_state(state::AppState; path::AbstractString=STATE_FILE)
-    open(path, "w") do io
-        serialize(io, state)
-    end
-end
+Serialize application state to disk.
 
-function load_state(path::AbstractString=STATE_FILE)
-    open(path, "r") do io
-        return deserialize(io)
-    end
-end
-
-export AppState
-
-function run_app()
-    app = nothing
-
+Args:
+- `state::AppState` - Persistent configuration to save
+- `path::String` - File path (default: STATE_FILE_PATH from config)
+"""
+function save_state(state::AppState; path::String=STATE_FILE_PATH)
     try
-        app = load_state()
-    catch
-        app = AppState(dark,
-                       current_panel,
-                       layout,
-                       controller)
-
-        save_state(app)
+        mkpath(dirname(path))
+        open(path, "w") do io
+            serialize(io, state)
+        end
+        @info "State saved" path=path
+    catch e
+        @error "Failed to save state" path=path error=string(e)
     end
-
-    app_run = AppRun(nothing,
-                     nothing,
-                     nothing,
-                     Threads.Atomic{Bool}(false),
-                     Observable(Float64[]),
-                     Observable(Float64[]),
-                     Observable{UInt32}(0)
-    )
-
-    gui = make_gui(app, app_run)
-    display(gui)
 end
+
+"""
+    load_state(path::String)::AppState
+
+Deserialize application state from disk.
+
+Returns cached state if file exists; otherwise returns nothing.
+
+Args:
+- `path::String` - File path (default: STATE_FILE_PATH from config)
+
+Returns:
+- AppState if file exists and is valid, nothing otherwise
+"""
+function load_state(path::String=STATE_FILE_PATH)
+    if !isfile(path)
+        return nothing
+    end
+    
+    try
+        open(path, "r") do io
+            return deserialize(io)
+        end
+    catch e
+        @warn "Failed to load state; reverting to defaults" path=path error=string(e)
+        return nothing
+    end
+end
+
+# =============================================================================
+# APPLICATION INITIALIZATION & EXECUTION
+# =============================================================================
+
+"""
+    run_app()
+
+Main application entry point.
+
+1. Initializes directories and configuration
+2. Loads or creates persistent application state
+3. Creates GUI and attaches event handlers
+4. Handles application lifecycle (blocking call)
+"""
+function run_app()
+    @info "="^60
+    @info "FLIM Application Starting"
+    @info "="^60
+    
+    # Ensure required directories exist
+    initialize_directories()
+    
+    # Load or create persistent state
+    app = load_state()
+    if app === nothing
+        @info "Creating fresh application state"
+        app = AppState(true)  # Start with dark mode
+        save_state(app)
+    else
+        @info "Loaded saved state" theme=app.dark ? "dark" : "light"
+    end
+    
+    # Initialize runtime state
+    app_run = AppRun()
+    
+    # Load IRF for lifetime analysis
+    try
+        global irf = get_irf()
+        global irf_bin_size = _compute_irf_bin_size(irf)
+        global tcspc_window_size = size(irf, 1) * irf_bin_size
+        # Initialize FFT plans with correct size based on IRF
+        global fft_plan = plan_fft(zeros(Float64, size(irf, 1)))
+        global ifft_plan = plan_ifft(zeros(Float64, size(irf, 1)))
+        @info "IRF loaded successfully" size=size(irf) bin_size=irf_bin_size window_size=tcspc_window_size
+    catch e
+        @error "Failed to load IRF; lifetime fitting will not work" error=string(e)
+        # Use defaults - FFT plans already initialized with default size
+        global irf = nothing
+        global irf_bin_size = nothing
+        global tcspc_window_size = nothing
+    end
+    
+    # Create GUI
+    @info "Creating GUI..."
+    fig, blocks = make_gui(app, app_run)
+    
+    # Attach event handlers
+    @info "Initializing event handlers..."
+    make_handlers(app, app_run, blocks)
+    
+    @info "="^60
+    @info "Application ready"
+    @info "="^60
+    
+    # Display and run (blocking)
+    display(fig)
+    
+    return fig
+end
+
+# Export public API
+export AppState, AppRun, run_app, save_state, load_state
+
+@info "FLIM Application module loaded. Call run_app() to start."
 
 run_app()

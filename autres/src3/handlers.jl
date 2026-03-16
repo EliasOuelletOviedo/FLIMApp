@@ -1,22 +1,7 @@
-"""
-handlers.jl
-
-Event handlers and callbacks for the FLIM GUI.
-
-Implements all interactive behavior:
-- Panel switching (Layout, Controller, Protocol, Console)
-- Parameter adjustment via spinners and text inputs
-- START/CLEAR button actions
-- File path selection and validation
-
-Uses Observables for reactive updates and on(...) bindings for event attachment.
-"""
 function make_handlers(app, app_run, blocks)
     panel = blocks[:panel_buttons]
     panel_grid = blocks[:panel_grid]
 
-    # helper used by layout panel spinners – compute the "next"
-    # value in a user‑friendly series (1,2,5,10,20,...).
     @inline function smart_next(val::T, min_val::S, max_val::S, ::Type{T}) where {T<:Number, S<:Number}
         if !(val > 0)
             return convert(T, min_val)
@@ -48,7 +33,6 @@ function make_handlers(app, app_run, blocks)
         return convert(T, new_v)
     end
 
-    # companion to `smart_next` for stepping backwards
     @inline function smart_prev(val::T, min_val::S, max_val::S, ::Type{T}) where {T<:Number, S<:Number}
         if !(val > 0)
             return convert(T, min_val)
@@ -335,14 +319,6 @@ function make_handlers(app, app_run, blocks)
         end
     end
 
-    on(blocks[:start_button].clicks) do _
-        start_pressed(app, app_run, blocks)
-    end
-
-    on(blocks[:stop_button].clicks) do _
-        stop_pressed(app_run)
-    end
-
     handlers = Dict{Symbol, Function}(
         :layout     => layout_pressed,
         :controller => controller_pressed,
@@ -356,9 +332,8 @@ function make_handlers(app, app_run, blocks)
         end
     end
 
-    # Note: Initial handler call removed - causes widget creation issues during attachment
-    # Handlers will work normally when user clicks buttons
     handlers[app.current_panel](force = true)
 
     return nothing
 end
+

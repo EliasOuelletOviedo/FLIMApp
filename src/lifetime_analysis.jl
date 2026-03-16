@@ -1,3 +1,20 @@
+"""
+lifetime_analysis.jl
+
+Fluorescence lifetime fitting algorithms and IRF (Instrument Response Function) management.
+
+This module implements:
+- IRF file loading and manipulation
+- Convolution of IRF with decay models
+- Maximum Likelihood Estimation (MLE) fitting for fluorescence decay
+- Multi-exponential decay component fitting (1, 2, 3+ lifetimes)
+
+References:
+- Bajzer et al. 1991 (MLE methodology)
+- Maus et al. 2001 (MLE for FLIM)
+- Enderlein, 1997 (IRF shift/delay compensation)
+"""
+
 using PyCall
 using FFTW
 using Statistics
@@ -5,8 +22,93 @@ using NativeFileDialog
 using Optim
 using LineSearches
 
+"""
+    _ensure_fft_plans(size::Int)
+
+Ensure FFT plans are created for the given size.
+Recreates plans if needed.
+"""
+function _ensure_fft_plans(size::Int)
+    if fft_plan_size != size
+        global fft_plan = plan_fft(zeros(Float64, size))
+        global ifft_plan = plan_ifft(zeros(Float64, size))
+        global fft_plan_size = size
+    end
+end
+
+# Helper predicates
 isnotnan(x) = !isnan(x)
 smaller_or_eq_zero(x) = x <= 0
+
+# Global state for FFT planning and IRF (initialized when IRF is loaded)
+var"fft_plan" = plan_fft(zeros(Float64, 256))  # Initialize with default size
+var"ifft_plan" = plan_ifft(zeros(Float64, 256))  # Initialize with default size
+var"fft_plan_size" = 256  # Track the current plan size
+var"irf" = nothing
+var"irf_bin_size" = nothing
+var"tcspc_window_size" = nothing
+
+# =============================================================================
+# HELPER: IRF BIN SIZE CALCULATION
+# =============================================================================
+
+"""
+    _compute_irf_bin_size(irf_data::Matrix{Float64})::Float64
+
+Compute the bin size (time resolution) from IRF data.
+
+Returns the minimum time difference between consecutive bins.
+
+Args:
+- `irf_data::Matrix{Float64}` - IRF matrix with shape (n_bins, 2)
+
+Returns:
+- Float64 - Time magnitude per bin in nanoseconds
+"""
+function _compute_irf_bin_size(irf_data::Matrix{Float64})::Float64
+    h = Inf
+    for i in 2:size(irf_data, 1)
+        Δt = irf_data[i, 1] - irf_data[i-1, 1]
+        if 0 < Δt < h
+            h = Δt
+        end
+    end
+    return h
+end
+
+# function get_irf(; channel=1)
+#     """
+#     Loads an .sdt IRF file. If irf_filepath.txt exists, load the IRF from this filepath, otherwise, open a file dialog create irf_filepath.txt
+#     """
+#     if isfile("docs/irf_filepath.txt")
+#         filepath = open(f->read(f, String), "docs/irf_filepath.txt")
+#         if !ispath(filepath)
+#             println("IRF filepath does not exist. Please select valid .sdt file.")
+#             # filepath = open_dialog("IRF: Choose .sdt file to open.")
+#             filepath = pick_file()
+#             open("docs/irf_filepath.txt", "w") do io
+#                 write(io, filepath)
+#             end
+#         end
+#     else
+#         # filepath = open_dialog("IRF: Choose .sdt file to open.")
+#         filepath = pick_file()
+#         open("docs/irf_filepath.txt", "w") do io
+#             write(io, filepath)
+#         end
+#     end
+
+#     vector, histogram_resolution, time = open_SDT_file(filepath)
+#     counts = convert.(Int64, vector)
+#     median_irf = round(median(counts))
+#     counts = counts.-round(Int, median_irf)
+#     counts[counts .<= 0] .= 0
+#     times = Float64.(collect(0:histogram_resolution-1)) .* time
+#     data = zeros(Float64, length(times), 2)::Matrix{Float64}
+#     data[:, 1] = times
+#     data[:, 2] = vec(counts)
+#     return data
+# end
 
 function get_irf(; channel=1)
     """
@@ -88,6 +190,14 @@ function convolve(irf::Vector{Float64}, decay::Vector{Float64}; histogram_resolu
     """
     Convolves the IRF with fluorescence decay
     """
+    # Ensure FFT plans match vector sizes
+    if length(irf) != length(decay)
+        error("IRF and decay vectors must have same length: $(length(irf)) vs $(length(decay))")
+    end
+    
+    n = length(irf)
+    _ensure_fft_plans(n)  # Ensure plans are ready for this size
+    
     y = real.(ifft_plan*((fft_plan*irf) .* (fft_plan*decay)))
 
     return (y/sum(y[13:histogram_resolution-12]))::Vector{Float64}
@@ -271,7 +381,7 @@ function MLE_iterative_reconvolution_jl(irf::Matrix{Float64}, data_xy::Vector{Ve
                 end
             end
         end
-        fit = optimize(x->MLE_model_func(x, x_data, y_data, irf, gating_function, histogram_resolution), lower_bounds, upper_bounds, params_copy, Fminbox(BFGS(linesearch = LineSearches.BackTracking())), Optim.Options(outer_iterations=5, x_abstol=5e-16, outer_x_abstol=5e-16, allow_f_increases=false))
+        fit = optimize(x->MLE_model_func(x, x_data, y_data, irf, gating_function, histogram_resolution), lower_bounds, upper_bounds, params_copy, Fminbox(BFGS(linesearch = LineSearches.BackTracking())), Optim.Options(outer_iterations=100, x_abstol=5e-16, outer_x_abstol=5e-16, allow_f_increases=true))
         res = Optim.minimizer(fit)
 
         if res[1] == lower_bounds[1] || res[1] == upper_bounds[1]
@@ -348,16 +458,16 @@ function MLE_iterative_reconvolution_jl(irf::Matrix{Float64}, data_xy::Vector{Ve
     #chi2 = sum((y_data.-fit).^2 ./ (histogram_resolution.*y_data.+1))
     #println(chi2)
     #if chi2 > 3
-    if Optim.minimum(fit) > 5 && sum(y_data) < 50000
-        println("Ignoring bad fit with optimization result: ", Optim.minimum(fit), " found values: ", res)
-        if number_of_lifetimes == 1
-            return Float64[NaN, NaN, NaN]
-        elseif number_of_lifetimes == 2
-            return Float64[NaN, NaN, NaN, NaN, NaN]
-        elseif number_of_lifetimes == 3
-            return Float64[NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]
-        end
-    end
+    # if Optim.minimum(fit) > 5 && sum(y_data) < 50000
+    #     println("Ignoring bad fit with optimization result: ", Optim.minimum(fit), " found values: ", res)
+    #     if number_of_lifetimes == 1
+    #         return Float64[NaN, NaN, NaN]
+    #     elseif number_of_lifetimes == 2
+    #         return Float64[NaN, NaN, NaN, NaN, NaN]
+    #     elseif number_of_lifetimes == 3
+    #         return Float64[NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]
+    #     end
+    # end
     if number_of_lifetimes == 2 && res[3] > res[1]
         t_1 = res[1]
         t_2 = res[3]
@@ -393,6 +503,16 @@ function vec_to_lifetime(x::Vector{Float64}; guess=[3.0, 1.0, 1e-6], laser_pulse
     """
     Calculate fluorescence lifetime from vector of counts
     """
+    # Safety check - ensure IRF is loaded
+    if tcspc_window_size === nothing
+        error("IRF not loaded: tcspc_window_size is nothing. Cannot perform lifetime fitting.")
+    end
+    
+    # Ensure tcspc_window_size is a valid number
+    if !isfinite(tcspc_window_size) || tcspc_window_size <= 0
+        error("Invalid tcspc_window_size: $tcspc_window_size. IRF may not be loaded correctly.")
+    end
+    
     total_channels = round(Int, laser_pulse_period*histogram_resolution/tcspc_window_size)
     x_data = vec(collect(irf_bin_size:irf_bin_size:total_channels*irf_bin_size))
 

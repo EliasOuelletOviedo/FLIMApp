@@ -1,11 +1,36 @@
+"""
+GUI.jl
+
+Makie-based graphical user interface for the FLIM application.
+
+Implements:
+- Main figure layout with grid system
+- Plotting axes for histograms, lifetimes, and ion concentration
+- Control panels (Layout, Controller, Protocol, Console)
+- Interactive widgets (buttons, text boxes, menus, spinners)
+- Theme-aware styling and colors
+
+The make_gui() function constructs and configures all GUI elements.
+The make_handlers() function (in handlers.jl) attaches event callbacks.
+"""
+
 using GLMakie
 using Base.Threads
 using Dates
 
-include("attributes.jl")
-include("handlers.jl")
-include("functions.jl")
 
+"""
+make_gui(app, app_run)
+
+Construct the Makie-based graphical user interface and return the
+`Figure` object.  The function lays out the two plotting axes, control
+buttons, text fields and panel buttons.  It does not attach event
+handlers; that task is delegated to `make_handlers` in `handlers.jl`.
+
+Arguments:
+- `app` : persistent configuration (`AppState`)
+- `app_run` : runtime data (`AppRun`)
+"""
 function make_gui(app, app_run)
     if app.dark
         set_theme!(;DARK_MODE[:theme]...)
@@ -40,8 +65,7 @@ function make_gui(app, app_run)
     plot_1 = Axis(left_grid[2, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 1\n($(app.layout[:plot1]))"))...)
     plot_2 = Axis(left_grid[3, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 2\n($(app.layout[:plot2]))"))...)
 
-    counts = Observable{Float64}(0.0)
-    hspan!(counts_axis, 1, counts, color = COLOR_4)
+    hspan!(counts_axis, 1, app_run.counts, color = COLOR_4)
 
     ################    RIGHT GRID    ################
 
@@ -93,59 +117,36 @@ function make_gui(app, app_run)
         :panel_buttons => panel,
         :counts_axis   => counts_axis,
         :plot_1_axis   => plot_1,
-        :plot_2_axis   => plot_2
+        :plot_2_axis   => plot_2,
+        :info_label    => label
     )
 
-    make_handlers(app, blocks)
+    plt1 = nothing
+    plt2 = nothing
 
-    on(port.is_open) do is_open
-        if is_open
-            ports = list_ports()
+    mapping = Dict(
+        "Histogram"       => (app_run.hist_time, app_run.histogram),
+        "Photon counts"   => (app_run.timestamps, app_run.photons),
+        "Lifetime"        => (app_run.timestamps, app_run.lifetime),
+        "Ion concentration" => (app_run.timestamps, app_run.concentration),
+        "Command"         => (app_run.timestamps, app_run.i)
+    )
 
-            if isempty(ports)
-                ports = ["No ports detected"]
-            end
-            
-            port.options[] = ports
-        end
+    selection1 = app.layout[:plot1]
+    selection2 = app.layout[:plot2]
+
+    xy1 = get(mapping, selection1, nothing)
+    xy2 = get(mapping, selection2, nothing)
+
+    lines!(plot_1, xy1..., color=Makie.wong_colors()[1])
+    lines!(plot_2, xy2..., color=Makie.wong_colors()[1])
+
+    if selection1 == "Histogram"
+        lines!(plot_1, app_run.hist_time, app_run.fit, color=Makie.wong_colors()[6])
     end
-    
-    global irf               = get_irf()
-    global irf_bin_size      = get_irf_bin_size()
-    global tcspc_window_size = round(irf[end, 1] + irf[2, 1], sigdigits=4)
-    global fft_plan          = plan_fft(zeros(Float64, 256))
-    global ifft_plan         = plan_ifft(zeros(Float64, 256))
 
-    plt = lines!(plot_1, app_run.lifetime, app_run.timestamps)
-
-    function start_consumer!(app_run)
-        # create channel if needed
-        ch = Channel{Tuple{Float64,Float64,UInt32}}(128)
-        app_run.channel = ch
-
-        # The consumer MUST be created on the main thread (here it is).
-        app_run.consumer_task = @async begin
-            try
-                while true
-                    x,y,i = take!(ch)           # bloquant jusqu'à production ou close
-                    push!(app_run.lifetime[], x)
-                    push!(app_run.timestamps[], y)
-                    app_run.i[] = i
-                    counts[] = app_run.timestamps[][end]
-                    notify(app_run.lifetime)
-                    notify(app_run.timestamps)
-                    notify(app_run.i)
-                    notify(counts)
-                end
-            catch e
-                # take! lève InvalidStateException si channel fermé et vide -> sortie propre
-                if isa(e, InvalidStateException)
-                    @info "Consumer: channel closed, exiting consumer."
-                else
-                    rethrow(e)
-                end
-            end
-        end
+    if selection2 == "Histogram"
+        lines!(plot_2, app_run.hist_time, app_run.fit, color=Makie.wong_colors()[6])
     end
 
     function apply_autoscale!(app, ax, xs::Vector{Float64}, ys::Vector{Float64}; pad_ratio=0.05)
@@ -189,84 +190,9 @@ function make_gui(app, app_run)
         ylims!(ax, ymin - ypad, ymax + ypad)
     end
 
-    function start_autoscaler!(app, app_run, plot_1=plot_1, plot_2=plot_2)
-        @async begin
-            while app_run.running[]
-                try
-                    xs = copy(app_run.lifetime[])      # copy pour éviter race sur lecture
-                    ys = copy(app_run.timestamps[])
-                    apply_autoscale!(app, plot_1, xs, ys; pad_ratio=0.08)
-                catch e
-                    @warn "Autoscaler erreur" e
-                end
-                sleep(0.1)
-            end
-        end
+    function apply_autoscale!(app, ax, xs::Vector{Int64}, ys::Vector{Float64}; pad_ratio=0.05)
+        autolimits!(ax)
     end
 
-    function start_infos!(app_run, label)
-        @async begin
-            last_i = UInt32(0)
-            while app_run.running[]
-                try
-                    i = app_run.i[]
-                    if i != last_i
-                        di = i - last_i
-                        last_i = i
-                        label.text[] = "Frequency: $di Hz"
-                    end
-                catch e
-                    @warn "Infos erreur" e
-                end
-                sleep(1)
-            end
-        end
-    end
-
-    # Tâche périodique sur le MAIN thread qui ajuste les limites toutes les 0.1 s
-
-    on(start.clicks) do _
-        println("Start clicked")
-        if app_run.running[] == false
-
-            # Vérifications utiles
-            @info "nthreads = $(Threads.nthreads()) (do `julia --threads N` si =1)"
-
-            app_run.running[] = true
-            # recréer channel + consumer
-            start_consumer!(app_run)
-            start_autoscaler!(app, app_run)
-            start_infos!(app_run, label)
-            
-            app_run.worker_task = @spawn test(app_run.channel, app_run.running; dt=0.05)
-        else
-            @info "Already running"
-        end
-    end
-
-    on(stop.clicks) do _
-        println("Stop clicked")
-
-        if app_run.running[] == true
-            app_run.running[] = false
-
-            if app_run.worker_task !== nothing
-                task = app_run.worker_task
-                app_run.worker_task = nothing
-
-                @async try
-                    wait(task)
-                catch e
-                    # @warn "Worker error" e
-                end
-            end
-        end
-    end
-
-    return fig
+    return fig, blocks
 end
-
-# gui
-
-# gui = make_gui()
-# display(gui.fig)
