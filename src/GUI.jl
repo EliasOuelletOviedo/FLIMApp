@@ -20,6 +20,85 @@ using Dates
 
 
 """
+    cached_basename(cache_path::AbstractString; fallback_path::Union{Nothing, AbstractString}=nothing)::String
+
+Read a cached full path and return only the filename/folder name for UI display.
+Falls back to `fallback_path` when cache is missing or empty.
+"""
+function cached_basename(cache_path::AbstractString; fallback_path::Union{Nothing, AbstractString}=nothing)::String
+    path_value = ""
+
+    if isfile(cache_path)
+        path_value = try
+            strip(open(f -> read(f, String), cache_path))
+        catch
+            ""
+        end
+    end
+
+    if isempty(path_value) && fallback_path !== nothing
+        path_value = strip(String(fallback_path))
+    end
+
+    if isempty(path_value)
+        return ""
+    end
+
+    return splitpath(path_value)[end]
+end
+
+"""
+    port_options(no_port_label::AbstractString)::Vector{String}
+
+Enumerate serial ports and prepend a default "no selection" label.
+"""
+function port_options(no_port_label::AbstractString)::Vector{String}
+    detected_ports = try
+        list_ports()
+    catch e
+        @warn "Port enumeration failed" error = string(e)
+        String[]
+    end
+
+    return vcat([String(no_port_label)], detected_ports)
+end
+
+"""
+    refresh_port_menu!(menu::Menu; no_port_label::AbstractString="No port selected")
+
+Refresh serial port menu options while preserving the previous valid selection.
+"""
+function refresh_port_menu!(menu::Menu; no_port_label::AbstractString="No port selected")
+    if menu.is_open[]
+        return nothing
+    end
+
+    old_selection = menu.selection[]
+    new_options = port_options(no_port_label)
+
+    # Prevent updates if user opened the dropdown while ports were being scanned.
+    if menu.is_open[]
+        return nothing
+    end
+
+    if menu.options[] != new_options
+        menu.options[] = new_options
+    end
+
+    if old_selection isa AbstractString && old_selection in new_options
+        idx = findfirst(==(old_selection), new_options)
+        if idx !== nothing && menu.i_selected[] != idx
+            menu.i_selected[] = idx
+        end
+    elseif menu.i_selected[] != 1
+        menu.i_selected[] = 1
+    end
+
+    return nothing
+end
+
+
+"""
 make_gui(app, app_run)
 
 Construct the Makie-based graphical user interface and return the
@@ -72,18 +151,23 @@ function make_gui(app, app_run)
     start = Button(button_grid[1, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "START"))...)
     stop  = Button(button_grid[1, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CLEAR"))...)
 
-    irf_path      = Textbox(button_grid[2, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "IRF path"))...)
-    folder_path   = Textbox(button_grid[3, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Folder path"))...)
+    initial_irf_name = cached_basename(IRF_FILEPATH_CACHE)
+    initial_folder_name = cached_basename(FOLDERPATH_CACHE; fallback_path=get_data_root_path())
+    irf_path      = Textbox(button_grid[2, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "IRF path", :displayed_string => initial_irf_name, :stored_string => initial_irf_name))...)
+    folder_path   = Textbox(button_grid[3, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Folder path", :displayed_string => initial_folder_name, :stored_string => initial_folder_name))...)
     irf_button    = Button(button_grid[2, 1:2];  PATH_BUTTON_ATTRS...)
     folder_button = Button(button_grid[3, 1:2];  PATH_BUTTON_ATTRS...)
 
-    ports = list_ports()
+    NO_PORT_SELECTED_LABEL = "No port selected"
 
-    if isempty(ports)
-        ports = ["No ports detected"]
-    end
+    initial_port_options = port_options(NO_PORT_SELECTED_LABEL)
+    port = Menu(button_grid[4, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => initial_port_options, :default => 1))...)
 
-    port = Menu(button_grid[4, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ports))...)
+    connect = Button(button_grid[4, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
+
+    label = Label(button_grid[5, 1], "test")
+
+    mode = Menu(button_grid[6, 1:2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime"]))...)
 
     Box(button_grid[2, 1:2]; PATH_BOX_ATTRS...)
     Box(button_grid[3, 1:2]; PATH_BOX_ATTRS...)
@@ -94,8 +178,6 @@ function make_gui(app, app_run)
         :protocol   => Button(panelbtn_grid[1, 3]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "Protocol"))...),
         :console    => Button(panelbtn_grid[1, 4]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "Console"))...)
     )
-
-    label = Label(button_grid[5, 1], "test")
 
     rowgap!(right_grid, 5, 0)
     rowgap!(fig.layout, 1, 0)
@@ -114,6 +196,13 @@ function make_gui(app, app_run)
         :panel_grid    => panel_grid,
         :start_button  => start,
         :stop_button   => stop,
+        :irf_path_textbox => irf_path,
+        :irf_button    => irf_button,
+        :folder_path_textbox => folder_path,
+        :folder_button => folder_button,
+        :port_menu     => port,
+        :connect_button => connect,
+        :mode_menu     => mode,
         :panel_buttons => panel,
         :counts_axis   => counts_axis,
         :plot_1_axis   => plot_1,
@@ -121,15 +210,29 @@ function make_gui(app, app_run)
         :info_label    => label
     )
 
-    plt1 = nothing
-    plt2 = nothing
+    @async begin
+        was_open = false
+
+        while true
+            is_window_open = isopen(fig.scene)
+
+            if is_window_open
+                was_open = true
+                refresh_port_menu!(port; no_port_label=NO_PORT_SELECTED_LABEL)
+            elseif was_open
+                break
+            end
+
+            sleep(1.0)
+        end
+    end
 
     mapping = Dict(
         "Histogram"       => (app_run.hist_time, app_run.histogram),
         "Photon counts"   => (app_run.timestamps, app_run.photons),
         "Lifetime"        => (app_run.timestamps, app_run.lifetime),
         "Ion concentration" => (app_run.timestamps, app_run.concentration),
-        "Command"         => (app_run.timestamps, app_run.i)
+        "Command"         => (app_run.timestamps, app_run.command1)
     )
 
     selection1 = app.layout[:plot1]
@@ -138,15 +241,28 @@ function make_gui(app, app_run)
     xy1 = get(mapping, selection1, nothing)
     xy2 = get(mapping, selection2, nothing)
 
-    lines!(plot_1, xy1..., color=Makie.wong_colors()[1])
-    lines!(plot_2, xy2..., color=Makie.wong_colors()[1])
+    if selection1 == "Command"
+        lines!(plot_1, app_run.timestamps, app_run.command1, color=Makie.wong_colors()[1])
+        lines!(plot_1, app_run.timestamps, app_run.command2, color=Makie.wong_colors()[2])
+    else
+        lines!(plot_1, xy1..., color=Makie.wong_colors()[1])
+    end
+
+    if selection2 == "Command"
+        lines!(plot_2, app_run.timestamps, app_run.command1, color=Makie.wong_colors()[1])
+        lines!(plot_2, app_run.timestamps, app_run.command2, color=Makie.wong_colors()[2])
+    else
+        lines!(plot_2, xy2..., color=Makie.wong_colors()[1])
+    end
 
     if selection1 == "Histogram"
         lines!(plot_1, app_run.hist_time, app_run.fit, color=Makie.wong_colors()[6])
+        lines!(plot_1, app_run.hist_time, lift(f -> normalized_irf_from_fit(f), app_run.fit), color=Makie.wong_colors()[3])
     end
 
     if selection2 == "Histogram"
         lines!(plot_2, app_run.hist_time, app_run.fit, color=Makie.wong_colors()[6])
+        lines!(plot_2, app_run.hist_time, lift(f -> normalized_irf_from_fit(f), app_run.fit), color=Makie.wong_colors()[3])
     end
 
     function apply_autoscale!(app, ax, xs::Vector{Float64}, ys::Vector{Float64}; pad_ratio=0.05)

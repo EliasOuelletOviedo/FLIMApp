@@ -26,6 +26,7 @@ app_run = AppRun(nothing,
                  Observable(Float64[]),
                  Observable(Float64[]),
                  Observable(Float64[]),
+                 Observable(Float64[]),
                  Observable{UInt32}(0),
                  Observable(collect(1:256)))
 

@@ -34,12 +34,42 @@ Path to the cached IRF file path configuration.
 const IRF_FILEPATH_CACHE = joinpath("docs", "irf_filepath.txt")
 
 """
+    FOLDERPATH_CACHE::String
+
+Path to the cached data folder path configuration.
+"""
+const FOLDERPATH_CACHE = joinpath("docs", "folderpath.txt")
+
+"""
     DATA_ROOT_PATH::String
 
 Root directory where test/sample data files are stored.
 """
-const DATA_ROOT_PATH = get(ENV, "FLIM_DATA_PATH", "/Users/eliasouellet-oviedo/Documents/Stage2/Codes/test")
-const DATA_ROOT_PATH = "/Users/eliasouellet-oviedo/Desktop/test1"
+# const DATA_ROOT_PATH = get(ENV, "FLIM_DATA_PATH", "/Users/eliasouellet-oviedo/Documents/Stage2/Codes/test")
+# const DATA_ROOT_PATH = "/Users/eliasouellet-oviedo/Documents/Stage2/Partie2/Données/2026-03-12/test_control/test4"
+const DATA_ROOT_PATH = "/Users/eliasouellet-oviedo/Desktop/test2"
+
+"""
+    get_data_root_path()::String
+
+Return the active data root path from cache when available,
+otherwise fallback to `DATA_ROOT_PATH`.
+"""
+function get_data_root_path()::String
+    if isfile(FOLDERPATH_CACHE)
+        cached = try
+            strip(open(f -> read(f, String), FOLDERPATH_CACHE))
+        catch
+            ""
+        end
+
+        if !isempty(cached)
+            return cached
+        end
+    end
+
+    return DATA_ROOT_PATH
+end
 
 # =============================================================================
 # PHYSICS CONSTANTS
@@ -150,6 +180,9 @@ function get_default_layout()::Dict{Symbol, Any}
         :time_range => 60,
         :binning    => 1,
         :smoothing  => 0,
+        :fit_every  => 1,
+        :max_fit_ms => 35.0,
+        :fit_cooldown_frames => 3,
         :plot1      => "Lifetime",
         :plot2      => "Ion concentration"
     )
@@ -173,16 +206,17 @@ function get_default_controller()::Dict{Symbol, Any}
         :ch1_on  => false,
         :ch1_out => "Out 1",
         :ch1_mode=> "Digital",
-        :P1      => 0,
-        :I1      => 0,
-        :D1      => 0,
+        :freq    => 1000,
+        :P1      => 0.0,
+        :I1      => 0.0,
+        :D1      => 0.0,
         :ch2_inv => false,
         :ch2_on  => false,
         :ch2_out => "Out 2",
         :ch2_mode=> "Digital",
-        :P2      => 0,
-        :I2      => 0,
-        :D2      => 0,
+        :P2      => 0.0,
+        :I2      => 0.0,
+        :D2      => 0.0,
     )
 end
 
@@ -247,5 +281,5 @@ Ensures all required directories exist. Called at application startup.
 """
 function initialize_directories()
     mkpath(dirname(STATE_FILE_PATH))
-    mkpath(DATA_ROOT_PATH)
+    mkpath(get_data_root_path())
 end

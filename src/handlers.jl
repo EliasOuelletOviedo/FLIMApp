@@ -11,6 +11,71 @@ Implements all interactive behavior:
 
 Uses Observables for reactive updates and on(...) bindings for event attachment.
 """
+
+"""
+    _pick_non_empty_path(picker::Function; error_msg::AbstractString)::Union{String, Nothing}
+
+Execute a native picker and return a non-empty selected path, or `nothing`.
+"""
+function _pick_non_empty_path(picker::Function; error_msg::AbstractString)::Union{String, Nothing}
+    selected = try
+        picker()
+    catch e
+        @warn String(error_msg) error=string(e)
+        nothing
+    end
+
+    if selected === nothing
+        return nothing
+    end
+
+    path = String(selected)
+    return isempty(strip(path)) ? nothing : path
+end
+
+"""
+    open_irf_dialog()::Union{String, Nothing}
+
+Open a file picker for IRF selection.
+"""
+function open_irf_dialog()::Union{String, Nothing}
+    return _pick_non_empty_path(pick_file; error_msg="IRF file dialog failed")
+end
+
+"""
+    open_folder_dialog()::Union{String, Nothing}
+
+Open a folder picker for data-root selection.
+"""
+function open_folder_dialog()::Union{String, Nothing}
+    return _pick_non_empty_path(pick_folder; error_msg="Folder dialog failed")
+end
+
+"""
+    set_path_cache!(cache_path::AbstractString, path_value::AbstractString)
+
+Write an absolute path value to the provided cache file.
+"""
+function set_path_cache!(cache_path::AbstractString, path_value::AbstractString)
+    mkpath(dirname(cache_path))
+    open(cache_path, "w") do io
+        write(io, String(path_value))
+    end
+    return nothing
+end
+
+"""
+    update_path_textbox!(textbox::Textbox, full_path::AbstractString)
+
+Update a path textbox with only the basename for display.
+"""
+function update_path_textbox!(textbox::Textbox, full_path::AbstractString)
+    short_name = basename(String(full_path))
+    textbox.displayed_string[] = short_name
+    textbox.stored_string[] = short_name
+    return nothing
+end
+
 function make_handlers(app, app_run, blocks)
     panel = blocks[:panel_buttons]
     panel_grid = blocks[:panel_grid]
@@ -191,15 +256,21 @@ function make_handlers(app, app_run, blocks)
                             "Photon counts"   => (app_run.timestamps, app_run.photons),
                             "Lifetime"        => (app_run.timestamps, app_run.lifetime),
                             "Ion concentration" => (app_run.timestamps, app_run.concentration),
-                            "Command"         => (app_run.timestamps, app_run.i)
+                            "Command"         => (app_run.timestamps, app_run.command1)
                         )
 
                         xy = get(mapping, selection, nothing)
 
-                        lines!(plot, xy..., color=Makie.wong_colors()[1])
+                        if selection == "Command"
+                            lines!(plot, app_run.timestamps, app_run.command1, color=Makie.wong_colors()[1])
+                            lines!(plot, app_run.timestamps, app_run.command2, color=Makie.wong_colors()[2])
+                        else
+                            lines!(plot, xy..., color=Makie.wong_colors()[1])
+                        end
 
                         if selection == "Histogram"
                             lines!(plot, app_run.hist_time, app_run.fit, color=Makie.wong_colors()[6])
+                            lines!(plot, app_run.hist_time, lift(f -> normalized_irf_from_fit(f), app_run.fit), color=Makie.wong_colors()[3])
                         end
 
                         # if selection == "Histogram"
@@ -211,7 +282,7 @@ function make_handlers(app, app_run, blocks)
                         # elseif selection == "Ion concentration"
                         #     plt = lines!(plot, app_run.timestamps, app_run.concentration)
                         # elseif selection == "Command"
-                        #     plt = lines!(plot, app_run.timestamps, app_run.i)
+                        #     plt = lines!(plot, app_run.timestamps, app_run.command1)
                         # end
                         
                         app.layout[symbol] = selection
@@ -288,7 +359,7 @@ function make_handlers(app, app_run, blocks)
                     
                 elseif typeof(block) == Textbox
                     on(block.stored_string) do new_str
-                        val = tryparse(Int, new_str)
+                        val = tryparse(Float64, new_str)
 
                         if val !== nothing
                             block.displayed_string[] = string(val)
@@ -343,6 +414,73 @@ function make_handlers(app, app_run, blocks)
         stop_pressed(app_run)
     end
 
+    on(blocks[:irf_button].clicks) do _
+        filepath = open_irf_dialog()
+        if filepath === nothing
+            return
+        end
+
+        try
+            set_path_cache!(IRF_FILEPATH_CACHE, filepath)
+            update_path_textbox!(blocks[:irf_path_textbox], filepath)
+            @info "IRF filepath updated" path=filepath
+        catch e
+            @warn "Failed to update IRF filepath" error=string(e)
+        end
+    end
+
+    on(blocks[:folder_button].clicks) do _
+        folderpath = open_folder_dialog()
+        if folderpath === nothing
+            return
+        end
+
+        try
+            set_path_cache!(FOLDERPATH_CACHE, folderpath)
+            update_path_textbox!(blocks[:folder_path_textbox], folderpath)
+            @info "Data folder path updated" path=folderpath
+        catch e
+            @warn "Failed to update data folder path" error=string(e)
+        end
+    end
+
+    on(blocks[:connect_button].clicks) do _
+        if app_run.serial_conn !== nothing
+            try
+                send_command(app_run.serial_conn, "A 0 AO 1 0\n")
+                send_command(app_run.serial_conn, "A 0 AO 2 0\n")
+            catch e
+                @warn "Failed to send zero-signal command during disconnect" error=string(e)
+            end
+
+            try
+                close(app_run.serial_conn)
+                @info "Serial port disconnected"
+            catch e
+                @warn "Error while disconnecting serial port" error=string(e)
+            end
+
+            app_run.serial_conn = nothing
+            blocks[:connect_button].label[] = "CONNECT"
+            return
+        end
+
+        selected_port = blocks[:port_menu].selection[]
+        if !(selected_port isa AbstractString) || selected_port == "No port selected"
+            @warn "No port selected"
+            return
+        end
+
+        ser = connect_to_port(selected_port)
+        if ser === nothing
+            blocks[:connect_button].label[] = "CONNECT"
+            return
+        end
+
+        app_run.serial_conn = ser
+        blocks[:connect_button].label[] = "DISCONNECT"
+    end
+
     handlers = Dict{Symbol, Function}(
         :layout     => layout_pressed,
         :controller => controller_pressed,
@@ -356,8 +494,6 @@ function make_handlers(app, app_run, blocks)
         end
     end
 
-    # Note: Initial handler call removed - causes widget creation issues during attachment
-    # Handlers will work normally when user clicks buttons
     handlers[app.current_panel](force = true)
 
     return nothing

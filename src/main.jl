@@ -141,12 +141,19 @@ function run_app()
     
     # Load IRF for lifetime analysis
     try
+        # global irf = get_irf()
+        # global irf_bin_size = _compute_irf_bin_size(irf)
+        # global tcspc_window_size = size(irf, 1) * irf_bin_size
+        # # Initialize FFT plans with correct size based on IRF
+        # global fft_plan = plan_fft(zeros(Float64, size(irf, 1)))
+        # global ifft_plan = plan_ifft(zeros(Float64, size(irf, 1)))
+
         global irf = get_irf()
-        global irf_bin_size = _compute_irf_bin_size(irf)
-        global tcspc_window_size = size(irf, 1) * irf_bin_size
-        # Initialize FFT plans with correct size based on IRF
-        global fft_plan = plan_fft(zeros(Float64, size(irf, 1)))
-        global ifft_plan = plan_ifft(zeros(Float64, size(irf, 1)))
+        global irf_bin_size = get_irf_bin_size()
+        global tcspc_window_size = round(irf[end, 1]+irf[2, 1], sigdigits=4)
+        global fft_plan = plan_fft(zeros(Float64, 256))
+        global ifft_plan = plan_ifft(zeros(Float64, 256))
+
         @info "IRF loaded successfully" size=size(irf) bin_size=irf_bin_size window_size=tcspc_window_size
     catch e
         @error "Failed to load IRF; lifetime fitting will not work" error=string(e)

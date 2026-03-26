@@ -18,6 +18,32 @@ using GLMakie
 using Observables
 using Base.Threads
 
+# Normalize IRF to the fit amplitude for histogram overlays.
+function normalized_irf_from_fit(fit::AbstractVector{<:Real})
+    nfit = length(fit)
+    out = zeros(Float64, nfit)
+
+    if nfit == 0 || !(@isdefined irf) || irf === nothing || size(irf, 2) < 2
+        return out
+    end
+
+    irf_y = Float64.(irf[:, 2])
+    if isempty(irf_y)
+        return out
+    end
+
+    fit_max = maximum(Float64.(fit))
+    irf_max = maximum(irf_y)
+
+    if !isfinite(fit_max) || !isfinite(irf_max) || irf_max == 0.0
+        return out
+    end
+
+    n = min(nfit, length(irf_y))
+    out[1:n] .= irf_y[1:n] .* (fit_max / irf_max)
+    return out
+end
+
 # -----------------------------------------------------------------------------
 # task loops
 # -----------------------------------------------------------------------------
@@ -36,6 +62,43 @@ so that a single error does not kill the task.
 """
 # internal helper replicating the scaling logic defined in GUI.apply_autoscale!
 # separated here so the autoscaler task doesn't need to depend on GUI scope.
+function autoscale_values!(ax)
+    autolimits!(ax)
+end
+
+function autoscale_values!(app, ax, xs::AbstractVector; pad_ratio=0.05)
+    if isempty(xs)
+        return
+    end
+
+    valid = .!isnan.(xs)
+    xs = xs[valid]
+    if isempty(xs)
+        return
+    end
+
+    time_range = app.layout[:time_range]
+    xmin, xmax = minimum(xs), maximum(xs)
+
+    if xmax < time_range
+        xmax = time_range
+    end
+
+    if xmax - xmin > time_range
+        xmin = xmax - time_range
+    end
+
+    if xmin == xmax
+        xmin -= 0.5
+        xmax += 0.5
+    end
+
+    xpad = (xmax - xmin) * pad_ratio
+
+    xlims!(ax, xmin - xpad, xmax + xpad)
+    ylims!(ax, 0.0, 100.0)
+end
+
 function autoscale_values!(app, ax, xs::AbstractVector, ys::AbstractVector; pad_ratio=0.05)
     if isempty(xs) || isempty(ys)
         return
@@ -94,6 +157,27 @@ function autoscale_values!(app, ax, xs::AbstractVector, ys::AbstractVector; pad_
 end
 
 """
+    lookup_plot_series(app_run, selection)
+
+Return x/y data vectors matching a plot selection label.
+"""
+function lookup_plot_series(app_run, selection)
+    if selection == "Histogram"
+        return (app_run.hist_time[], app_run.histogram[])
+    elseif selection == "Photon counts"
+        return (app_run.timestamps[], app_run.photons[])
+    elseif selection == "Lifetime"
+        return (app_run.timestamps[], app_run.lifetime[])
+    elseif selection == "Ion concentration"
+        return (app_run.timestamps[], app_run.concentration[])
+    elseif selection == "Command"
+        return (vcat(app_run.timestamps[], app_run.timestamps[]), vcat(app_run.command1[], app_run.command2[]))
+    else
+        return (Float64[], Float64[])
+    end
+end
+
+"""
 consumer_loop(app_run)
 
 Consumes data from the channel and updates the app_run observables.
@@ -106,28 +190,13 @@ function consumer_loop(app, app_run, blocks; rate=30)
     ax1 = blocks[:plot_1_axis]
     ax2 = blocks[:plot_2_axis]
 
-    # mapping from label to the corresponding observable pairs
-    function lookup(sel)
-        if sel == "Histogram"
-            return (app_run.hist_time[], app_run.histogram[])
-        elseif sel == "Photon counts"
-            return (app_run.timestamps[], app_run.photons[])
-        elseif sel == "Lifetime"
-            return (app_run.timestamps[], app_run.lifetime[])
-        elseif sel == "Ion concentration"
-            return (app_run.timestamps[], app_run.concentration[])
-        elseif sel == "Command"
-            return (app_run.timestamps[], app_run.i[])
-        else
-            return (Float64[], Float64[])
-        end
-    end
-
     try
-        for (histogram, fit, photons, counts, lifetime, concentration, timestamps, i) in app_run.channel
+        for (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, counts, i) in app_run.channel
             push!(app_run.photons[], photons)
             push!(app_run.lifetime[], lifetime)
             push!(app_run.concentration[], concentration)
+            push!(app_run.command1[], command1)
+            push!(app_run.command2[], command2)
             push!(app_run.timestamps[], timestamps)
             app_run.i[] = i
 
@@ -141,6 +210,8 @@ function consumer_loop(app, app_run, blocks; rate=30)
                 notify(app_run.photons)
                 notify(app_run.lifetime)
                 notify(app_run.concentration)
+                notify(app_run.command1)
+                notify(app_run.command2)
                 notify(app_run.timestamps)
                 notify(app_run.i)
 
@@ -150,16 +221,22 @@ function consumer_loop(app, app_run, blocks; rate=30)
                 sel2 = app.layout[:plot2]
 
                 if sel1 == "Histogram"
-                    autolimits!(ax1)
+                    autoscale_values!(ax1)
+                elseif sel1 == "Command"
+                    xs, _ = lookup_plot_series(app_run, sel1)
+                    autoscale_values!(app, ax1, xs)
                 else
-                    xs, ys = lookup(sel1)
+                    xs, ys = lookup_plot_series(app_run, sel1)
                     autoscale_values!(app, ax1, xs, ys)
                 end
 
                 if sel2 == "Histogram"
-                    autolimits!(ax2)
+                    autoscale_values!(ax2)
+                elseif sel2 == "Command"
+                    xs, _ = lookup_plot_series(app_run, sel2)
+                    autoscale_values!(app, ax2, xs)
                 else
-                    xs, ys = lookup(sel2)
+                    xs, ys = lookup_plot_series(app_run, sel2)
                     autoscale_values!(app, ax2, xs, ys)
                 end
             end
@@ -185,6 +262,98 @@ function infos_loop(app_run, info_label; rate=1.0)
             @warn "Infos erreur" e
         end
     end
+    return nothing
+end
+
+"""
+    _last_or_nan(values::Vector{Float64})::Float64
+
+Return the latest value of a series, or `NaN` when empty.
+"""
+function _last_or_nan(values::Vector{Float64})::Float64
+    return isempty(values) ? NaN : values[end]
+end
+
+"""
+    _safe_frequency(controller::Dict{Symbol, Any})::Int
+
+Read PWM frequency from controller config and clamp to a positive integer.
+"""
+function _safe_frequency(controller::Dict{Symbol, Any})::Int
+    raw = try
+        Float64(get(controller, :freq, 1000))
+    catch
+        1000.0
+    end
+    return max(1, Int(round(raw)))
+end
+
+"""
+    _write_pwm_command!(serial_conn, channel::Int, frequency::Int, command::Float64)
+
+Emit the proper command for PWM/analog output depending on command saturation.
+"""
+function _write_pwm_command!(serial_conn, channel::Int, frequency::Int, command::Float64)
+    cmd = isfinite(command) ? clamp(command, 0.0, 100.0) : 0.0
+
+    if cmd <= 0.0
+        write(serial_conn, "A 0 AO $channel 0\n")
+    elseif cmd >= 100.0
+        write(serial_conn, "A 0 AO $channel 5000\n")
+    else
+        write(serial_conn, "A 0 AP $channel $(Int(frequency)) $cmd 0 5000\n")
+    end
+
+    return nothing
+end
+
+"""
+    send_command(serial_conn, command_str::AbstractString)
+
+Write a raw command string to serial.
+"""
+function send_command(serial_conn, command_str::AbstractString)
+    write(serial_conn, String(command_str))
+    return nothing
+end
+
+"""
+    serial_signal_loop(app, app_run; rate=10.0)
+
+Periodic task that sends controller commands to the connected serial device.
+"""
+function serial_signal_loop(app, app_run; rate=10.0)
+    dt = 1 / float(rate)
+
+    while app_run.running[]
+        serial_conn = app_run.serial_conn
+
+        if serial_conn === nothing
+            sleep(dt)
+            continue
+        end
+
+        try
+            frequency = _safe_frequency(app.controller)
+            cmd1 = _last_or_nan(app_run.command1[])
+            cmd2 = _last_or_nan(app_run.command2[])
+
+            _write_pwm_command!(serial_conn, 1, frequency, cmd1)
+            _write_pwm_command!(serial_conn, 2, frequency, cmd2)
+        catch e
+            @warn "Serial signal send failed" error=string(e)
+
+            try
+                close(serial_conn)
+            catch
+            end
+
+            app_run.serial_conn = nothing
+        end
+
+        sleep(dt)
+    end
+
     return nothing
 end
 
@@ -225,20 +394,43 @@ function start_pressed(app, app_run, blocks)
     
     @info "Starting test function"
     app_run.running[] = true
-    app_run.channel = Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,UInt32}}(32)
+    app_run.channel = Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}}(32)
 
     # reset time-series data
     empty!(app_run.photons[])
     app_run.counts[] = 0.0
     empty!(app_run.lifetime[])
     empty!(app_run.concentration[])
+    empty!(app_run.command1[])
+    empty!(app_run.command2[])
     empty!(app_run.timestamps[])
     app_run.i[] = 0
 
     # worker & consumer
-    app_run.worker_task = @async test(app_run.channel, app_run.running, app.layout)
+    selected_mode = haskey(blocks, :mode_menu) ? blocks[:mode_menu].selection[] : "Playback"
+    if !(selected_mode isa AbstractString)
+        selected_mode = "Playback"
+    end
+    playback = selected_mode == "Playback"
+
+    if playback
+        app_run.worker_task = @async start_playback(
+            app_run.channel,
+            app_run.running,
+            app.layout,
+            app.controller
+        )
+    else
+        app_run.worker_task = @async start_realtime(
+            app_run.channel,
+            app_run.running,
+            app.layout,
+            app.controller
+        )
+    end
 
     app_run.consumer_task = @async consumer_loop(app, app_run, blocks; rate=10)
+    app_run.serial_task = @async serial_signal_loop(app, app_run; rate=20.0)
 
     # periodic tasks
     # app_run.autoscaler_task = @async autoscaler_loop(app, app_run, blocks; rate=10)
@@ -261,17 +453,29 @@ that occurred previously when the channel closed while `test`
 continued running.
 """
 function stop_pressed(app_run)
+    if app_run.serial_conn !== nothing
+        try
+            send_command(app_run.serial_conn, "A 0 AO 1 0\n")
+            send_command(app_run.serial_conn, "A 0 AO 2 0\n")
+        catch e
+            @warn "Failed to send zero-signal command during stop" error=string(e)
+        end
+    end
+
     if !app_run.running[]
         @info "Not running"
         return
     end
+
     @info "Stopping test function"
+    
     app_run.running[] = false
     if app_run.channel !== nothing && isopen(app_run.channel)
         close(app_run.channel)
     end
+
     for t in (app_run.worker_task, app_run.consumer_task,
-              app_run.autoscaler_task, app_run.infos_task)
+              app_run.autoscaler_task, app_run.infos_task, app_run.serial_task)
         if t !== nothing && !istaskdone(t)
             try
                 wait(t)
@@ -280,10 +484,13 @@ function stop_pressed(app_run)
             end
         end
     end
+
     app_run.worker_task = nothing
     app_run.consumer_task = nothing
     app_run.autoscaler_task = nothing
     app_run.infos_task = nothing
+    app_run.serial_task = nothing
+
     app_run.channel = nothing
     return nothing
 end

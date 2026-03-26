@@ -86,23 +86,29 @@ Fields:
 - `counts::Observable{Float64}` - Current photon count
 - `lifetime::Observable{Vector{Float64}}` - Time-series of fitted lifetimes
 - `concentration::Observable{Vector{Float64}}` - Time-series of ion concentrations
+- `command1::Observable{Vector{Float64}}` - Time-series of PID command values (controller 1)
+- `command2::Observable{Vector{Float64}}` - Time-series of PID command values (controller 2)
 - `timestamps::Observable{Vector{Float64}}` - Time-series timestamps
 - `i::Observable{UInt32}` - Current frame/iteration counter
 - `hist_time::Observable{Vector{Int64}}` - Histogram time-axis values
 """
 mutable struct AppRun
-    channel::Union{Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,UInt32}}, Nothing}
+    channel::Union{Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}}, Nothing}
     running::Threads.Atomic{Bool}
     worker_task::Union{Task, Nothing}
     consumer_task::Union{Task, Nothing}
     autoscaler_task::Union{Task, Nothing}
     infos_task::Union{Task, Nothing}
+    serial_task::Union{Task, Nothing}
+    serial_conn::Union{Any, Nothing}
     histogram::Observable{Vector{Float64}}
     fit::Observable{Vector{Float64}}
     photons::Observable{Vector{Float64}}
     counts::Observable{Float64}
     lifetime::Observable{Vector{Float64}}
     concentration::Observable{Vector{Float64}}
+    command1::Observable{Vector{Float64}}
+    command2::Observable{Vector{Float64}}
     timestamps::Observable{Vector{Float64}}
     i::Observable{UInt32}
     hist_time::Observable{Vector{Int64}}
@@ -125,10 +131,14 @@ function AppRun()
         nothing,
         nothing,
         nothing,
+        nothing,
+        nothing,
         Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
         Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
         Observable(Float64[]),
         Observable(0.0),
+        Observable(Float64[]),
+        Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),
