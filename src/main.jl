@@ -45,6 +45,9 @@ include("data_processing.jl")
 # Background task management
 include("runtime.jl")
 
+# Protocol popup UI module
+include("protocol_popup.jl")
+
 # Event handlers (depends on runtime)
 include("handlers.jl")
 

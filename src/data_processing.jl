@@ -320,6 +320,98 @@ function open_SDT_file(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
     end
 end
 
+@inline function _protocol_float_or_nan(raw_value)::Float64
+    if raw_value isa Number
+        return Float64(raw_value)
+    elseif raw_value isa AbstractString
+        return something(tryparse(Float64, strip(raw_value)), NaN)
+    else
+        return NaN
+    end
+end
+
+@inline function _protocol_int_or(raw_value, default::Int; min_value::Int=0)::Int
+    parsed = if raw_value isa Integer
+        Int(raw_value)
+    elseif raw_value isa AbstractFloat
+        round(Int, raw_value)
+    elseif raw_value isa AbstractString
+        something(tryparse(Int, strip(raw_value)), default)
+    else
+        default
+    end
+    return max(parsed, min_value)
+end
+
+function _protocol_steps(protocol::Dict{Symbol, Any})::Vector{Tuple{Float64, Float64}}
+    times_raw = get(protocol, :times, Float64[])
+    setpoints_raw = get(protocol, :setpoints, Float64[])
+
+    if !(times_raw isa AbstractVector) || !(setpoints_raw isa AbstractVector)
+        return Tuple{Float64, Float64}[]
+    end
+
+    nsteps = min(length(times_raw), length(setpoints_raw))
+    steps = Tuple{Float64, Float64}[]
+
+    for idx in 1:nsteps
+        duration = _protocol_float_or_nan(times_raw[idx])
+        setpoint = _protocol_float_or_nan(setpoints_raw[idx])
+
+        if !isfinite(duration) || duration <= 0.0
+            continue
+        end
+
+        push!(steps, (duration, setpoint))
+    end
+
+    return steps
+end
+
+function protocol_setpoint_at_timestamp(protocol::Dict{Symbol, Any}, timestamp::Real)::Float64
+    t = Float64(timestamp)
+    if !isfinite(t)
+        return NaN
+    end
+
+    delay_s = _protocol_int_or(get(protocol, :delay, 0), 0; min_value=0)
+    repeats = _protocol_int_or(get(protocol, :repeats, 1), 1; min_value=0)
+    steps = _protocol_steps(protocol)
+
+    if isempty(steps)
+        return NaN
+    end
+
+    t_after_delay = t - delay_s
+    if t_after_delay < 0.0
+        return NaN
+    end
+
+    cycle_duration = sum(step -> step[1], steps)
+    if cycle_duration <= 0.0
+        return NaN
+    end
+
+    if repeats > 0
+        total_duration = repeats * cycle_duration
+        if t_after_delay >= total_duration
+            return NaN
+        end
+    end
+
+    cycle_t = mod(t_after_delay, cycle_duration)
+    elapsed = 0.0
+
+    for (duration, setpoint) in steps
+        elapsed += duration
+        if cycle_t < elapsed
+            return setpoint
+        end
+    end
+
+    return steps[end][2]
+end
+
 # =============================================================================
 # WORKER TASK
 # =============================================================================
@@ -359,6 +451,8 @@ function start_playback(
         running::Threads.Atomic{Bool},
     layout::Dict{Symbol, Any},
     controller::Dict{Symbol, Any};
+        initial_guess::Vector{Float64} = [3.0, 0.5, 0.5, 0.0, 5.0e-5],
+        protocol::Union{Nothing, Dict{Symbol, Any}} = nothing,
         dt::Float64 = 0.0001
     )
     try
@@ -397,17 +491,11 @@ function start_playback(
         current_count = 0
 
         # Initial parameter guess for lifetime fitting
-        params = [3.0, 0.5, 0.5, 0.0, 5.0e-5]
+        params = copy(initial_guess)
         n = UInt32(0)
 
-        # Adaptive anti-spike controls for expensive lifetime optimization.
-        fit_every = max(1, Int(get(layout, :fit_every, 1)))
-        max_fit_ms = max(1.0, Float64(get(layout, :max_fit_ms, 35.0)))
-        fit_cooldown_frames = max(0, Int(get(layout, :fit_cooldown_frames, 3)))
-        skip_fit_frames = 0
-
         # PID state for lifetime control
-        lifetime_setpoint_ns = 4.0
+        fallback_setpoint_ns = 4.0
         I_error = 0.0
         old_error = 0.0
         D_error = 0.0
@@ -449,28 +537,11 @@ function start_playback(
 
             final_vector = sum_vector ./ bin
 
-            # Fit lifetime can be expensive; throttle and cool down after spikes.
-            should_fit = (skip_fit_frames == 0) && ((Int(n) % fit_every == 0) || n == 0)
+            # Fit every processed frame/file.
+            params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution)
 
-            if should_fit
-                t_fit_start = time_ns()
-                params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution)
-                fit_elapsed_ms = (time_ns() - t_fit_start) / 1e6
-
-                if fit_elapsed_ms > max_fit_ms
-                    skip_fit_frames = fit_cooldown_frames
-                end
-
-                if !isnan(params_raw[1])
-                    params = params_raw
-                end
-            else
-                if skip_fit_frames > 0
-                    skip_fit_frames -= 1
-                end
-
-                x_data = collect(irf_bin_size:irf_bin_size:histogram_resolution*irf_bin_size)
-                data = [x_data, Float64.(final_vector)]
+            if !isnan(params_raw[1])
+                params = params_raw
             end
 
             histogram = data[2]
@@ -481,42 +552,57 @@ function start_playback(
             timestamps += time
             n += 1
 
-            # PID terms are shared from one lifetime error for both controllers.
-            dt_sample = max(Float64(time), eps(Float64))
-            P_error = lifetime_setpoint_ns - lifetime
-            I_error += P_error * dt_sample
-            D_error = (P_error - old_error) / dt_sample
-            old_error = P_error
-
-            p1 = Float64(get(controller, :P1, 0.0))
-            i1 = Float64(get(controller, :I1, 0.0))
-            d1 = Float64(get(controller, :D1, 0.0))
-            p2 = Float64(get(controller, :P2, 0.0))
-            i2 = Float64(get(controller, :I2, 0.0))
-            d2 = Float64(get(controller, :D2, 0.0))
-
-            command1 = p1*P_error + i1*I_error + d1*D_error
-            command2 = p2*P_error + i2*I_error + d2*D_error
-
-            # Inversion is applied only to the command sent to each controller.
-            if Bool(get(controller, :ch1_inv, false))
-                command1 = -command1
-            end
-
-            if Bool(get(controller, :ch2_inv, false))
-                command2 = -command2
-            end
-
-            if Bool(get(controller, :ch1_on, false))
-                command1 = clamp(command1, 0.0, 100.0)
+            setpoint_ns = if protocol === nothing
+                fallback_setpoint_ns
             else
-                command1 = NaN
+                protocol_setpoint_at_timestamp(protocol, timestamps)
             end
 
-            if Bool(get(controller, :ch2_on, false))
-                command2 = clamp(command2, 0.0, 100.0)
+            command1 = NaN
+            command2 = NaN
+
+            if !isnan(setpoint_ns)
+                # PID terms are shared from one lifetime error for both controllers.
+                dt_sample = max(Float64(time), eps(Float64))
+                P_error = setpoint_ns - lifetime
+                I_error += P_error * dt_sample
+                D_error = (P_error - old_error) / dt_sample
+                old_error = P_error
+
+                p1 = Float64(get(controller, :P1, 0.0))
+                i1 = Float64(get(controller, :I1, 0.0))
+                d1 = Float64(get(controller, :D1, 0.0))
+                p2 = Float64(get(controller, :P2, 0.0))
+                i2 = Float64(get(controller, :I2, 0.0))
+                d2 = Float64(get(controller, :D2, 0.0))
+
+                command1 = p1*P_error + i1*I_error + d1*D_error
+                command2 = p2*P_error + i2*I_error + d2*D_error
+
+                # Inversion is applied only to the command sent to each controller.
+                if Bool(get(controller, :ch1_inv, false))
+                    command1 = -command1
+                end
+
+                if Bool(get(controller, :ch2_inv, false))
+                    command2 = -command2
+                end
+
+                if Bool(get(controller, :ch1_on, false))
+                    command1 = clamp(command1, 0.0, 100.0)
+                else
+                    command1 = NaN
+                end
+
+                if Bool(get(controller, :ch2_on, false))
+                    command2 = clamp(command2, 0.0, 100.0)
+                else
+                    command2 = NaN
+                end
             else
-                command2 = NaN
+                I_error = 0.0
+                old_error = 0.0
+                D_error = 0.0
             end
 
             # Send results; handle closed channel gracefully
@@ -567,6 +653,8 @@ function start_realtime(
         running::Threads.Atomic{Bool},
     layout::Dict{Symbol, Any},
     controller::Dict{Symbol, Any};
+        initial_guess::Vector{Float64} = [3.0, 0.5, 0.5, 0.0, 5.0e-5],
+        protocol::Union{Nothing, Dict{Symbol, Any}} = nothing,
         dt::Float64 = 0.0001,
         poll_interval_s::Float64 = 0.1
     )
@@ -591,32 +679,85 @@ function start_realtime(
         last_bin = 1
         current_count = 0
 
-        params = [3.0, 0.5, 0.5, 0.0, 5.0e-5]
+        params = copy(initial_guess)
         n = UInt32(0)
 
-        # Adaptive anti-spike controls for expensive lifetime optimization.
-        fit_every = max(1, Int(get(layout, :fit_every, 1)))
-        max_fit_ms = max(1.0, Float64(get(layout, :max_fit_ms, 35.0)))
-        fit_cooldown_frames = max(0, Int(get(layout, :fit_cooldown_frames, 3)))
-        skip_fit_frames = 0
-
-        lifetime_setpoint_ns = 4.0
+        fallback_setpoint_ns = 4.0
         I_error = 0.0
         old_error = 0.0
         D_error = 0.0
 
         last_processed_filepath = ""
+        last_dir_mtime = 0.0
+        known_sdt_files = String[]
+        next_scan_at = 0.0
+
+        # Build initial file list once.
+        for entry in readdir(path; join=true)
+            if isfile(entry) && endswith(lowercase(entry), ".sdt")
+                push!(known_sdt_files, entry)
+            end
+        end
+
+        if isempty(known_sdt_files)
+            @warn "No .sdt files found yet in real-time folder" path=path
+        end
 
         while running[]
-            all_entries = readdir(path; join=true)
-            filepaths = sort(filter(f -> isfile(f) && endswith(lowercase(f), ".sdt"), all_entries))
+            now_t = time()
+            if now_t < next_scan_at
+                sleep(min(dt, max(1e-4, next_scan_at - now_t)))
+                continue
+            end
+            next_scan_at = now_t + poll_interval_s
 
-            if isempty(filepaths)
+            dir_stat = try
+                stat(path)
+            catch
+                nothing
+            end
+
+            if dir_stat === nothing
                 sleep(poll_interval_s)
                 continue
             end
 
-            latest_filepath = filepaths[argmax(stat.(filepaths) .|> s -> s.mtime)]
+            current_dir_mtime = dir_stat.mtime
+
+            if current_dir_mtime != last_dir_mtime
+                last_dir_mtime = current_dir_mtime
+
+                known_sdt_files = String[]
+                for entry in readdir(path; join=true)
+                    if isfile(entry) && endswith(lowercase(entry), ".sdt")
+                        push!(known_sdt_files, entry)
+                    end
+                end
+            end
+
+            if isempty(known_sdt_files)
+                sleep(poll_interval_s)
+                continue
+            end
+
+            latest_filepath = known_sdt_files[1]
+            latest_mtime = try
+                stat(latest_filepath).mtime
+            catch
+                0.0
+            end
+
+            for f in known_sdt_files
+                mt = try
+                    stat(f).mtime
+                catch
+                    -1.0
+                end
+                if mt > latest_mtime
+                    latest_mtime = mt
+                    latest_filepath = f
+                end
+            end
 
             if latest_filepath == last_processed_filepath
                 sleep(poll_interval_s)
@@ -654,27 +795,11 @@ function start_realtime(
 
             final_vector = sum_vector ./ bin
 
-            should_fit = (skip_fit_frames == 0) && ((Int(n) % fit_every == 0) || n == 0)
+            # Fit every processed frame/file.
+            params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution)
 
-            if should_fit
-                t_fit_start = time_ns()
-                params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution)
-                fit_elapsed_ms = (time_ns() - t_fit_start) / 1e6
-
-                if fit_elapsed_ms > max_fit_ms
-                    skip_fit_frames = fit_cooldown_frames
-                end
-
-                if !isnan(params_raw[1])
-                    params = params_raw
-                end
-            else
-                if skip_fit_frames > 0
-                    skip_fit_frames -= 1
-                end
-
-                x_data = collect(irf_bin_size:irf_bin_size:histogram_resolution*irf_bin_size)
-                data = [x_data, Float64.(final_vector)]
+            if !isnan(params_raw[1])
+                params = params_raw
             end
 
             histogram = data[2]
@@ -685,40 +810,55 @@ function start_realtime(
             timestamps += time
             n += 1
 
-            dt_sample = max(Float64(time), eps(Float64))
-            P_error = lifetime_setpoint_ns - lifetime
-            I_error += P_error * dt_sample
-            D_error = (P_error - old_error) / dt_sample
-            old_error = P_error
-
-            p1 = Float64(get(controller, :P1, 0.0))
-            i1 = Float64(get(controller, :I1, 0.0))
-            d1 = Float64(get(controller, :D1, 0.0))
-            p2 = Float64(get(controller, :P2, 0.0))
-            i2 = Float64(get(controller, :I2, 0.0))
-            d2 = Float64(get(controller, :D2, 0.0))
-
-            command1 = p1*P_error + i1*I_error + d1*D_error
-            command2 = p2*P_error + i2*I_error + d2*D_error
-
-            if Bool(get(controller, :ch1_inv, false))
-                command1 = -command1
-            end
-
-            if Bool(get(controller, :ch2_inv, false))
-                command2 = -command2
-            end
-
-            if Bool(get(controller, :ch1_on, false))
-                command1 = clamp(command1, 0.0, 100.0)
+            setpoint_ns = if protocol === nothing
+                fallback_setpoint_ns
             else
-                command1 = NaN
+                protocol_setpoint_at_timestamp(protocol, timestamps)
             end
 
-            if Bool(get(controller, :ch2_on, false))
-                command2 = clamp(command2, 0.0, 100.0)
+            command1 = NaN
+            command2 = NaN
+
+            if !isnan(setpoint_ns)
+                dt_sample = max(Float64(time), eps(Float64))
+                P_error = setpoint_ns - lifetime
+                I_error += P_error * dt_sample
+                D_error = (P_error - old_error) / dt_sample
+                old_error = P_error
+
+                p1 = Float64(get(controller, :P1, 0.0))
+                i1 = Float64(get(controller, :I1, 0.0))
+                d1 = Float64(get(controller, :D1, 0.0))
+                p2 = Float64(get(controller, :P2, 0.0))
+                i2 = Float64(get(controller, :I2, 0.0))
+                d2 = Float64(get(controller, :D2, 0.0))
+
+                command1 = p1*P_error + i1*I_error + d1*D_error
+                command2 = p2*P_error + i2*I_error + d2*D_error
+
+                if Bool(get(controller, :ch1_inv, false))
+                    command1 = -command1
+                end
+
+                if Bool(get(controller, :ch2_inv, false))
+                    command2 = -command2
+                end
+
+                if Bool(get(controller, :ch1_on, false))
+                    command1 = clamp(command1, 0.0, 100.0)
+                else
+                    command1 = NaN
+                end
+
+                if Bool(get(controller, :ch2_on, false))
+                    command2 = clamp(command2, 0.0, 100.0)
+                else
+                    command2 = NaN
+                end
             else
-                command2 = NaN
+                I_error = 0.0
+                old_error = 0.0
+                D_error = 0.0
             end
 
             if isopen(ch) && running[]

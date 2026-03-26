@@ -180,9 +180,6 @@ function get_default_layout()::Dict{Symbol, Any}
         :time_range => 60,
         :binning    => 1,
         :smoothing  => 0,
-        :fit_every  => 1,
-        :max_fit_ms => 35.0,
-        :fit_cooldown_frames => 3,
         :plot1      => "Lifetime",
         :plot2      => "Ion concentration"
     )
@@ -223,12 +220,24 @@ end
 """
     get_default_protocol()::Dict
 
-Returns a dictionary of default protocol settings (empty).
+Returns default protocol UI values persisted in AppState.
 
-To be populated with experimental protocol parameters as needed.
+Stored fields:
+- `:active`    (Bool, enable protocol on next START)
+- `:repeats`   (Int)
+- `:delay`     (Int, seconds)
+- `:times`     (Vector{Float64}, per-step durations)
+- `:setpoints` (Vector{Float64}, per-step setpoints)
 """
 function get_default_protocol()::Dict{Symbol, Any}
-    return Dict{Symbol, Any}()
+    step_count = 10
+    return Dict{Symbol, Any}(
+        :active => false,
+        :repeats => 1,
+        :delay => 0,
+        :times => fill(NaN, step_count),
+        :setpoints => fill(NaN, step_count)
+    )
 end
 
 """

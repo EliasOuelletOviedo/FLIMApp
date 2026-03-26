@@ -165,9 +165,10 @@ function make_gui(app, app_run)
 
     connect = Button(button_grid[4, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
 
-    label = Label(button_grid[5, 1], "test")
+    label = Label(button_grid[5, 1], "Frequency: -- Hz\nFile: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
 
-    mode = Menu(button_grid[6, 1:2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime"]))...)
+    mode = Menu(button_grid[6, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime"]))...)
+    lifetimes = Menu(button_grid[6, 2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["1 lifetime", "2 lifetimes", "3 lifetimes"]))...)
 
     Box(button_grid[2, 1:2]; PATH_BOX_ATTRS...)
     Box(button_grid[3, 1:2]; PATH_BOX_ATTRS...)
@@ -203,6 +204,7 @@ function make_gui(app, app_run)
         :port_menu     => port,
         :connect_button => connect,
         :mode_menu     => mode,
+        :lifetimes_menu => lifetimes,
         :panel_buttons => panel,
         :counts_axis   => counts_axis,
         :plot_1_axis   => plot_1,

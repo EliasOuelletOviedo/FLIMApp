@@ -18,6 +18,8 @@ using GLMakie
 using Observables
 using Base.Threads
 
+const LIFETIME_WARMUP_DONE = Ref(false)
+
 # Normalize IRF to the fit amplitude for histogram overlays.
 function normalized_irf_from_fit(fit::AbstractVector{<:Real})
     nfit = length(fit)
@@ -317,6 +319,41 @@ function send_command(serial_conn, command_str::AbstractString)
     return nothing
 end
 
+function warmup_lifetime_fit!()
+    if LIFETIME_WARMUP_DONE[]
+        return true
+    end
+
+    if !(@isdefined irf) || irf === nothing || !(@isdefined irf_bin_size) || irf_bin_size === nothing ||
+       !(@isdefined tcspc_window_size) || tcspc_window_size === nothing
+        return false
+    end
+
+    try
+        n = DEFAULT_HISTOGRAM_RESOLUTION
+        x = collect(1.0:1.0:n)
+        synthetic_hist = @. 1800.0 * exp(-x / 36.0) + 20.0
+
+        t0 = time_ns()
+        params_raw, data = vec_to_lifetime(
+            Float64.(synthetic_hist);
+            guess=[3.0, 0.5, 0.5, 0.0, 5.0e-5],
+            histogram_resolution=n
+        )
+
+        if !isempty(params_raw) && !isnan(params_raw[1])
+            _ = conv_irf_data(data[1], Tuple(params_raw), irf; histogram_resolution=n)
+        end
+
+        LIFETIME_WARMUP_DONE[] = true
+        @info "Lifetime warmup completed" elapsed_ms=((time_ns() - t0) / 1e6)
+    catch e
+        @warn "Lifetime warmup failed; continuing" error=string(e)
+    end
+
+    return LIFETIME_WARMUP_DONE[]
+end
+
 """
     serial_signal_loop(app, app_run; rate=10.0)
 
@@ -391,6 +428,8 @@ function start_pressed(app, app_run, blocks)
         @error "IRF status: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
         return
     end
+
+    warmup_lifetime_fit!()
     
     @info "Starting test function"
     app_run.running[] = true
@@ -411,21 +450,61 @@ function start_pressed(app, app_run, blocks)
     if !(selected_mode isa AbstractString)
         selected_mode = "Playback"
     end
+
+    selected_lifetimes = haskey(blocks, :lifetimes_menu) ? blocks[:lifetimes_menu].selection[] : "2 lifetimes"
+    if !(selected_lifetimes isa AbstractString)
+        selected_lifetimes = "2 lifetimes"
+    end
+
+    initial_guess = if selected_lifetimes == "1 lifetime"
+        [3.0, 0.0, 5.0e-5]
+    elseif selected_lifetimes == "3 lifetimes"
+        [3.0, 0.5, 0.5, 0.5, 0.5, 0.0, 5.0e-5]
+    else
+        [3.0, 0.5, 0.5, 0.0, 5.0e-5]
+    end
+
     playback = selected_mode == "Playback"
+
+    protocol_config = nothing
+    if Bool(get(app.protocol, :active, false))
+        raw_times = get(app.protocol, :times, Float64[])
+        raw_setpoints = get(app.protocol, :setpoints, Float64[])
+
+        times = raw_times isa AbstractVector ? [v isa Number ? Float64(v) : NaN for v in raw_times] : Float64[]
+        setpoints = raw_setpoints isa AbstractVector ? [v isa Number ? Float64(v) : NaN for v in raw_setpoints] : Float64[]
+
+        repeats_raw = get(app.protocol, :repeats, 1)
+        delay_raw = get(app.protocol, :delay, 0)
+
+        repeats = repeats_raw isa Number ? Int(round(Float64(repeats_raw))) : 1
+        delay = delay_raw isa Number ? Int(round(Float64(delay_raw))) : 0
+
+        protocol_config = Dict{Symbol, Any}(
+            :delay => max(delay, 0),
+            :repeats => max(repeats, 0),
+            :times => times,
+            :setpoints => setpoints
+        )
+    end
 
     if playback
         app_run.worker_task = @async start_playback(
             app_run.channel,
             app_run.running,
             app.layout,
-            app.controller
+            app.controller;
+            initial_guess=initial_guess,
+            protocol=protocol_config
         )
     else
         app_run.worker_task = @async start_realtime(
             app_run.channel,
             app_run.running,
             app.layout,
-            app.controller
+            app.controller;
+            initial_guess=initial_guess,
+            protocol=protocol_config
         )
     end
 

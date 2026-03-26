@@ -79,6 +79,7 @@ end
 function make_handlers(app, app_run, blocks)
     panel = blocks[:panel_buttons]
     panel_grid = blocks[:panel_grid]
+    protocol_popup_screen = Ref{Union{Nothing, GLMakie.Screen}}(nothing)
 
     # helper used by layout panel spinners – compute the "next"
     # value in a user‑friendly series (1,2,5,10,20,...).
@@ -368,6 +369,8 @@ function make_handlers(app, app_run, blocks)
                             block.displayed_string[] = string(app.controller[symbol])
                             block.stored_string[]    = string(app.controller[symbol])
                         end
+                        
+                        save_state(app)
                     end
                 end
             end
@@ -389,7 +392,19 @@ function make_handlers(app, app_run, blocks)
             app.current_panel = :protocol
             save_state(app)
 
-            Label(panel_grid[1, 1]; text="PROTOCOL")
+            protocol_button = Button(panel_grid[1, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Protocol"))...)
+            protocol_active = Bool(get(app.protocol, :active, false))
+            app.protocol[:active] = protocol_active
+            protocol_toggle = Toggle(panel_grid[2, 1]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => protocol_active))...)
+
+            on(protocol_toggle.active) do is_active
+                app.protocol[:active] = Bool(is_active)
+                save_state(app)
+            end
+            
+            on(protocol_button.clicks) do _
+                open_protocol_popup!(app, protocol_popup_screen)
+            end
         end
     end
 
