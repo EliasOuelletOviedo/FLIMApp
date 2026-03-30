@@ -503,7 +503,7 @@ function start_playback(
         while running[]
             filepath = filepaths[mod1(n+1, nb_files)]
 
-            vector, histogram_resolution, time = open_SDT_file(filepath)
+            vector, histogram_resolution, frame_time = open_SDT_file(filepath)
 
             # Store in circular buffer
             pos = mod1(n+1, n_vectors)
@@ -549,7 +549,7 @@ function start_playback(
             fit = conv_irf_data(data[1], Tuple(params), irf; histogram_resolution=histogram_resolution)*photons
             lifetime = params[1]
             concentration = (9.5 / lifetime - 1)/0.025
-            timestamps += time
+            timestamps += frame_time
             n += 1
 
             setpoint_ns = if protocol === nothing
@@ -563,7 +563,7 @@ function start_playback(
 
             if !isnan(setpoint_ns)
                 # PID terms are shared from one lifetime error for both controllers.
-                dt_sample = max(Float64(time), eps(Float64))
+                dt_sample = max(Float64(frame_time), eps(Float64))
                 P_error = setpoint_ns - lifetime
                 I_error += P_error * dt_sample
                 D_error = (P_error - old_error) / dt_sample
@@ -765,7 +765,7 @@ function start_realtime(
             end
 
             filepath = latest_filepath
-            vector, histogram_resolution, time = open_SDT_file(filepath)
+            vector, histogram_resolution, frame_time = open_SDT_file(filepath)
             last_processed_filepath = filepath
 
             pos = mod1(n+1, n_vectors)
@@ -807,7 +807,7 @@ function start_realtime(
             fit = conv_irf_data(data[1], Tuple(params), irf; histogram_resolution=histogram_resolution) * photons
             lifetime = params[1]
             concentration = (9.5 / lifetime - 1) / 0.025
-            timestamps += time
+            timestamps += frame_time
             n += 1
 
             setpoint_ns = if protocol === nothing
@@ -820,7 +820,7 @@ function start_realtime(
             command2 = NaN
 
             if !isnan(setpoint_ns)
-                dt_sample = max(Float64(time), eps(Float64))
+                dt_sample = max(Float64(frame_time), eps(Float64))
                 P_error = setpoint_ns - lifetime
                 I_error += P_error * dt_sample
                 D_error = (P_error - old_error) / dt_sample
