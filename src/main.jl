@@ -37,7 +37,7 @@ include("data_types.jl")
 include("gui_themes.jl")
 
 # Analysis algorithms (lifetime fitting)
-include("lifetime_analysis.jl")
+include("lifetime_analysis2.jl")
 
 # File I/O and worker tasks (depends on lifetime_analysis via vec_to_lifetime and conv_irf_data)
 include("data_processing.jl")

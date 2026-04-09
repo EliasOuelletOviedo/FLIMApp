@@ -529,9 +529,9 @@ function start_playback(
         running::Threads.Atomic{Bool},
     layout::Dict{Symbol, Any},
     controller::Dict{Symbol, Any};
-        initial_guess::Vector{Float64} = [3.0, 0.5, 0.5, 0.0, 5.0e-5],
+        initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
         protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
-        dt::Float64 = 0.0001
+        dt::Float64 = 0.0000001
     )
     try
         @info "Playback worker started on thread $(threadid())"
@@ -582,7 +582,7 @@ function start_playback(
         pid_prev_raw_lifetime = NaN
         pid_scale_est = 1.0e-6
 
-        target_period_ns = round(Int, 1e9 / 60.0)
+        target_period_ns = round(Int, 1e9 / 600.0)
         next_analysis_ns = time_ns()
 
         while running[]
