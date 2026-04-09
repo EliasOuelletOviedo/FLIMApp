@@ -107,6 +107,82 @@ function load_state(path::String=STATE_FILE_PATH)
     end
 end
 
+"""
+    _merge_missing_layout_defaults!(app_state::AppState)::Bool
+
+Ensure layout defaults exist in persisted state and perform small key migrations.
+
+Returns `true` when the state was changed.
+"""
+function _merge_missing_layout_defaults!(app_state::AppState)::Bool
+    defaults = get_default_layout()
+    has_updates = false
+
+    for (key, value) in defaults
+        if !haskey(app_state.layout, key)
+            app_state.layout[key] = value
+            has_updates = true
+        end
+    end
+
+    if haskey(app_state.layout, :lifetime_smooth_method)
+        delete!(app_state.layout, :lifetime_smooth_method)
+        has_updates = true
+    end
+
+    return has_updates
+end
+
+"""
+    _load_or_create_state()::AppState
+
+Load persisted state when available, otherwise create a new default state.
+Also applies small state migrations when needed.
+"""
+function _load_or_create_state()::AppState
+    app_state = load_state()
+
+    if app_state === nothing
+        @info "Creating fresh application state"
+        app_state = AppState(true)
+        save_state(app_state)
+        return app_state
+    end
+
+    @info "Loaded saved state" theme=app_state.dark ? "dark" : "light"
+
+    if _merge_missing_layout_defaults!(app_state)
+        save_state(app_state)
+    end
+
+    return app_state
+end
+
+"""
+    _initialize_irf_runtime!()
+
+Load IRF-related globals used by lifetime fitting and FFT-based operations.
+Falls back to `nothing` values when loading fails.
+"""
+function _initialize_irf_runtime!()
+    try
+        global irf = get_irf()
+        global irf_bin_size = get_irf_bin_size()
+        global tcspc_window_size = round(irf[end, 1] + irf[2, 1], sigdigits=4)
+        global fft_plan = plan_fft(zeros(Float64, 256))
+        global ifft_plan = plan_ifft(zeros(Float64, 256))
+
+        @info "IRF loaded successfully" size=size(irf) bin_size=irf_bin_size window_size=tcspc_window_size
+    catch e
+        @error "Failed to load IRF; lifetime fitting will not work" error=string(e)
+        global irf = nothing
+        global irf_bin_size = nothing
+        global tcspc_window_size = nothing
+    end
+
+    return nothing
+end
+
 # =============================================================================
 # APPLICATION INITIALIZATION & EXECUTION
 # =============================================================================
@@ -130,49 +206,21 @@ function run_app()
     initialize_directories()
     
     # Load or create persistent state
-    app = load_state()
-    if app === nothing
-        @info "Creating fresh application state"
-        app = AppState(true)  # Start with dark mode
-        save_state(app)
-    else
-        @info "Loaded saved state" theme=app.dark ? "dark" : "light"
-    end
+    app_state = _load_or_create_state()
     
     # Initialize runtime state
-    app_run = AppRun()
+    runtime_state = AppRun()
     
     # Load IRF for lifetime analysis
-    try
-        # global irf = get_irf()
-        # global irf_bin_size = _compute_irf_bin_size(irf)
-        # global tcspc_window_size = size(irf, 1) * irf_bin_size
-        # # Initialize FFT plans with correct size based on IRF
-        # global fft_plan = plan_fft(zeros(Float64, size(irf, 1)))
-        # global ifft_plan = plan_ifft(zeros(Float64, size(irf, 1)))
-
-        global irf = get_irf()
-        global irf_bin_size = get_irf_bin_size()
-        global tcspc_window_size = round(irf[end, 1]+irf[2, 1], sigdigits=4)
-        global fft_plan = plan_fft(zeros(Float64, 256))
-        global ifft_plan = plan_ifft(zeros(Float64, 256))
-
-        @info "IRF loaded successfully" size=size(irf) bin_size=irf_bin_size window_size=tcspc_window_size
-    catch e
-        @error "Failed to load IRF; lifetime fitting will not work" error=string(e)
-        # Use defaults - FFT plans already initialized with default size
-        global irf = nothing
-        global irf_bin_size = nothing
-        global tcspc_window_size = nothing
-    end
+    _initialize_irf_runtime!()
     
     # Create GUI
     @info "Creating GUI..."
-    fig, blocks = make_gui(app, app_run)
+    fig, blocks = make_gui(app_state, runtime_state)
     
     # Attach event handlers
     @info "Initializing event handlers..."
-    make_handlers(app, app_run, blocks)
+    make_handlers(app_state, runtime_state, blocks)
     
     @info "="^60
     @info "Application ready"

@@ -85,6 +85,8 @@ Fields:
 - `photons::Observable{Vector{Float64}}` - Time-series of photon counts
 - `counts::Observable{Float64}` - Current photon count
 - `lifetime::Observable{Vector{Float64}}` - Time-series of fitted lifetimes
+- `lifetime_smooth::Observable{Vector{Float64}}` - Smoothed time-series of fitted lifetimes
+- `protocol_setpoint::Observable{Vector{Float64}}` - Time-series of protocol setpoints used by PID
 - `concentration::Observable{Vector{Float64}}` - Time-series of ion concentrations
 - `command1::Observable{Vector{Float64}}` - Time-series of PID command values (controller 1)
 - `command2::Observable{Vector{Float64}}` - Time-series of PID command values (controller 2)
@@ -106,12 +108,15 @@ mutable struct AppRun
     photons::Observable{Vector{Float64}}
     counts::Observable{Float64}
     lifetime::Observable{Vector{Float64}}
+    lifetime_smooth::Observable{Vector{Float64}}
+    protocol_setpoint::Observable{Vector{Float64}}
     concentration::Observable{Vector{Float64}}
     command1::Observable{Vector{Float64}}
     command2::Observable{Vector{Float64}}
     timestamps::Observable{Vector{Float64}}
     i::Observable{UInt32}
     hist_time::Observable{Vector{Int64}}
+    protocol::Observable{Dict{Symbol, Any}}
 end
 
 """
@@ -124,6 +129,7 @@ Returns:
   all tasks set to nothing, and channel set to nothing
 """
 function AppRun()
+    default_protocol = get_default_protocol()
     return AppRun(
         nothing,
         Threads.Atomic{Bool}(false),
@@ -142,7 +148,16 @@ function AppRun()
         Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),
+        Observable(Float64[]),
+        Observable(Float64[]),
         Observable{UInt32}(0),
-        Observable(collect(1:DEFAULT_HISTOGRAM_RESOLUTION))
+        Observable(collect(1:DEFAULT_HISTOGRAM_RESOLUTION)),
+        Observable(Dict{Symbol, Any}(
+            :active => Bool(get(default_protocol, :active, false)),
+            :delay => Int(round(Float64(get(default_protocol, :delay, 0)))),
+            :repeats => Int(round(Float64(get(default_protocol, :repeats, 1)))),
+            :times => [v isa Number ? Float64(v) : NaN for v in get(default_protocol, :times, Float64[])],
+            :setpoints => [v isa Number ? Float64(v) : NaN for v in get(default_protocol, :setpoints, Float64[])]
+        ))
     )
 end

@@ -84,6 +84,16 @@ function make_handlers(app, app_run, blocks)
     # helper used by layout panel spinners – compute the "next"
     # value in a user‑friendly series (1,2,5,10,20,...).
     @inline function smart_next(val::T, min_val::S, max_val::S, ::Type{T}) where {T<:Number, S<:Number}
+        if T <: Integer
+            min_t = convert(T, ceil(float(min_val)))
+            max_t = convert(T, floor(float(max_val)))
+
+            # Explicit edge handling for integer spinners (e.g. smoothing 0 <-> 1).
+            if val <= min_t
+                return min(min_t + one(T), max_t)
+            end
+        end
+
         if !(val > 0)
             return convert(T, min_val)
         end
@@ -116,6 +126,15 @@ function make_handlers(app, app_run, blocks)
 
     # companion to `smart_next` for stepping backwards
     @inline function smart_prev(val::T, min_val::S, max_val::S, ::Type{T}) where {T<:Number, S<:Number}
+        if T <: Integer
+            min_t = convert(T, ceil(float(min_val)))
+
+            # Explicit edge handling for integer spinners (e.g. smoothing 1 -> 0).
+            if val <= min_t + one(T)
+                return min_t
+            end
+        end
+
         if !(val > 0)
             return convert(T, min_val)
         end
@@ -147,6 +166,12 @@ function make_handlers(app, app_run, blocks)
             new_v = new_v
         end
 
+        if T <: Integer
+            # For integer spinners, keep deterministic downward stepping and
+            # avoid InexactError on values like 0.9 when min_val is 0.
+            return convert(T, floor(new_v + 1e-12))
+        end
+
         return convert(T, new_v)
     end
 
@@ -175,6 +200,13 @@ function make_handlers(app, app_run, blocks)
 
             options = ["Histogram", "Photon counts", "Lifetime", "Ion concentration", "Command"]
 
+            smoothing_value = get(app.layout, :smoothing, 0)
+            if !(smoothing_value isa Number)
+                smoothing_value = 0
+            end
+            smoothing_value = clamp(round(Int, Float64(smoothing_value)), 0, 10)
+            app.layout[:smoothing] = smoothing_value
+
             layout_params = Dict{Symbol, Any}(
                 :time_range => (Textbox(panel_grid[1, 2]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout[:time_range]), :stored_string => string(app.layout[:time_range])))...),
                                 Button(panel_grid[1, 2];  SPINNER_UP_ATTRS...),
@@ -184,7 +216,7 @@ function make_handlers(app, app_run, blocks)
                                 Button(panel_grid[2, 2];  SPINNER_UP_ATTRS...),
                                 Button(panel_grid[2, 2];  SPINNER_DOWN_ATTRS...),
                                 (1, 100, Int)),
-                :smoothing  => (Textbox(panel_grid[3, 2]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout[:smoothing]), :stored_string => string(app.layout[:smoothing])))...),
+                :smoothing  => (Textbox(panel_grid[3, 2]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(smoothing_value), :stored_string => string(smoothing_value)))...),
                                 Button(panel_grid[3, 2];  SPINNER_UP_ATTRS...),
                                 Button(panel_grid[3, 2];  SPINNER_DOWN_ATTRS...),
                                 (0, 10, Int)),
@@ -192,65 +224,62 @@ function make_handlers(app, app_run, blocks)
                 :plot2      =>  Menu(panel_grid[7, 1:2];  merge(MENU_ATTRS, Dict(:default => app.layout[:plot2], :options => options))...),
             )
 
+            function commit_layout_value!(key::Symbol, value)
+                app.layout[key] = value
+                if key == :smoothing
+                    recompute_lifetime_smooth!(app, app_run)
+                    notify(app_run.lifetime_smooth)
+                end
+                save_state(app)
+                return nothing
+            end
+
             for (symbol, block) in layout_params
-                if typeof(block) == Tuple{Textbox, Button, Button, Tuple{Int64, Int64, DataType}}
-                    txt, up, down, (min_val, max_val, T) = block
+                if block isa Tuple{Textbox, Button, Button, Tuple{Int64, Int64, DataType}}
+                    textbox, up_button, down_button, (min_value, max_value, value_type) = block
 
-                    on(up.clicks) do _
-                        val = tryparse(T, txt.stored_string[])
-                        if val === nothing
-                            val = min_val
-                        else
-                            val = smart_next(val, min_val, max_val, T)
-                        end
+                    on(up_button.clicks) do _
+                        parsed_value = tryparse(value_type, textbox.stored_string[])
+                        next_value = parsed_value === nothing ? min_value : smart_next(parsed_value, min_value, max_value, value_type)
 
-                        txt.displayed_string[] = string(val)
-                        txt.stored_string[]  = string(val)
-
-                        app.layout[symbol] = val
-                        save_state(app)
+                        textbox.displayed_string[] = string(next_value)
+                        textbox.stored_string[] = string(next_value)
+                        commit_layout_value!(symbol, next_value)
                     end
 
-                    on(down.clicks) do _
-                        val = tryparse(T, txt.stored_string[])
-                        if val === nothing
-                            val = min_val
-                        else
-                            val = smart_prev(val, min_val, max_val, T)
-                        end
+                    on(down_button.clicks) do _
+                        parsed_value = tryparse(value_type, textbox.stored_string[])
+                        next_value = parsed_value === nothing ? min_value : smart_prev(parsed_value, min_value, max_value, value_type)
 
-                        txt.displayed_string[] = string(val)
-                        txt.stored_string[]  = string(val)
-
-                        app.layout[symbol] = val
-                        save_state(app)
+                        textbox.displayed_string[] = string(next_value)
+                        textbox.stored_string[] = string(next_value)
+                        commit_layout_value!(symbol, next_value)
                     end
 
-                    on(txt.stored_string) do new_str
-                        val = tryparse(T, new_str)
-
-                        if val !== nothing
-                            val = clamp(val, min_val, max_val)
-                            txt.displayed_string[] = string(val)
-
-                            app.layout[symbol] = val
-                            save_state(app)
+                    on(textbox.stored_string) do new_string
+                        parsed_value = tryparse(value_type, new_string)
+                        if parsed_value === nothing
+                            return
                         end
+
+                        clamped_value = clamp(parsed_value, min_value, max_value)
+                        textbox.displayed_string[] = string(clamped_value)
+                        commit_layout_value!(symbol, clamped_value)
                     end
 
-                elseif typeof(block) == Menu
+                elseif block isa Menu
                     on(block.selection) do selection
-                        plot = nothing
+                        axis = nothing
 
                         if symbol == :plot1
                             blocks[:plot_1_axis].title[] = "Plot 1\n($(selection))"
-                            plot = blocks[:plot_1_axis]
+                            axis = blocks[:plot_1_axis]
                         elseif symbol == :plot2
                             blocks[:plot_2_axis].title[] = "Plot 2\n($(selection))"
-                            plot = blocks[:plot_2_axis]
+                            axis = blocks[:plot_2_axis]
                         end
 
-                        empty!(plot)
+                        empty!(axis)
 
                         mapping = Dict(
                             "Histogram"       => (app_run.hist_time, app_run.histogram),
@@ -262,16 +291,35 @@ function make_handlers(app, app_run, blocks)
 
                         xy = get(mapping, selection, nothing)
 
+                        aligned_xy_observables = function (x_obs::Observable{Vector{Float64}}, y_obs::Observable{Vector{Float64}})
+                            paired = lift(x_obs, y_obs) do xs, ys
+                                n = min(length(xs), length(ys))
+                                if n == 0
+                                    return (Float64[], Float64[])
+                                end
+                                return (xs[1:n], ys[1:n])
+                            end
+                            return lift(v -> v[1], paired), lift(v -> v[2], paired)
+                        end
+
                         if selection == "Command"
-                            lines!(plot, app_run.timestamps, app_run.command1, color=Makie.wong_colors()[1])
-                            lines!(plot, app_run.timestamps, app_run.command2, color=Makie.wong_colors()[2])
+                            lines!(axis, app_run.timestamps, app_run.command1, color=Makie.wong_colors()[1])
+                            lines!(axis, app_run.timestamps, app_run.command2, color=Makie.wong_colors()[2])
+                        elseif selection == "Lifetime"
+                            add_protocol_setpoint_highlight!(axis, app_run)
+                            lifetime_x, lifetime_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime)
+                            smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_smooth)
+                            protocol_x, protocol_y = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
+                            lines!(axis, lifetime_x, lifetime_y, color=Makie.wong_colors()[1])
+                            lines!(axis, smooth_x, smooth_y, color=Makie.wong_colors()[3])
+                            lines!(axis, protocol_x, protocol_y, color=Makie.wong_colors()[2])
                         else
-                            lines!(plot, xy..., color=Makie.wong_colors()[1])
+                            lines!(axis, xy..., color=Makie.wong_colors()[1])
                         end
 
                         if selection == "Histogram"
-                            lines!(plot, app_run.hist_time, app_run.fit, color=Makie.wong_colors()[6])
-                            lines!(plot, app_run.hist_time, lift(f -> normalized_irf_from_fit(f), app_run.fit), color=Makie.wong_colors()[3])
+                            lines!(axis, app_run.hist_time, app_run.fit, color=Makie.wong_colors()[6])
+                            lines!(axis, app_run.hist_time, lift(f -> normalized_irf_from_fit(f), app_run.fit), color=Makie.wong_colors()[3])
                         end
 
                         # if selection == "Histogram"
@@ -286,8 +334,7 @@ function make_handlers(app, app_run, blocks)
                         #     plt = lines!(plot, app_run.timestamps, app_run.command1)
                         # end
                         
-                        app.layout[symbol] = selection
-                        save_state(app)
+                        commit_layout_value!(symbol, selection)
                     end
                 end
             end
@@ -395,15 +442,17 @@ function make_handlers(app, app_run, blocks)
             protocol_button = Button(panel_grid[1, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Protocol"))...)
             protocol_active = Bool(get(app.protocol, :active, false))
             app.protocol[:active] = protocol_active
+            sync_runtime_protocol!(app, app_run)
             protocol_toggle = Toggle(panel_grid[2, 1]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => protocol_active))...)
 
             on(protocol_toggle.active) do is_active
                 app.protocol[:active] = Bool(is_active)
+                sync_runtime_protocol!(app, app_run)
                 save_state(app)
             end
             
             on(protocol_button.clicks) do _
-                open_protocol_popup!(app, protocol_popup_screen)
+                open_protocol_popup!(app, app_run, protocol_popup_screen)
             end
         end
     end

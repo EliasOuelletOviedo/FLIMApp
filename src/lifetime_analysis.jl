@@ -15,16 +15,58 @@ References:
 - Enderlein, 1997 (IRF shift/delay compensation)
 """
 
-using PyCall
 using FFTW
 using Statistics
 using NativeFileDialog
 using Optim
 using LineSearches
+using ZipFile
 
 const X_DATA_CACHE = Dict{Int, Vector{Float64}}()
 const GATING_CACHE = Dict{Tuple{Int, Int, Int}, Vector{UInt8}}()
 const IRF_CHANNEL_CACHE = Dict{Int, Matrix{Float64}}()
+
+function _reshape_to_vec_no_python(file::Vector{UInt16}, num_rows::Int)::Vector{Float64}
+    return sum(reshape(file, (num_rows, :)), dims=2)[:, 1]
+end
+
+function _open_sdt_file_no_python(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
+    open(filepath, "r") do io
+        seek(io, 14)
+        header = read!(io, Vector{UInt8}(undef, 12))
+
+        seek(io, header[12]*0x100 + header[11] + 82)
+        infos = read!(io, Vector{UInt8}(undef, 2))
+        histogram_resolution = infos[2]*0x100 + infos[1]
+
+        seek(io, header[12]*0x100 + header[11] + 215)
+        infos_2 = read!(io, Vector{UInt8}(undef, 4))
+        time = reinterpret(Float32, infos_2)[1]
+
+        if (header[8]*0x100 + header[7]) in (512, 128)
+            seek(io, header[2]*0x100 + header[1] + 22)
+            vector = read(io)
+            n = div(length(vector), 2)
+            new_vector = reinterpret(UInt16, vector[1:2*n])
+            return new_vector, histogram_resolution, time
+        else
+            seek(io, header[2]*0x100 + header[1] + 2)
+            file_info = read!(io, Vector{UInt8}(undef, 20))
+            shift_1 = file_info[8]*0x1000000 + file_info[7]*0x10000 + file_info[6]*0x100 + file_info[5] -
+                      (file_info[2]*0x100 + file_info[1])
+            shift_2 = file_info[20]*0x1000000 + file_info[19]*0x10000 + file_info[18]*0x100 + file_info[17]
+
+            buffer = IOBuffer(read(io, shift_1))
+            zip_file = first(ZipFile.Reader(buffer).files)
+
+            file_data = Vector{UInt8}(undef, shift_2)
+            read!(zip_file, file_data)
+
+            vector = _reshape_to_vec_no_python(reinterpret(UInt16, file_data), histogram_resolution)
+            return convert.(UInt16, vector), histogram_resolution, time
+        end
+    end
+end
 
 """
     _ensure_fft_plans(size::Int)
@@ -64,18 +106,25 @@ function _get_x_data(total_channels::Int)::Vector{Float64}
 end
 
 function _get_gating_function(total_channels::Int, low_cut_idx::Int, high_cut_idx::Int)::Vector{UInt8}
-    key = (total_channels, low_cut_idx, high_cut_idx)
+    if total_channels <= 0
+        return UInt8[]
+    end
+
+    low_cut = clamp(low_cut_idx, 0, total_channels)
+    high_cut = clamp(high_cut_idx, 1, total_channels + 1)
+
+    key = (total_channels, low_cut, high_cut)
     cached = get(GATING_CACHE, key, nothing)
     if cached !== nothing
         return cached
     end
 
     gating = ones(UInt8, total_channels)
-    if low_cut_idx >= 1
-        gating[1:low_cut_idx] .= 0
+    if low_cut >= 1
+        gating[1:low_cut] .= 0
     end
-    if high_cut_idx <= total_channels
-        gating[high_cut_idx:total_channels] .= 0
+    if high_cut <= total_channels
+        gating[high_cut:total_channels] .= 0
     end
 
     GATING_CACHE[key] = gating
@@ -99,6 +148,25 @@ function _get_irf_for_channels(total_channels::Int)::Matrix{Float64}
 
     IRF_CHANNEL_CACHE[total_channels] = new_irf
     return new_irf
+end
+
+function _fit_optim_options(number_of_lifetimes::Int, first_fit::Bool)
+    if number_of_lifetimes == 1
+        if first_fit
+            return Optim.Options(outer_iterations=14, iterations=64, x_abstol=5e-7, outer_x_abstol=5e-7, f_reltol=1e-5, outer_f_reltol=1e-4, f_calls_limit=280, time_limit=0.060, allow_f_increases=true)
+        end
+        return Optim.Options(outer_iterations=8, iterations=32, x_abstol=5e-7, outer_x_abstol=5e-7, f_reltol=1e-5, outer_f_reltol=1e-4, f_calls_limit=140, time_limit=0.020, allow_f_increases=true)
+    elseif number_of_lifetimes == 2
+        if first_fit
+            return Optim.Options(outer_iterations=10, iterations=40, f_reltol=1e-5, outer_f_reltol=1e-4, x_abstol=5e-7, outer_x_abstol=5e-7, f_calls_limit=220, time_limit=0.050)
+        end
+        return Optim.Options(outer_iterations=6, iterations=24, f_reltol=1e-5, outer_f_reltol=1e-4, x_abstol=5e-7, outer_x_abstol=5e-7, f_calls_limit=120, time_limit=0.015)
+    else
+        if first_fit
+            return Optim.Options(outer_iterations=6, iterations=24, f_reltol=1e-4, outer_f_reltol=1e-3, x_abstol=1e-6, outer_x_abstol=1e-6, f_calls_limit=160, time_limit=0.030)
+        end
+        return Optim.Options(outer_iterations=4, iterations=16, f_reltol=1e-4, outer_f_reltol=1e-3, x_abstol=1e-6, outer_x_abstol=1e-6, f_calls_limit=80, time_limit=0.012)
+    end
 end
 
 # =============================================================================
@@ -129,39 +197,55 @@ function _compute_irf_bin_size(irf_data::Matrix{Float64})::Float64
     return h
 end
 
+
+function _irf_from_sdt_without_python(filepath::AbstractString; channel::Int=1)::Matrix{Float64}
+    counts_raw, histogram_resolution, time = _open_sdt_file_no_python(String(filepath))
+
+    counts = Float64.(counts_raw)
+    if isempty(counts)
+        error("IRF file contains no histogram data")
+    end
+
+    median_irf = round(median(counts))
+    counts .-= round(Int, median_irf)
+    counts[counts .<= 0] .= 0
+
+    n = min(length(counts), histogram_resolution)
+    bin_size_ns = Float64(time) * 1e9
+    window_ns = bin_size_ns * n
+
+    # Some SDT variants expose a per-frame duration in this header field.
+    # Fall back to one laser period when this produces non-physical TCSPC windows.
+    if !isfinite(bin_size_ns) || bin_size_ns <= 0.0 || !isfinite(window_ns) || window_ns > 1_000.0
+        bin_size_ns = 12.5 / n
+    end
+
+    times = collect(0:n-1) .* bin_size_ns
+
+    data = zeros(Float64, n, 2)
+    data[:, 1] = times
+    data[:, 2] = counts[1:n]
+    return data
+end
+
 function get_irf(; channel=1)
-    """
-    Loads an .sdt IRF file. If irf_filepath.txt exists, load the IRF from this filepath, otherwise, open a file dialog create irf_filepath.txt
-    """
     if isfile("docs/irf_filepath.txt")
         filepath = open(f->read(f, String), "docs/irf_filepath.txt")
         if !ispath(filepath)
             println("IRF filepath does not exist. Please select valid .sdt file.")
-            # filepath = open_dialog("IRF: Choose .sdt file to open.")
             filepath = pick_file()
             open("docs/irf_filepath.txt", "w") do io
                 write(io, filepath)
             end
         end
     else
-        # filepath = open_dialog("IRF: Choose .sdt file to open.")
         filepath = pick_file()
         open("docs/irf_filepath.txt", "w") do io
             write(io, filepath)
         end
     end
 
-    sdt = pyimport("sdtfile")
-    file = sdt.SdtFile(filepath)
-    counts = convert.(Int64, file.data[channel])
-    median_irf = round(median(counts))
-    counts = counts.-round(Int, median_irf)
-    counts[counts .<= 0] .= 0
-    times = convert.(Float64, vec(file.times[1]).*1e9)
-    data = zeros(Float64, length(times), 2)::Matrix{Float64}
-    data[:, 1] = times
-    data[:, 2] = vec(counts)
-    return data
+    return _irf_from_sdt_without_python(filepath; channel=channel)
 end
 
 function get_new_irf(; channel=1)
@@ -173,14 +257,7 @@ function get_new_irf(; channel=1)
         write(io, filepath)
     end
 
-    sdt = pyimport("sdtfile")
-    file = sdt.SdtFile(filepath)
-    data = convert.(Int64, file.data[channel])
-    median_irf = round(median(data))
-    data = data.-round(Int, 1.25*median_irf)
-    data[data .<= 0] .= 0
-    times = convert.(Float64, vec(file.times[1]).*1e9)
-    data = [times, vec(data)]
+    data = _irf_from_sdt_without_python(filepath; channel=channel)
 
     println("Done")
     println()
@@ -374,7 +451,7 @@ function _clamp_initial_point!(params_copy::Vector{Float64}, lower_bounds::Vecto
     return params_copy
 end
 
-function MLE_iterative_reconvolution_jl(irf::Matrix{Float64}, data_xy::Vector{Vector{Float64}}; params, gating_function=ones(UInt8, 320), histogram_resolution=256, laser_pulse_period=12.5, fixed_parameters=Float64[NaN, NaN, NaN])
+function MLE_iterative_reconvolution_jl(irf::Matrix{Float64}, data_xy::Vector{Vector{Float64}}; params, gating_function=ones(UInt8, 320), histogram_resolution=256, laser_pulse_period=12.5, fixed_parameters=Float64[NaN, NaN, NaN], first_fit::Bool=false)
     """
     Curve fitting of fluorescence decay using Maximum Likelihood Estimation
     """
@@ -418,7 +495,7 @@ function MLE_iterative_reconvolution_jl(irf::Matrix{Float64}, data_xy::Vector{Ve
             end
         end
         _clamp_initial_point!(params_copy, lower_bounds, upper_bounds)
-        fit = optimize(x->MLE_model_func(x, x_data, y_data, irf, gating_function, histogram_resolution), lower_bounds, upper_bounds, params_copy, Fminbox(LBFGS(linesearch = LineSearches.BackTracking())), Optim.Options(outer_iterations=8, iterations=32, x_abstol=5e-7, outer_x_abstol=5e-7, f_reltol=1e-5, outer_f_reltol=1e-4, f_calls_limit=140, time_limit=0.020, allow_f_increases=true))
+        fit = optimize(x->MLE_model_func(x, x_data, y_data, irf, gating_function, histogram_resolution), lower_bounds, upper_bounds, params_copy, Fminbox(LBFGS(linesearch = LineSearches.BackTracking())), _fit_optim_options(number_of_lifetimes, first_fit))
         res = Optim.minimizer(fit)
 
         if res[1] == lower_bounds[1] || res[1] == upper_bounds[1]
@@ -448,7 +525,7 @@ function MLE_iterative_reconvolution_jl(irf::Matrix{Float64}, data_xy::Vector{Ve
         end
         _clamp_initial_point!(params_copy, lower_bounds, upper_bounds)
         #res = sp_o.minimize(MLE_model_func, params_copy, args=(x_data, y_data, irf, gating_function, histogram_resolution, number_of_previous_pulses, laser_pulse_period), bounds=bounds, method="L-BFGS-B")
-        fit = optimize(x->MLE_model_func(x, x_data, y_data, irf, gating_function, histogram_resolution), lower_bounds, upper_bounds, params_copy, Fminbox(LBFGS(linesearch = LineSearches.BackTracking())), Optim.Options(outer_iterations=6, iterations=24, f_reltol=1e-5, outer_f_reltol=1e-4, x_abstol=5e-7, outer_x_abstol=5e-7, f_calls_limit=120, time_limit=0.015))
+        fit = optimize(x->MLE_model_func(x, x_data, y_data, irf, gating_function, histogram_resolution), lower_bounds, upper_bounds, params_copy, Fminbox(LBFGS(linesearch = LineSearches.BackTracking())), _fit_optim_options(number_of_lifetimes, first_fit))
         res = Optim.minimizer(fit)
     elseif number_of_lifetimes == 3 || number_of_lifetimes == 4
         #push!(params_copy, 0.25)
@@ -479,7 +556,7 @@ function MLE_iterative_reconvolution_jl(irf::Matrix{Float64}, data_xy::Vector{Ve
         #println("bounds: ", bounds)
         #res = sp_o.minimize(MLE_model_func, params_copy, args=(x_data, y_data, irf, gating_function, histogram_resolution, number_of_previous_pulses, laser_pulse_period), bounds=bounds, constraints=Dict("type"=>"eq", "fun"=>fit_3_lifetime_amplitudes_constraint), method="trust-constr", tol=1e-6, options=Dict("maxiter"=>3000))
         # fit = optimize(x->MLE_model_func(x, x_data, y_data, irf, gating_function, histogram_resolution), constraint, params_copy, IPNewton(), Optim.Options(outer_iterations=10, f_reltol=1e-8, allow_f_increases = true, successive_f_reltol = 2))
-        fit = optimize(x->MLE_model_func(x, x_data, y_data, irf, gating_function, histogram_resolution), constraint, params_copy, IPNewton(), Optim.Options(outer_iterations=4, iterations=16, f_reltol=1e-4, outer_f_reltol=1e-3, x_abstol=1e-6, outer_x_abstol=1e-6, f_calls_limit=80, time_limit=0.012))
+        fit = optimize(x->MLE_model_func(x, x_data, y_data, irf, gating_function, histogram_resolution), constraint, params_copy, IPNewton(), _fit_optim_options(number_of_lifetimes, first_fit))
         res = Optim.minimizer(fit)
         #println(res)
     end
@@ -538,7 +615,7 @@ function MLE_iterative_reconvolution_jl(irf::Matrix{Float64}, data_xy::Vector{Ve
     return res::Vector{Float64}
 end
 
-function vec_to_lifetime(x::Vector{Float64}; guess=[3.0, 1.0, 1e-6], laser_pulse_period=12.5, histogram_resolution=256, tac_low_cut=5.0980392, tac_high_cut=94.901962, fixed_parameters=Float64[NaN, NaN, NaN])
+function vec_to_lifetime(x::Vector{Float64}; guess=[3.0, 1.0, 1e-6], laser_pulse_period=12.5, histogram_resolution=256, tac_low_cut=5.0980392, tac_high_cut=94.901962, fixed_parameters=Float64[NaN, NaN, NaN], first_fit::Bool=false)
     """
     Calculate fluorescence lifetime from vector of counts
     """
@@ -552,10 +629,19 @@ function vec_to_lifetime(x::Vector{Float64}; guess=[3.0, 1.0, 1e-6], laser_pulse
         error("Invalid tcspc_window_size: $tcspc_window_size. IRF may not be loaded correctly.")
     end
     
-    total_channels = round(Int, laser_pulse_period * histogram_resolution / tcspc_window_size)
+    requested_channels = round(Int, laser_pulse_period * histogram_resolution / tcspc_window_size)
+    total_channels = requested_channels
+
+    if total_channels <= 0
+        @warn "Computed invalid total_channels from IRF window; falling back to histogram resolution" requested_channels=total_channels tcspc_window_size=tcspc_window_size histogram_resolution=histogram_resolution
+        total_channels = histogram_resolution
+    end
+
     if abs(total_channels - histogram_resolution) <= 1
         total_channels = histogram_resolution
     end
+
+    total_channels = max(total_channels, histogram_resolution, length(x), 32)
 
     x_data = _get_x_data(total_channels)
     irf_local = _get_irf_for_channels(total_channels)
@@ -563,14 +649,14 @@ function vec_to_lifetime(x::Vector{Float64}; guess=[3.0, 1.0, 1e-6], laser_pulse
     if sum(x) < 100
         return Float64[NaN], [x_data, vec(x)]::Vector{Vector{Float64}}
     else
-        low_cut_idx = round(Int, tac_low_cut / 100 * histogram_resolution)
-        high_cut_idx = round(Int, tac_high_cut / 100 * histogram_resolution)
+        low_cut_idx = round(Int, tac_low_cut / 100 * total_channels)
+        high_cut_idx = round(Int, tac_high_cut / 100 * total_channels)
         gating_function = _get_gating_function(total_channels, low_cut_idx, high_cut_idx)
         # tcspc_high_cut_index = total_channels-round(Int, tac_high_cut/100*histogram_resolution)
 
         data_xy = [x_data, copy(x)]
         
-        tau_fit = MLE_iterative_reconvolution_jl(irf_local, data_xy, params=guess, gating_function=gating_function, histogram_resolution=total_channels, fixed_parameters=fixed_parameters, laser_pulse_period=laser_pulse_period)
+        tau_fit = MLE_iterative_reconvolution_jl(irf_local, data_xy, params=guess, gating_function=gating_function, histogram_resolution=total_channels, fixed_parameters=fixed_parameters, laser_pulse_period=laser_pulse_period, first_fit=first_fit)
 
         return tau_fit::Vector{Float64}, data_xy::Vector{Vector{Float64}}
     end

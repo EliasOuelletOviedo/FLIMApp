@@ -20,6 +20,118 @@ using Base.Threads
 
 const LIFETIME_WARMUP_DONE = Ref(false)
 
+function lifetime_smooth_level(layout::Dict{Symbol, Any})::Int
+    raw = get(layout, :smoothing, 0)
+    val = raw isa Number ? Float64(raw) : 0.0
+    return clamp(round(Int, val), 0, 10)
+end
+
+@inline function _smooth_strength_factor(level::Int)::Float64
+    # Keep level 1 unchanged and map level 10 to ~10x stronger smoothing.
+    clamped_level = clamp(level, 1, 10)
+    return 10.0 ^ ((clamped_level - 1) / 9)
+end
+
+function _local_scale(values::Vector{Float64}, idx::Int, window::Int)::Float64
+    if idx <= 1
+        return 1.0e-6
+    end
+
+    start_idx = max(2, idx - window + 1)
+    s = 0.0
+    n = 0
+    for k in start_idx:idx
+        v1 = values[k]
+        v0 = values[k - 1]
+        if isfinite(v1) && isfinite(v0)
+            s += abs(v1 - v0)
+            n += 1
+        end
+    end
+
+    return max(n > 0 ? (s / n) : 1.0e-6, 1.0e-6)
+end
+
+function _compute_lifetime_smooth_at(
+    values::Vector{Float64},
+    idx::Int,
+    level::Int,
+    prev_smooth::Float64
+)::Float64
+    if idx <= 0 || idx > length(values)
+        return NaN
+    end
+
+    x = values[idx]
+    if !isfinite(x)
+        return NaN
+    end
+
+    # Level 0 disables the smooth trace to avoid curve overlap with raw lifetime.
+    if level <= 0
+        return NaN
+    end
+
+    if !isfinite(prev_smooth)
+        return x
+    end
+
+    window = 4 + 5 * level
+    scale = _local_scale(values, idx, window)
+    innovation = x - prev_smooth
+    smooth_factor = _smooth_strength_factor(level)
+
+    q = max(scale * scale * (0.24 - 0.009 * level), 1.0e-12)
+    r = max(scale * scale * (0.95 + 0.14 * level) * smooth_factor, 1.0e-12)
+
+    gain = q / (q + r)
+    innovation_ratio = abs(innovation) / (abs(innovation) + 2.0 * scale)
+    gain_boost = 0.45 * innovation_ratio / smooth_factor
+    k_min = 0.03 / smooth_factor
+    k = clamp(gain + gain_boost, k_min, 0.90)
+
+    return prev_smooth + k * innovation
+end
+
+function recompute_lifetime_smooth!(app, app_run)
+    # Snapshot mutable vectors to avoid transient length races with the consumer task.
+    lifetime_values = copy(app_run.lifetime[])
+    timestamps_values = copy(app_run.timestamps[])
+
+    n_lifetime = length(lifetime_values)
+    n_timestamps = length(timestamps_values)
+    n_common = min(n_lifetime, n_timestamps)
+
+    smoothed = fill(NaN, n_timestamps)
+
+    level = lifetime_smooth_level(app.layout)
+    prev = NaN
+
+    for idx in 1:n_common
+        y = _compute_lifetime_smooth_at(lifetime_values, idx, level, prev)
+        smoothed[idx] = y
+        prev = y
+    end
+
+    app_run.lifetime_smooth[] = smoothed
+    return nothing
+end
+
+function append_lifetime_smooth!(app, app_run)
+    idx = length(app_run.lifetime[])
+    if idx == 0
+        return nothing
+    end
+
+    level = lifetime_smooth_level(app.layout)
+    prev = isempty(app_run.lifetime_smooth[]) ? NaN : app_run.lifetime_smooth[][end]
+
+    y = _compute_lifetime_smooth_at(app_run.lifetime[], idx, level, prev)
+    push!(app_run.lifetime_smooth[], y)
+
+    return nothing
+end
+
 # Normalize IRF to the fit amplitude for histogram overlays.
 function normalized_irf_from_fit(fit::AbstractVector{<:Real})
     nfit = length(fit)
@@ -44,6 +156,63 @@ function normalized_irf_from_fit(fit::AbstractVector{<:Real})
     n = min(nfit, length(irf_y))
     out[1:n] .= irf_y[1:n] .* (fit_max / irf_max)
     return out
+end
+
+function protocol_setpoint_spans(
+    timestamps::AbstractVector{<:Real},
+    setpoints::AbstractVector{<:Real}
+)::Tuple{Vector{Float64}, Vector{Float64}}
+    n = min(length(timestamps), length(setpoints))
+    starts = Float64[]
+    ends = Float64[]
+
+    if n == 0
+        return (starts, ends)
+    end
+
+    active_start = nothing
+
+    for idx in 1:n
+        t = Float64(timestamps[idx])
+        sp = Float64(setpoints[idx])
+
+        if !isfinite(t)
+            continue
+        end
+
+        if isfinite(sp)
+            if active_start === nothing
+                active_start = t
+            end
+        elseif active_start !== nothing
+            push!(starts, active_start)
+            push!(ends, t)
+            active_start = nothing
+        end
+    end
+
+    if active_start !== nothing
+        push!(starts, active_start)
+        push!(ends, Float64(timestamps[n]))
+    end
+
+    return (starts, ends)
+end
+
+function add_protocol_setpoint_highlight!(ax, app_run)
+    spans = lift(app_run.timestamps, app_run.protocol_setpoint) do ts, sp
+        starts, ends = protocol_setpoint_spans(ts, sp)
+        if isempty(starts)
+            return ([NaN], [NaN])
+        end
+        return (starts, ends)
+    end
+
+    span_starts = lift(x -> x[1], spans)
+    span_ends = lift(x -> x[2], spans)
+    vspan!(ax, span_starts, span_ends, color = (Makie.wong_colors()[2], 0.05))
+
+    return nothing
 end
 
 # -----------------------------------------------------------------------------
@@ -159,24 +328,69 @@ function autoscale_values!(app, ax, xs::AbstractVector, ys::AbstractVector; pad_
 end
 
 """
-    lookup_plot_series(app_run, selection)
+    lookup_plot_series(app_run, plot_label)
 
-Return x/y data vectors matching a plot selection label.
+Return x/y vectors for one plot label.
+Labels supported: `Histogram`, `Photon counts`, `Lifetime`, `Ion concentration`, `Command`.
 """
-function lookup_plot_series(app_run, selection)
-    if selection == "Histogram"
+function lookup_plot_series(app_run, plot_label)
+    if plot_label == "Histogram"
         return (app_run.hist_time[], app_run.histogram[])
-    elseif selection == "Photon counts"
-        return (app_run.timestamps[], app_run.photons[])
-    elseif selection == "Lifetime"
-        return (app_run.timestamps[], app_run.lifetime[])
-    elseif selection == "Ion concentration"
-        return (app_run.timestamps[], app_run.concentration[])
-    elseif selection == "Command"
-        return (vcat(app_run.timestamps[], app_run.timestamps[]), vcat(app_run.command1[], app_run.command2[]))
-    else
-        return (Float64[], Float64[])
     end
+
+    if plot_label == "Photon counts"
+        return (app_run.timestamps[], app_run.photons[])
+    end
+
+    if plot_label == "Lifetime"
+        return (
+            vcat(app_run.timestamps[], app_run.timestamps[], app_run.timestamps[]),
+            vcat(app_run.lifetime[], app_run.lifetime_smooth[], app_run.protocol_setpoint[])
+        )
+    end
+
+    if plot_label == "Ion concentration"
+        return (app_run.timestamps[], app_run.concentration[])
+    end
+
+    if plot_label == "Command"
+        return (
+            vcat(app_run.timestamps[], app_run.timestamps[]),
+            vcat(app_run.command1[], app_run.command2[])
+        )
+    end
+
+    return (Float64[], Float64[])
+end
+
+function _notify_runtime_observables!(app_run)
+    notify(app_run.photons)
+    notify(app_run.lifetime)
+    notify(app_run.lifetime_smooth)
+    notify(app_run.protocol_setpoint)
+    notify(app_run.concentration)
+    notify(app_run.command1)
+    notify(app_run.command2)
+    notify(app_run.timestamps)
+    notify(app_run.i)
+    return nothing
+end
+
+function _autoscale_plot_selection!(app, app_run, axis, plot_label)
+    if plot_label == "Histogram"
+        autoscale_values!(axis)
+        return nothing
+    end
+
+    xs, ys = lookup_plot_series(app_run, plot_label)
+
+    if plot_label == "Command"
+        autoscale_values!(app, axis, xs)
+    else
+        autoscale_values!(app, axis, xs, ys)
+    end
+
+    return nothing
 end
 
 """
@@ -187,60 +401,38 @@ Notifications are throttled to approximately 30 Hz to avoid overwhelming
 the GUI with too frequent updates.
 """
 function consumer_loop(app, app_run, blocks; rate=30)
-    last_notify_time = time()
-    notify_interval = 1.0 / rate
-    ax1 = blocks[:plot_1_axis]
-    ax2 = blocks[:plot_2_axis]
+    last_publish_time = time()
+    publish_interval_s = 1.0 / rate
+    plot_1_axis = blocks[:plot_1_axis]
+    plot_2_axis = blocks[:plot_2_axis]
 
     try
-        for (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, counts, i) in app_run.channel
+        for sample in app_run.channel
+            histogram, fit, photons, command1, command2, lifetime, concentration, timestamp, protocol_setpoint, frame_idx = sample
+
             push!(app_run.photons[], photons)
             push!(app_run.lifetime[], lifetime)
+            append_lifetime_smooth!(app, app_run)
+            push!(app_run.protocol_setpoint[], protocol_setpoint)
             push!(app_run.concentration[], concentration)
             push!(app_run.command1[], command1)
             push!(app_run.command2[], command2)
-            push!(app_run.timestamps[], timestamps)
-            app_run.i[] = i
+            push!(app_run.timestamps[], timestamp)
+            app_run.i[] = frame_idx
 
-            current_time = time()
+            now_s = time()
 
-            if current_time - last_notify_time >= notify_interval
+            if now_s - last_publish_time >= publish_interval_s
                 app_run.histogram[] = histogram
                 app_run.fit[] = fit
-                app_run.counts[] = counts
+                app_run.counts[] = photons
 
-                notify(app_run.photons)
-                notify(app_run.lifetime)
-                notify(app_run.concentration)
-                notify(app_run.command1)
-                notify(app_run.command2)
-                notify(app_run.timestamps)
-                notify(app_run.i)
+                _notify_runtime_observables!(app_run)
 
-                last_notify_time = current_time
+                last_publish_time = now_s
 
-                sel1 = app.layout[:plot1]
-                sel2 = app.layout[:plot2]
-
-                if sel1 == "Histogram"
-                    autoscale_values!(ax1)
-                elseif sel1 == "Command"
-                    xs, _ = lookup_plot_series(app_run, sel1)
-                    autoscale_values!(app, ax1, xs)
-                else
-                    xs, ys = lookup_plot_series(app_run, sel1)
-                    autoscale_values!(app, ax1, xs, ys)
-                end
-
-                if sel2 == "Histogram"
-                    autoscale_values!(ax2)
-                elseif sel2 == "Command"
-                    xs, _ = lookup_plot_series(app_run, sel2)
-                    autoscale_values!(app, ax2, xs)
-                else
-                    xs, ys = lookup_plot_series(app_run, sel2)
-                    autoscale_values!(app, ax2, xs, ys)
-                end
+                _autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout[:plot1])
+                _autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout[:plot2])
             end
         end
     catch e
@@ -354,6 +546,33 @@ function warmup_lifetime_fit!()
     return LIFETIME_WARMUP_DONE[]
 end
 
+function _normalize_protocol_config(raw_protocol)::Dict{Symbol, Any}
+    times_raw = get(raw_protocol, :times, Float64[])
+    setpoints_raw = get(raw_protocol, :setpoints, Float64[])
+
+    times = times_raw isa AbstractVector ? [v isa Number ? Float64(v) : NaN for v in times_raw] : Float64[]
+    setpoints = setpoints_raw isa AbstractVector ? [v isa Number ? Float64(v) : NaN for v in setpoints_raw] : Float64[]
+
+    repeats_raw = get(raw_protocol, :repeats, 1)
+    delay_raw = get(raw_protocol, :delay, 0)
+
+    repeats = repeats_raw isa Number ? Int(round(Float64(repeats_raw))) : 1
+    delay = delay_raw isa Number ? Int(round(Float64(delay_raw))) : 0
+
+    return Dict{Symbol, Any}(
+        :active => Bool(get(raw_protocol, :active, false)),
+        :delay => max(delay, 0),
+        :repeats => max(repeats, 0),
+        :times => times,
+        :setpoints => setpoints
+    )
+end
+
+function sync_runtime_protocol!(app, app_run)
+    app_run.protocol[] = _normalize_protocol_config(app.protocol)
+    return nothing
+end
+
 """
     serial_signal_loop(app, app_run; rate=10.0)
 
@@ -439,6 +658,8 @@ function start_pressed(app, app_run, blocks)
     empty!(app_run.photons[])
     app_run.counts[] = 0.0
     empty!(app_run.lifetime[])
+    empty!(app_run.lifetime_smooth[])
+    empty!(app_run.protocol_setpoint[])
     empty!(app_run.concentration[])
     empty!(app_run.command1[])
     empty!(app_run.command2[])
@@ -466,27 +687,8 @@ function start_pressed(app, app_run, blocks)
 
     playback = selected_mode == "Playback"
 
-    protocol_config = nothing
-    if Bool(get(app.protocol, :active, false))
-        raw_times = get(app.protocol, :times, Float64[])
-        raw_setpoints = get(app.protocol, :setpoints, Float64[])
-
-        times = raw_times isa AbstractVector ? [v isa Number ? Float64(v) : NaN for v in raw_times] : Float64[]
-        setpoints = raw_setpoints isa AbstractVector ? [v isa Number ? Float64(v) : NaN for v in raw_setpoints] : Float64[]
-
-        repeats_raw = get(app.protocol, :repeats, 1)
-        delay_raw = get(app.protocol, :delay, 0)
-
-        repeats = repeats_raw isa Number ? Int(round(Float64(repeats_raw))) : 1
-        delay = delay_raw isa Number ? Int(round(Float64(delay_raw))) : 0
-
-        protocol_config = Dict{Symbol, Any}(
-            :delay => max(delay, 0),
-            :repeats => max(repeats, 0),
-            :times => times,
-            :setpoints => setpoints
-        )
-    end
+    sync_runtime_protocol!(app, app_run)
+    protocol_config = app_run.protocol
 
     if playback
         app_run.worker_task = @async start_playback(

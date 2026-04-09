@@ -412,6 +412,84 @@ function protocol_setpoint_at_timestamp(protocol::Dict{Symbol, Any}, timestamp::
     return steps[end][2]
 end
 
+@inline function _resolve_protocol_config(protocol)
+    if protocol === nothing
+        return nothing
+    end
+
+    candidate = if protocol isa Observables.AbstractObservable
+        protocol[]
+    else
+        protocol
+    end
+
+    return candidate isa Dict{Symbol, Any} ? candidate : nothing
+end
+
+@inline function _layout_smoothing_level(layout::Dict{Symbol, Any})::Int
+    raw = get(layout, :smoothing, 0)
+    val = raw isa Number ? Float64(raw) : 0.0
+    return clamp(round(Int, val), 0, 10)
+end
+
+@inline function _smooth_strength_factor(level::Int)::Float64
+    # Keep level 1 unchanged and map level 10 to ~10x stronger smoothing.
+    clamped_level = clamp(level, 1, 10)
+    return 10.0 ^ ((clamped_level - 1) / 9)
+end
+
+"""
+    _update_pid_lifetime_kalman(current_lifetime, prev_smooth, prev_raw, scale_est, level)
+
+Update a local adaptive Kalman smoother used by PID error computation.
+Returns `(lifetime_for_pid, new_prev_smooth, new_prev_raw, new_scale_est)`.
+"""
+function _update_pid_lifetime_kalman(
+    current_lifetime::Float64,
+    prev_smooth::Float64,
+    prev_raw::Float64,
+    scale_est::Float64,
+    level::Int
+)::NTuple{4, Float64}
+    if !isfinite(current_lifetime)
+        return (current_lifetime, prev_smooth, prev_raw, scale_est)
+    end
+
+    if !isfinite(prev_raw)
+        prev_raw = current_lifetime
+    end
+
+    delta_raw = abs(current_lifetime - prev_raw)
+    if !isfinite(scale_est) || scale_est <= 0.0
+        scale_est = max(delta_raw, 1.0e-6)
+    else
+        scale_est = max(0.90 * scale_est + 0.10 * delta_raw, 1.0e-6)
+    end
+
+    if level <= 0
+        return (current_lifetime, current_lifetime, current_lifetime, scale_est)
+    end
+
+    if !isfinite(prev_smooth)
+        prev_smooth = current_lifetime
+    end
+
+    smooth_factor = _smooth_strength_factor(level)
+
+    q = max(scale_est * scale_est * (0.24 - 0.009 * level), 1.0e-12)
+    r = max(scale_est * scale_est * (0.95 + 0.14 * level) * smooth_factor, 1.0e-12)
+
+    innovation = current_lifetime - prev_smooth
+    gain = q / (q + r)
+    innovation_ratio = abs(innovation) / (abs(innovation) + 2.0 * scale_est)
+    gain_boost = 0.45 * innovation_ratio / smooth_factor
+    k_min = 0.03 / smooth_factor
+    k = clamp(gain + gain_boost, k_min, 0.90)
+
+    smooth_lifetime = prev_smooth + k * innovation
+    return (smooth_lifetime, smooth_lifetime, current_lifetime, scale_est)
+end
+
 # =============================================================================
 # WORKER TASK
 # =============================================================================
@@ -432,7 +510,7 @@ Args:
 - `layout::Dict` - Layout config (for binning parameter)
 
 Keyword Args:
-- `dt::Float64` - Sleep interval between frames (default 0.05 seconds)
+- `dt::Float64` - Polling interval used to check scheduling cadence
 
 The channel tuples contain:
 1. histogram::Vector{Float64} - Raw photon counts
@@ -443,7 +521,7 @@ The channel tuples contain:
 6. lifetime::Float64 - Fitted decay constant (τ)
 7. concentration::Float64 - Computed ion concentration
 8. timestamps::Float64 - Cumulative acquisition time
-9. reserved::Float64 - Placeholder for future use
+9. protocol_setpoint::Float64 - Effective protocol setpoint used for control
 10. i::UInt32 - Frame counter
 """
 function start_playback(
@@ -452,7 +530,7 @@ function start_playback(
     layout::Dict{Symbol, Any},
     controller::Dict{Symbol, Any};
         initial_guess::Vector{Float64} = [3.0, 0.5, 0.5, 0.0, 5.0e-5],
-        protocol::Union{Nothing, Dict{Symbol, Any}} = nothing,
+        protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
         dt::Float64 = 0.0001
     )
     try
@@ -493,14 +571,34 @@ function start_playback(
         # Initial parameter guess for lifetime fitting
         params = copy(initial_guess)
         n = UInt32(0)
+        first_fit_pending = true
 
         # PID state for lifetime control
         fallback_setpoint_ns = 4.0
         I_error = 0.0
         old_error = 0.0
         D_error = 0.0
+        pid_prev_smooth_lifetime = NaN
+        pid_prev_raw_lifetime = NaN
+        pid_scale_est = 1.0e-6
+
+        target_period_ns = round(Int, 1e9 / 60.0)
+        next_analysis_ns = time_ns()
 
         while running[]
+            now_ns = time_ns()
+            if now_ns < next_analysis_ns
+                remaining_s = (next_analysis_ns - now_ns) / 1e9
+                sleep(min(dt, remaining_s))
+                continue
+            end
+
+            # Keep a fixed 60 Hz schedule when possible; if we are late, restart from now.
+            next_analysis_ns += target_period_ns
+            if next_analysis_ns < now_ns
+                next_analysis_ns = now_ns + target_period_ns
+            end
+
             filepath = filepaths[mod1(n+1, nb_files)]
 
             vector, histogram_resolution, frame_time = open_SDT_file(filepath)
@@ -538,7 +636,8 @@ function start_playback(
             final_vector = sum_vector ./ bin
 
             # Fit every processed frame/file.
-            params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution)
+            params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution, first_fit=first_fit_pending)
+            first_fit_pending = false
 
             if !isnan(params_raw[1])
                 params = params_raw
@@ -552,11 +651,22 @@ function start_playback(
             timestamps += frame_time
             n += 1
 
-            setpoint_ns = if protocol === nothing
+            current_protocol = _resolve_protocol_config(protocol)
+            setpoint_ns = if current_protocol === nothing || !Bool(get(current_protocol, :active, false))
                 fallback_setpoint_ns
             else
-                protocol_setpoint_at_timestamp(protocol, timestamps)
+                protocol_setpoint_at_timestamp(current_protocol, timestamps)
             end
+
+            smooth_level = _layout_smoothing_level(layout)
+            lifetime_for_pid, pid_prev_smooth_lifetime, pid_prev_raw_lifetime, pid_scale_est =
+                _update_pid_lifetime_kalman(
+                    lifetime,
+                    pid_prev_smooth_lifetime,
+                    pid_prev_raw_lifetime,
+                    pid_scale_est,
+                    smooth_level
+                )
 
             command1 = NaN
             command2 = NaN
@@ -564,7 +674,7 @@ function start_playback(
             if !isnan(setpoint_ns)
                 # PID terms are shared from one lifetime error for both controllers.
                 dt_sample = max(Float64(frame_time), eps(Float64))
-                P_error = setpoint_ns - lifetime
+                P_error = setpoint_ns - lifetime_for_pid
                 I_error += P_error * dt_sample
                 D_error = (P_error - old_error) / dt_sample
                 old_error = P_error
@@ -608,7 +718,7 @@ function start_playback(
             # Send results; handle closed channel gracefully
             if isopen(ch) && running[]
                 try
-                    put!(ch, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, photons, n))
+                    put!(ch, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n))
                 catch e
                     if isa(e, InvalidStateException)
                         break
@@ -620,7 +730,6 @@ function start_playback(
                 break
             end
             
-            sleep(dt)
         end
     catch e
         @error "Playback worker error" exception=e
@@ -654,7 +763,7 @@ function start_realtime(
     layout::Dict{Symbol, Any},
     controller::Dict{Symbol, Any};
         initial_guess::Vector{Float64} = [3.0, 0.5, 0.5, 0.0, 5.0e-5],
-        protocol::Union{Nothing, Dict{Symbol, Any}} = nothing,
+        protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
         dt::Float64 = 0.0001,
         poll_interval_s::Float64 = 0.1
     )
@@ -681,11 +790,15 @@ function start_realtime(
 
         params = copy(initial_guess)
         n = UInt32(0)
+        first_fit_pending = true
 
         fallback_setpoint_ns = 4.0
         I_error = 0.0
         old_error = 0.0
         D_error = 0.0
+        pid_prev_smooth_lifetime = NaN
+        pid_prev_raw_lifetime = NaN
+        pid_scale_est = 1.0e-6
 
         last_processed_filepath = ""
         last_dir_mtime = 0.0
@@ -796,7 +909,8 @@ function start_realtime(
             final_vector = sum_vector ./ bin
 
             # Fit every processed frame/file.
-            params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution)
+            params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution, first_fit=first_fit_pending)
+            first_fit_pending = false
 
             if !isnan(params_raw[1])
                 params = params_raw
@@ -810,18 +924,29 @@ function start_realtime(
             timestamps += frame_time
             n += 1
 
-            setpoint_ns = if protocol === nothing
+            current_protocol = _resolve_protocol_config(protocol)
+            setpoint_ns = if current_protocol === nothing || !Bool(get(current_protocol, :active, false))
                 fallback_setpoint_ns
             else
-                protocol_setpoint_at_timestamp(protocol, timestamps)
+                protocol_setpoint_at_timestamp(current_protocol, timestamps)
             end
+
+            smooth_level = _layout_smoothing_level(layout)
+            lifetime_for_pid, pid_prev_smooth_lifetime, pid_prev_raw_lifetime, pid_scale_est =
+                _update_pid_lifetime_kalman(
+                    lifetime,
+                    pid_prev_smooth_lifetime,
+                    pid_prev_raw_lifetime,
+                    pid_scale_est,
+                    smooth_level
+                )
 
             command1 = NaN
             command2 = NaN
 
             if !isnan(setpoint_ns)
                 dt_sample = max(Float64(frame_time), eps(Float64))
-                P_error = setpoint_ns - lifetime
+                P_error = setpoint_ns - lifetime_for_pid
                 I_error += P_error * dt_sample
                 D_error = (P_error - old_error) / dt_sample
                 old_error = P_error
@@ -863,7 +988,7 @@ function start_realtime(
 
             if isopen(ch) && running[]
                 try
-                    put!(ch, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, photons, n))
+                    put!(ch, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n))
                 catch e
                     if isa(e, InvalidStateException)
                         break

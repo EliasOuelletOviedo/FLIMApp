@@ -150,7 +150,7 @@ end
     end
 end
 
-function open_protocol_popup!(app, protocol_popup_screen::Base.RefValue{Union{Nothing, GLMakie.Screen}})
+function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue{Union{Nothing, GLMakie.Screen}})
     existing_screen = protocol_popup_screen[]
     if existing_screen !== nothing && isopen(existing_screen)
         _protocol_bring_popup_to_front!(existing_screen)
@@ -169,6 +169,7 @@ function open_protocol_popup!(app, protocol_popup_screen::Base.RefValue{Union{No
     app.protocol[:delay] = saved_delay
     app.protocol[:times] = copy(saved_times)
     app.protocol[:setpoints] = copy(saved_setpoints)
+    sync_runtime_protocol!(app, app_run)
     save_state(app)
 
     popup_figure = Figure(size = (600, 400))
@@ -303,6 +304,7 @@ function open_protocol_popup!(app, protocol_popup_screen::Base.RefValue{Union{No
         app.protocol[:delay] = _protocol_parse_int_or(delay_input.stored_string[], 0)
         app.protocol[:times] = copy(step_duration_values)
         app.protocol[:setpoints] = copy(step_setpoint_values)
+        sync_runtime_protocol!(app, app_run)
         save_state(app)
         return nothing
     end
