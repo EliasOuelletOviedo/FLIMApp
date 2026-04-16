@@ -36,21 +36,21 @@ function list_ports()::Vector{String}
     ports = String[]
     
     if Sys.iswindows()
-        _enumerate_windows_ports!(ports)
+        enumerate_windows_ports!(ports)
     else
-        _enumerate_unix_ports!(ports)
+        enumerate_unix_ports!(ports)
     end
     
-    display_ports = map(_port_display_name, ports)
+    display_ports = map(port_display_name, ports)
     return sort(unique(display_ports))
 end
 
 """
-    _serial_port_candidates(port_name::AbstractString)::Vector{String}
+    serial_port_candidates(port_name::AbstractString)::Vector{String}
 
 Build a list of concrete device candidates from a user-facing port name.
 """
-function _serial_port_candidates(port_name::AbstractString)::Vector{String}
+function serial_port_candidates(port_name::AbstractString)::Vector{String}
     name = strip(String(port_name))
     if isempty(name)
         return String[]
@@ -84,7 +84,7 @@ Attempt to connect to a serial port from a menu display name.
 Returns an open serial handle on success, or `nothing` on failure.
 """
 function connect_to_port(port_name::AbstractString; baudrate::Integer=115200, timeout_sec::Integer=3)
-    candidates = _serial_port_candidates(port_name)
+    candidates = serial_port_candidates(port_name)
     if isempty(candidates)
         @warn "No port selected"
         return nothing
@@ -114,7 +114,7 @@ function connect_to_port(port_name::AbstractString; baudrate::Integer=115200, ti
 end
 
 """
-    _port_display_name(port::AbstractString)::String
+    port_display_name(port::AbstractString)::String
 
 Convert a platform-specific device path/name into a compact display string.
 Examples:
@@ -122,18 +122,18 @@ Examples:
 - `/dev/ttyUSB0` -> `ttyUSB0`
 - `COM8` -> `COM8`
 """
-function _port_display_name(port::AbstractString)::String
+function port_display_name(port::AbstractString)::String
     name = splitpath(port)[end]
     name = replace(name, r"^(tty\.|cu\.)" => "")
     return strip(name)
 end
 
 """
-    _enumerate_windows_ports!(ports::Vector{String})
+    enumerate_windows_ports!(ports::Vector{String})
 
 Query Windows COM ports using PowerShell WMI.
 """
-function _enumerate_windows_ports!(ports::Vector{String})
+function enumerate_windows_ports!(ports::Vector{String})
     cmd = `powershell -NoProfile -Command "Get-WmiObject Win32_SerialPort | Select-Object -Property DeviceID,Caption | Format-Table -HideTableHeaders"`
     
     try
@@ -150,11 +150,11 @@ function _enumerate_windows_ports!(ports::Vector{String})
 end
 
 """
-    _enumerate_unix_ports!(ports::Vector{String})
+    enumerate_unix_ports!(ports::Vector{String})
 
 Scan /dev directory for Unix serial ports (macOS/Linux).
 """
-function _enumerate_unix_ports!(ports::Vector{String})
+function enumerate_unix_ports!(ports::Vector{String})
     devdir = "/dev"
     
     if !isdir(devdir)
@@ -165,20 +165,20 @@ function _enumerate_unix_ports!(ports::Vector{String})
     files = readdir(devdir)
     
     if Sys.islinux()
-        _enumerate_linux_ports!(ports, files)
+        enumerate_linux_ports!(ports, files)
     elseif Sys.isapple()
-        _enumerate_macos_ports!(ports, files)
+        enumerate_macos_ports!(ports, files)
     else
-        _enumerate_generic_unix_ports!(ports, files)
+        enumerate_generic_unix_ports!(ports, files)
     end
 end
 
 """
-    _enumerate_linux_ports!(ports::Vector{String}, files::Vector{String})
+    enumerate_linux_ports!(ports::Vector{String}, files::Vector{String})
 
 Enumerate Linux tty devices including symbolic links from /dev/serial/by-id.
 """
-function _enumerate_linux_ports!(ports::Vector{String}, files::Vector{String})
+function enumerate_linux_ports!(ports::Vector{String}, files::Vector{String})
     # Check symbolic links in by-id directory (more stable than device names)
     byid = "/dev/serial/by-id"
     if isdir(byid)
@@ -205,11 +205,11 @@ function _enumerate_linux_ports!(ports::Vector{String}, files::Vector{String})
 end
 
 """
-    _enumerate_macos_ports!(ports::Vector{String}, files::Vector{String})
+    enumerate_macos_ports!(ports::Vector{String}, files::Vector{String})
 
 Enumerate macOS USB serial ports.
 """
-function _enumerate_macos_ports!(ports::Vector{String}, files::Vector{String})
+function enumerate_macos_ports!(ports::Vector{String}, files::Vector{String})
     devdir = "/dev"
     for f in files
         if (startswith(f, "tty.") || startswith(f, "cu.")) && occursin("usb", lowercase(f))
@@ -219,11 +219,11 @@ function _enumerate_macos_ports!(ports::Vector{String}, files::Vector{String})
 end
 
 """
-    _enumerate_generic_unix_ports!(ports::Vector{String}, files::Vector{String})
+    enumerate_generic_unix_ports!(ports::Vector{String}, files::Vector{String})
 
 Fallback enumeration for generic Unix systems.
 """
-function _enumerate_generic_unix_ports!(ports::Vector{String}, files::Vector{String})
+function enumerate_generic_unix_ports!(ports::Vector{String}, files::Vector{String})
     devdir = "/dev"
     for f in files
         if startswith(f, "tty") || startswith(f, "cu.")
@@ -320,7 +320,7 @@ function open_SDT_file(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
     end
 end
 
-@inline function _protocol_float_or_nan(raw_value)::Float64
+@inline function protocol_float_or_nan(raw_value)::Float64
     if raw_value isa Number
         return Float64(raw_value)
     elseif raw_value isa AbstractString
@@ -330,7 +330,7 @@ end
     end
 end
 
-@inline function _protocol_int_or(raw_value, default::Int; min_value::Int=0)::Int
+@inline function protocol_int_or(raw_value, default::Int; min_value::Int=0)::Int
     parsed = if raw_value isa Integer
         Int(raw_value)
     elseif raw_value isa AbstractFloat
@@ -343,7 +343,7 @@ end
     return max(parsed, min_value)
 end
 
-function _protocol_steps(protocol::Dict{Symbol, Any})::Vector{Tuple{Float64, Float64}}
+function protocol_steps(protocol::Dict{Symbol, Any})::Vector{Tuple{Float64, Float64}}
     times_raw = get(protocol, :times, Float64[])
     setpoints_raw = get(protocol, :setpoints, Float64[])
 
@@ -355,8 +355,8 @@ function _protocol_steps(protocol::Dict{Symbol, Any})::Vector{Tuple{Float64, Flo
     steps = Tuple{Float64, Float64}[]
 
     for idx in 1:nsteps
-        duration = _protocol_float_or_nan(times_raw[idx])
-        setpoint = _protocol_float_or_nan(setpoints_raw[idx])
+        duration = protocol_float_or_nan(times_raw[idx])
+        setpoint = protocol_float_or_nan(setpoints_raw[idx])
 
         if !isfinite(duration) || duration <= 0.0
             continue
@@ -374,9 +374,9 @@ function protocol_setpoint_at_timestamp(protocol::Dict{Symbol, Any}, timestamp::
         return NaN
     end
 
-    delay_s = _protocol_int_or(get(protocol, :delay, 0), 0; min_value=0)
-    repeats = _protocol_int_or(get(protocol, :repeats, 1), 1; min_value=0)
-    steps = _protocol_steps(protocol)
+    delay_s = protocol_int_or(get(protocol, :delay, 0), 0; min_value=0)
+    repeats = protocol_int_or(get(protocol, :repeats, 1), 1; min_value=0)
+    steps = protocol_steps(protocol)
 
     if isempty(steps)
         return NaN
@@ -412,7 +412,7 @@ function protocol_setpoint_at_timestamp(protocol::Dict{Symbol, Any}, timestamp::
     return steps[end][2]
 end
 
-@inline function _resolve_protocol_config(protocol)
+@inline function resolve_protocol_config(protocol)
     if protocol === nothing
         return nothing
     end
@@ -424,70 +424,6 @@ end
     end
 
     return candidate isa Dict{Symbol, Any} ? candidate : nothing
-end
-
-@inline function _layout_smoothing_level(layout::Dict{Symbol, Any})::Int
-    raw = get(layout, :smoothing, 0)
-    val = raw isa Number ? Float64(raw) : 0.0
-    return clamp(round(Int, val), 0, 10)
-end
-
-@inline function _smooth_strength_factor(level::Int)::Float64
-    # Keep level 1 unchanged and map level 10 to ~10x stronger smoothing.
-    clamped_level = clamp(level, 1, 10)
-    return 10.0 ^ ((clamped_level - 1) / 9)
-end
-
-"""
-    _update_pid_lifetime_kalman(current_lifetime, prev_smooth, prev_raw, scale_est, level)
-
-Update a local adaptive Kalman smoother used by PID error computation.
-Returns `(lifetime_for_pid, new_prev_smooth, new_prev_raw, new_scale_est)`.
-"""
-function _update_pid_lifetime_kalman(
-    current_lifetime::Float64,
-    prev_smooth::Float64,
-    prev_raw::Float64,
-    scale_est::Float64,
-    level::Int
-)::NTuple{4, Float64}
-    if !isfinite(current_lifetime)
-        return (current_lifetime, prev_smooth, prev_raw, scale_est)
-    end
-
-    if !isfinite(prev_raw)
-        prev_raw = current_lifetime
-    end
-
-    delta_raw = abs(current_lifetime - prev_raw)
-    if !isfinite(scale_est) || scale_est <= 0.0
-        scale_est = max(delta_raw, 1.0e-6)
-    else
-        scale_est = max(0.90 * scale_est + 0.10 * delta_raw, 1.0e-6)
-    end
-
-    if level <= 0
-        return (current_lifetime, current_lifetime, current_lifetime, scale_est)
-    end
-
-    if !isfinite(prev_smooth)
-        prev_smooth = current_lifetime
-    end
-
-    smooth_factor = _smooth_strength_factor(level)
-
-    q = max(scale_est * scale_est * (0.24 - 0.009 * level), 1.0e-12)
-    r = max(scale_est * scale_est * (0.95 + 0.14 * level) * smooth_factor, 1.0e-12)
-
-    innovation = current_lifetime - prev_smooth
-    gain = q / (q + r)
-    innovation_ratio = abs(innovation) / (abs(innovation) + 2.0 * scale_est)
-    gain_boost = 0.45 * innovation_ratio / smooth_factor
-    k_min = 0.03 / smooth_factor
-    k = clamp(gain + gain_boost, k_min, 0.90)
-
-    smooth_lifetime = prev_smooth + k * innovation
-    return (smooth_lifetime, smooth_lifetime, current_lifetime, scale_est)
 end
 
 # =============================================================================
@@ -525,13 +461,16 @@ The channel tuples contain:
 10. i::UInt32 - Frame counter
 """
 function start_playback(
-    ch::Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}},
+        ch::Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}},
         running::Threads.Atomic{Bool},
-    layout::Dict{Symbol, Any},
-    controller::Dict{Symbol, Any};
+        layout::Dict{Symbol, Any},
+        controller::Dict{Symbol, Any};
         initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
         protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
-        dt::Float64 = 0.0000001
+    paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
+        dt::Float64 = 0.0000001,
+        use_partial_fit::Bool = true,
+        target_frequency::Float64 = 60.0
     )
     try
         @info "Playback worker started on thread $(threadid())"
@@ -570,8 +509,15 @@ function start_playback(
 
         # Initial parameter guess for lifetime fitting
         params = copy(initial_guess)
+        full_fit_params = copy(initial_guess)
         n = UInt32(0)
         first_fit_pending = true
+        partial_fit_period = 10
+        partial_fit_enabled = use_partial_fit && length(initial_guess) == 3
+
+        if use_partial_fit && !partial_fit_enabled
+            @warn "Partial fit mode is only supported for 3-parameter playback fits; falling back to full fits."
+        end
 
         # PID state for lifetime control
         fallback_setpoint_ns = 4.0
@@ -582,10 +528,16 @@ function start_playback(
         pid_prev_raw_lifetime = NaN
         pid_scale_est = 1.0e-6
 
-        target_period_ns = round(Int, 1e9 / 600.0)
+        target_period_ns = round(Int, 1e9 / target_frequency)
         next_analysis_ns = time_ns()
 
         while running[]
+            if paused !== nothing && paused[]
+                next_analysis_ns = time_ns() + target_period_ns
+                sleep(min(dt, 0.02))
+                continue
+            end
+
             now_ns = time_ns()
             if now_ns < next_analysis_ns
                 remaining_s = (next_analysis_ns - now_ns) / 1e9
@@ -636,11 +588,24 @@ function start_playback(
             final_vector = sum_vector ./ bin
 
             # Fit every processed frame/file.
-            params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution, first_fit=first_fit_pending)
-            first_fit_pending = false
+            fit_index = Int(n) + 1
+            use_full_fit = !partial_fit_enabled || fit_index == 1 || mod1(fit_index, partial_fit_period) == 1
 
-            if !isnan(params_raw[1])
-                params = params_raw
+            if use_full_fit
+                params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=full_fit_params, histogram_resolution=histogram_resolution, first_fit=first_fit_pending)
+                first_fit_pending = false
+
+                if !isnan(params_raw[1])
+                    params = params_raw
+                    full_fit_params = params_raw
+                end
+            else
+                fixed_parameters = Float64[NaN, NaN, full_fit_params[3]]
+                params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution, fixed_parameters=fixed_parameters, first_fit=false)
+
+                if !isnan(params_raw[1])
+                    params = params_raw
+                end
             end
 
             histogram = data[2]
@@ -651,16 +616,16 @@ function start_playback(
             timestamps += frame_time
             n += 1
 
-            current_protocol = _resolve_protocol_config(protocol)
+            current_protocol = resolve_protocol_config(protocol)
             setpoint_ns = if current_protocol === nothing || !Bool(get(current_protocol, :active, false))
                 fallback_setpoint_ns
             else
                 protocol_setpoint_at_timestamp(current_protocol, timestamps)
             end
 
-            smooth_level = _layout_smoothing_level(layout)
+            smooth_level = layout_smoothing_level(layout)
             lifetime_for_pid, pid_prev_smooth_lifetime, pid_prev_raw_lifetime, pid_scale_est =
-                _update_pid_lifetime_kalman(
+                update_pid_lifetime_kalman(
                     lifetime,
                     pid_prev_smooth_lifetime,
                     pid_prev_raw_lifetime,
@@ -758,12 +723,13 @@ If no file exists yet, or if the newest file was already processed, it waits
 until a new file appears.
 """
 function start_realtime(
-    ch::Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}},
+        ch::Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}},
         running::Threads.Atomic{Bool},
-    layout::Dict{Symbol, Any},
-    controller::Dict{Symbol, Any};
+        layout::Dict{Symbol, Any},
+        controller::Dict{Symbol, Any};
         initial_guess::Vector{Float64} = [3.0, 0.5, 0.5, 0.0, 5.0e-5],
         protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
+        paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         dt::Float64 = 0.0001,
         poll_interval_s::Float64 = 0.1
     )
@@ -817,6 +783,11 @@ function start_realtime(
         end
 
         while running[]
+            if paused !== nothing && paused[]
+                sleep(min(dt, 0.05))
+                continue
+            end
+
             now_t = time()
             if now_t < next_scan_at
                 sleep(min(dt, max(1e-4, next_scan_at - now_t)))
@@ -924,16 +895,16 @@ function start_realtime(
             timestamps += frame_time
             n += 1
 
-            current_protocol = _resolve_protocol_config(protocol)
+            current_protocol = resolve_protocol_config(protocol)
             setpoint_ns = if current_protocol === nothing || !Bool(get(current_protocol, :active, false))
                 fallback_setpoint_ns
             else
                 protocol_setpoint_at_timestamp(current_protocol, timestamps)
             end
 
-            smooth_level = _layout_smoothing_level(layout)
+            smooth_level = layout_smoothing_level(layout)
             lifetime_for_pid, pid_prev_smooth_lifetime, pid_prev_raw_lifetime, pid_scale_est =
-                _update_pid_lifetime_kalman(
+                update_pid_lifetime_kalman(
                     lifetime,
                     pid_prev_smooth_lifetime,
                     pid_prev_raw_lifetime,
@@ -1013,6 +984,290 @@ function start_realtime(
             # Ignore if already closed
         end
         @info "Real-time worker finished"
+    end
+
+    return nothing
+end
+
+"""
+    start_save(ch::Channel, running::Threads.Atomic{Bool}, layout::Dict;
+                                   dt::Float64=0.05)
+
+Worker task for Save mode.
+
+Processes all `.sdt` files in `DATA_ROOT_PATH` once, without publishing
+intermediate GUI updates. After the full folder is processed, it pushes all
+results to the channel so the UI can display the complete run.
+"""
+function start_save(
+        ch::Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}},
+        running::Threads.Atomic{Bool},
+        layout::Dict{Symbol, Any},
+        controller::Dict{Symbol, Any};
+        initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
+        protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
+    paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
+        dt::Float64 = 0.0000001,
+    use_partial_fit::Bool = true,
+    progress_cb::Union{Nothing, Function} = nothing
+    )
+    try
+        @info "Save worker started on thread $(threadid())"
+
+        @info "Checking IRF status: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
+        if irf === nothing || tcspc_window_size === nothing
+            @error "IRF not loaded - cannot start data processing. Please load an IRF file first."
+            @error "IRF status: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
+            return
+        end
+
+        path = get_data_root_path()
+        if !isdir(path)
+            @error "Data folder not found: $path"
+            return
+        end
+
+        all_entries = readdir(path; join=true)
+        filepaths = sort(filter(f -> isfile(f) && endswith(lowercase(f), ".sdt"), all_entries))
+        nb_files = length(filepaths)
+
+        if nb_files == 0
+            @error "No .sdt files found in $path"
+            return
+        end
+
+        timestamps = 0.0
+        vectors = zeros(100, DEFAULT_HISTOGRAM_RESOLUTION)
+        n_vectors = 100
+
+        sum_vector = zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)
+        last_bin = 1
+        current_count = 0
+
+        params = copy(initial_guess)
+        full_fit_params = copy(initial_guess)
+        n = UInt32(0)
+        first_fit_pending = true
+        partial_fit_period = 10
+        partial_fit_enabled = use_partial_fit && length(initial_guess) == 3
+
+        if use_partial_fit && !partial_fit_enabled
+            @warn "Partial fit mode is only supported for 3-parameter save fits; falling back to full fits."
+        end
+
+        fallback_setpoint_ns = 4.0
+        I_error = 0.0
+        old_error = 0.0
+        D_error = 0.0
+        pid_prev_smooth_lifetime = NaN
+        pid_prev_raw_lifetime = NaN
+        pid_scale_est = 1.0e-6
+
+        buffered_samples = Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}[]
+        last_progress_pct = -1
+
+        if progress_cb !== nothing
+            try
+                progress_cb(0)
+                last_progress_pct = 0
+            catch e
+                @warn "Save progress callback failed" error=string(e)
+                progress_cb = nothing
+            end
+        end
+
+        for filepath in filepaths
+            if !running[]
+                break
+            end
+
+            while running[] && paused !== nothing && paused[]
+                sleep(min(dt, 0.05))
+            end
+
+            if !running[]
+                break
+            end
+
+            vector, histogram_resolution, frame_time = open_SDT_file(filepath)
+
+            pos = mod1(n+1, n_vectors)
+            vectors[pos, 1:histogram_resolution] .= vector
+
+            bin = get(layout, :binning, 1)
+
+            if bin != last_bin
+                effective_bin = min(bin, current_count + 1)
+                idxs = mod1.(pos .- (0:effective_bin-1), n_vectors)
+                fill!(sum_vector, 0.0)
+                @inbounds for idx in idxs
+                    @views sum_vector[1:histogram_resolution] .+= vectors[idx, 1:histogram_resolution]
+                end
+                last_bin = bin
+                current_count = effective_bin
+            else
+                if current_count < bin
+                    sum_vector .+= vector
+                    current_count += 1
+                else
+                    old_pos = mod1(pos - bin, n_vectors)
+                    sum_vector .-= vectors[old_pos, 1:histogram_resolution]
+                    sum_vector .+= vector
+                end
+            end
+
+            final_vector = sum_vector ./ bin
+
+            fit_index = Int(n) + 1
+            use_full_fit = !partial_fit_enabled || fit_index == 1 || mod1(fit_index, partial_fit_period) == 1
+
+            if use_full_fit
+                params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=full_fit_params, histogram_resolution=histogram_resolution, first_fit=first_fit_pending)
+                first_fit_pending = false
+
+                if !isnan(params_raw[1])
+                    params = params_raw
+                    full_fit_params = params_raw
+                end
+            else
+                fixed_parameters = Float64[NaN, NaN, full_fit_params[3]]
+                params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution, fixed_parameters=fixed_parameters, first_fit=false)
+
+                if !isnan(params_raw[1])
+                    params = params_raw
+                end
+            end
+
+            histogram = data[2]
+            photons = sum(histogram)
+            fit = conv_irf_data(data[1], Tuple(params), irf; histogram_resolution=histogram_resolution)*photons
+            lifetime = params[1]
+            concentration = (9.5 / lifetime - 1)/0.025
+            timestamps += frame_time
+            n += 1
+
+            current_protocol = resolve_protocol_config(protocol)
+            setpoint_ns = if current_protocol === nothing || !Bool(get(current_protocol, :active, false))
+                fallback_setpoint_ns
+            else
+                protocol_setpoint_at_timestamp(current_protocol, timestamps)
+            end
+
+            smooth_level = layout_smoothing_level(layout)
+            lifetime_for_pid, pid_prev_smooth_lifetime, pid_prev_raw_lifetime, pid_scale_est =
+                update_pid_lifetime_kalman(
+                    lifetime,
+                    pid_prev_smooth_lifetime,
+                    pid_prev_raw_lifetime,
+                    pid_scale_est,
+                    smooth_level
+                )
+
+            command1 = NaN
+            command2 = NaN
+
+            if !isnan(setpoint_ns)
+                dt_sample = max(Float64(frame_time), eps(Float64))
+                P_error = setpoint_ns - lifetime_for_pid
+                I_error += P_error * dt_sample
+                D_error = (P_error - old_error) / dt_sample
+                old_error = P_error
+
+                p1 = Float64(get(controller, :P1, 0.0))
+                i1 = Float64(get(controller, :I1, 0.0))
+                d1 = Float64(get(controller, :D1, 0.0))
+                p2 = Float64(get(controller, :P2, 0.0))
+                i2 = Float64(get(controller, :I2, 0.0))
+                d2 = Float64(get(controller, :D2, 0.0))
+
+                command1 = p1*P_error + i1*I_error + d1*D_error
+                command2 = p2*P_error + i2*I_error + d2*D_error
+
+                if Bool(get(controller, :ch1_inv, false))
+                    command1 = -command1
+                end
+
+                if Bool(get(controller, :ch2_inv, false))
+                    command2 = -command2
+                end
+
+                if Bool(get(controller, :ch1_on, false))
+                    command1 = clamp(command1, 0.0, 100.0)
+                else
+                    command1 = NaN
+                end
+
+                if Bool(get(controller, :ch2_on, false))
+                    command2 = clamp(command2, 0.0, 100.0)
+                else
+                    command2 = NaN
+                end
+            else
+                I_error = 0.0
+                old_error = 0.0
+                D_error = 0.0
+            end
+
+            push!(buffered_samples, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n))
+
+            if progress_cb !== nothing
+                progress_pct = clamp(floor(Int, (Int(n) * 100) / nb_files), 0, 100)
+                if progress_pct > last_progress_pct
+                    for pct in (last_progress_pct + 1):progress_pct
+                        try
+                            progress_cb(pct)
+                        catch e
+                            @warn "Save progress callback failed" error=string(e)
+                            progress_cb = nothing
+                            break
+                        end
+                    end
+                    last_progress_pct = progress_pct
+                end
+            end
+
+            if dt > 0.0
+                sleep(dt)
+            end
+        end
+
+        if running[] && isopen(ch)
+            @info "Save mode completed processing; publishing buffered samples" count=length(buffered_samples)
+            for sample in buffered_samples
+                if !running[] || !isopen(ch)
+                    break
+                end
+
+                while running[] && paused !== nothing && paused[]
+                    sleep(min(dt, 0.05))
+                end
+
+                if !running[] || !isopen(ch)
+                    break
+                end
+
+                try
+                    put!(ch, sample)
+                catch e
+                    if isa(e, InvalidStateException)
+                        break
+                    else
+                        rethrow()
+                    end
+                end
+            end
+        end
+    catch e
+        @error "Save worker error" exception=e
+        rethrow()
+    finally
+        running[] = false
+        try
+            close(ch)
+        catch
+            # Ignore if already closed
+        end
+        @info "Save worker finished"
     end
 
     return nothing

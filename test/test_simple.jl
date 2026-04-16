@@ -4,7 +4,7 @@ println("Testing IRF and data processing...")
 
 # Load IRF
 global irf = get_irf()
-global irf_bin_size = _compute_irf_bin_size(irf)
+global irf_bin_size = compute_irf_bin_size(irf)
 global tcspc_window_size = size(irf, 1) * irf_bin_size
 println("IRF loaded: bin_size=$irf_bin_size, window_size=$tcspc_window_size")
 

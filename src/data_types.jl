@@ -97,6 +97,7 @@ Fields:
 mutable struct AppRun
     channel::Union{Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}}, Nothing}
     running::Threads.Atomic{Bool}
+    paused::Threads.Atomic{Bool}
     worker_task::Union{Task, Nothing}
     consumer_task::Union{Task, Nothing}
     autoscaler_task::Union{Task, Nothing}
@@ -115,6 +116,7 @@ mutable struct AppRun
     command2::Observable{Vector{Float64}}
     timestamps::Observable{Vector{Float64}}
     i::Observable{UInt32}
+    save_progress::Observable{Float64}
     hist_time::Observable{Vector{Int64}}
     protocol::Observable{Dict{Symbol, Any}}
 end
@@ -132,6 +134,7 @@ function AppRun()
     default_protocol = get_default_protocol()
     return AppRun(
         nothing,
+        Threads.Atomic{Bool}(false),
         Threads.Atomic{Bool}(false),
         nothing,
         nothing,
@@ -151,6 +154,7 @@ function AppRun()
         Observable(Float64[]),
         Observable(Float64[]),
         Observable{UInt32}(0),
+        Observable(NaN),
         Observable(collect(1:DEFAULT_HISTOGRAM_RESOLUTION)),
         Observable(Dict{Symbol, Any}(
             :active => Bool(get(default_protocol, :active, false)),

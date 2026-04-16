@@ -70,7 +70,7 @@ end
 
 function init_numeric_context!()
     global irf = get_irf()
-    global irf_bin_size = _compute_irf_bin_size(irf)
+    global irf_bin_size = compute_irf_bin_size(irf)
     global tcspc_window_size = round(irf[end, 1] + irf[2, 1], sigdigits=4)
 
     n = size(irf, 1)

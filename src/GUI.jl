@@ -18,35 +18,6 @@ using GLMakie
 using Base.Threads
 using Dates
 
-
-"""
-    cached_basename(cache_path::AbstractString; fallback_path::Union{Nothing, AbstractString}=nothing)::String
-
-Read a cached full path and return only the filename/folder name for UI display.
-Falls back to `fallback_path` when cache is missing or empty.
-"""
-function cached_basename(cache_path::AbstractString; fallback_path::Union{Nothing, AbstractString}=nothing)::String
-    path_value = ""
-
-    if isfile(cache_path)
-        path_value = try
-            strip(open(f -> read(f, String), cache_path))
-        catch
-            ""
-        end
-    end
-
-    if isempty(path_value) && fallback_path !== nothing
-        path_value = strip(String(fallback_path))
-    end
-
-    if isempty(path_value)
-        return ""
-    end
-
-    return splitpath(path_value)[end]
-end
-
 """
     port_options(no_port_label::AbstractString)::Vector{String}
 
@@ -144,6 +115,40 @@ function make_gui(app, app_run)
     plot_1 = Axis(left_grid[2, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 1\n($(app.layout[:plot1]))"))...)
     plot_2 = Axis(left_grid[3, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 2\n($(app.layout[:plot2]))"))...)
 
+    save_progress_axis = Axis(left_grid[4, 2:4]; PROGRESS_BAR_ATTRS...)
+    hidedecorations!(save_progress_axis)
+    xlims!(save_progress_axis, 0.0, 100.0)
+    ylims!(save_progress_axis, 0.0, 20.0)
+
+    save_outline_color = lift(app_run.save_progress) do p
+        return isfinite(Float64(p)) ? COLOR_5 : RGBAf(1.0, 1.0, 1.0, 0.0)
+    end
+    lines!(save_progress_axis, [0.0, 100.0, 100.0, 0.0, 0.0], [0.0, 0.0, 20.0, 20.0, 0.0], color=save_outline_color, linewidth=1.5)
+
+    save_fill_width = lift(app_run.save_progress, save_progress_axis.scene.viewport) do p, viewport
+        width_units = Float64(viewport.widths[1])
+        height_units = Float64(viewport.widths[2])
+
+        if !isfinite(width_units) || width_units <= 0.0 || !isfinite(height_units) || height_units <= 0.0
+            return 0.0
+        end
+
+        # Convert one-bar-height in viewport units to x-axis data units so 0% starts as a square.
+        min_width_units = clamp(height_units * (100.0 / width_units), 0.0, 100.0)
+
+        if !isfinite(Float64(p))
+            return min_width_units
+        end
+
+        clamped = clamp(Float64(p), 0.0, 100.0)
+        return min_width_units + (100.0 - min_width_units) * (clamped / 100.0)
+    end
+
+    save_fill_color = lift(app_run.save_progress) do p
+        return isfinite(Float64(p)) ? COLOR_5 : RGBAf(COLOR_5.r, COLOR_5.g, COLOR_5.b, 0.0)
+    end
+    vspan!(save_progress_axis, 0.0, save_fill_width, color=save_fill_color)
+
     hspan!(counts_axis, 1, app_run.counts, color = COLOR_4)
 
     ################    RIGHT GRID    ################
@@ -167,7 +172,7 @@ function make_gui(app, app_run)
 
     label = Label(button_grid[5, 1], "Frequency: -- Hz\nFile: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
 
-    mode = Menu(button_grid[6, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime"]))...)
+    mode = Menu(button_grid[6, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime", "Save"]))...)
     lifetimes = Menu(button_grid[6, 2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["1 lifetime", "2 lifetimes", "3 lifetimes"]))...)
 
     Box(button_grid[2, 1:2]; PATH_BOX_ATTRS...)
@@ -186,6 +191,7 @@ function make_gui(app, app_run)
     colgap!(panelbtn_grid, -1)
     colsize!(left_grid, 1, 32)
     colsize!(left_grid, 5, 32)
+    rowsize!(left_grid, 4, 20)
 
     blocks = Dict{Symbol, Any}(
         :top_grid      => top_grid,
@@ -209,6 +215,7 @@ function make_gui(app, app_run)
         :counts_axis   => counts_axis,
         :plot_1_axis   => plot_1,
         :plot_2_axis   => plot_2,
+        :save_progress_axis => save_progress_axis,
         :info_label    => label
     )
 

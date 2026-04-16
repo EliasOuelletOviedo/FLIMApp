@@ -12,70 +12,6 @@ Implements all interactive behavior:
 Uses Observables for reactive updates and on(...) bindings for event attachment.
 """
 
-"""
-    _pick_non_empty_path(picker::Function; error_msg::AbstractString)::Union{String, Nothing}
-
-Execute a native picker and return a non-empty selected path, or `nothing`.
-"""
-function _pick_non_empty_path(picker::Function; error_msg::AbstractString)::Union{String, Nothing}
-    selected = try
-        picker()
-    catch e
-        @warn String(error_msg) error=string(e)
-        nothing
-    end
-
-    if selected === nothing
-        return nothing
-    end
-
-    path = String(selected)
-    return isempty(strip(path)) ? nothing : path
-end
-
-"""
-    open_irf_dialog()::Union{String, Nothing}
-
-Open a file picker for IRF selection.
-"""
-function open_irf_dialog()::Union{String, Nothing}
-    return _pick_non_empty_path(pick_file; error_msg="IRF file dialog failed")
-end
-
-"""
-    open_folder_dialog()::Union{String, Nothing}
-
-Open a folder picker for data-root selection.
-"""
-function open_folder_dialog()::Union{String, Nothing}
-    return _pick_non_empty_path(pick_folder; error_msg="Folder dialog failed")
-end
-
-"""
-    set_path_cache!(cache_path::AbstractString, path_value::AbstractString)
-
-Write an absolute path value to the provided cache file.
-"""
-function set_path_cache!(cache_path::AbstractString, path_value::AbstractString)
-    mkpath(dirname(cache_path))
-    open(cache_path, "w") do io
-        write(io, String(path_value))
-    end
-    return nothing
-end
-
-"""
-    update_path_textbox!(textbox::Textbox, full_path::AbstractString)
-
-Update a path textbox with only the basename for display.
-"""
-function update_path_textbox!(textbox::Textbox, full_path::AbstractString)
-    short_name = basename(String(full_path))
-    textbox.displayed_string[] = short_name
-    textbox.stored_string[] = short_name
-    return nothing
-end
-
 function make_handlers(app, app_run, blocks)
     panel = blocks[:panel_buttons]
     panel_grid = blocks[:panel_grid]
@@ -322,6 +258,13 @@ function make_handlers(app, app_run, blocks)
                             lines!(axis, app_run.hist_time, lift(f -> normalized_irf_from_fit(f), app_run.fit), color=Makie.wong_colors()[3])
                         end
 
+                        if !app_run.running[]
+                            autolimits!(axis)
+                            lim = axis.finallimits[]
+                            xmax = lim.origin[1] + lim.widths[1]
+                            xlims!(axis, 0.0, max(Float64(xmax), 0.0))
+                        end
+
                         # if selection == "Histogram"
                         #     plt = lines!(plot, app_run.hist_time, app_run.histogram)
                         # elseif selection == "Photon counts"
@@ -470,12 +413,86 @@ function make_handlers(app, app_run, blocks)
         end
     end
 
+    function update_start_button_label!()
+        if !app_run.running[]
+            blocks[:start_button].label[] = "START"
+        elseif app_run.paused[]
+            blocks[:start_button].label[] = "CONTINUE"
+        else
+            blocks[:start_button].label[] = "PAUSE"
+        end
+        return nothing
+    end
+
+    function update_stop_button_label!()
+        if app_run.running[] && !app_run.paused[]
+            blocks[:stop_button].label[] = "STOP"
+        else
+            blocks[:stop_button].label[] = "CLEAR"
+        end
+        return nothing
+    end
+
+    function clear_runtime_plots!(app_run)
+        empty!(app_run.photons[])
+        empty!(app_run.lifetime[])
+        empty!(app_run.lifetime_smooth[])
+        empty!(app_run.protocol_setpoint[])
+        empty!(app_run.concentration[])
+        empty!(app_run.command1[])
+        empty!(app_run.command2[])
+        empty!(app_run.timestamps[])
+
+        n_hist = length(app_run.hist_time[])
+        app_run.histogram[] = fill(NaN, n_hist)
+        app_run.fit[] = fill(NaN, n_hist)
+        app_run.counts[] = 0.0
+        app_run.i[] = 0
+        app_run.save_progress[] = NaN
+
+        notify(app_run.histogram)
+        notify(app_run.fit)
+        notify(app_run.photons)
+        notify(app_run.lifetime)
+        notify(app_run.lifetime_smooth)
+        notify(app_run.protocol_setpoint)
+        notify(app_run.concentration)
+        notify(app_run.command1)
+        notify(app_run.command2)
+        notify(app_run.timestamps)
+        notify(app_run.counts)
+        notify(app_run.i)
+        return nothing
+    end
+
+    update_start_button_label!()
+    update_stop_button_label!()
+
     on(blocks[:start_button].clicks) do _
-        start_pressed(app, app_run, blocks)
+        if !app_run.running[]
+            start_pressed(app, app_run, blocks)
+        elseif app_run.paused[]
+            resume_pressed(app_run)
+        else
+            pause_pressed(app_run)
+        end
+
+        update_start_button_label!()
+        update_stop_button_label!()
     end
 
     on(blocks[:stop_button].clicks) do _
-        stop_pressed(app_run)
+        if app_run.running[] && !app_run.paused[]
+            stop_pressed(app_run)
+        else
+            if app_run.running[]
+                stop_pressed(app_run)
+            end
+            clear_runtime_plots!(app_run)
+        end
+
+        update_start_button_label!()
+        update_stop_button_label!()
     end
 
     on(blocks[:irf_button].clicks) do _

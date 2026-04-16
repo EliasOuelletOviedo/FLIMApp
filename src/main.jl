@@ -36,6 +36,12 @@ include("data_types.jl")
 # GUI themes (colors and styling)
 include("gui_themes.jl")
 
+# Shared UI path and picker helpers
+include("path_utils.jl")
+
+# Shared smoothing helpers used by runtime and workers
+include("smoothing.jl")
+
 # Analysis algorithms (lifetime fitting)
 include("lifetime_analysis2.jl")
 
@@ -108,13 +114,13 @@ function load_state(path::String=STATE_FILE_PATH)
 end
 
 """
-    _merge_missing_layout_defaults!(app_state::AppState)::Bool
+    merge_layout_defaults!(app_state::AppState)::Bool
 
 Ensure layout defaults exist in persisted state and perform small key migrations.
 
 Returns `true` when the state was changed.
 """
-function _merge_missing_layout_defaults!(app_state::AppState)::Bool
+function merge_layout_defaults!(app_state::AppState)::Bool
     defaults = get_default_layout()
     has_updates = false
 
@@ -134,12 +140,12 @@ function _merge_missing_layout_defaults!(app_state::AppState)::Bool
 end
 
 """
-    _load_or_create_state()::AppState
+    load_or_create_state()::AppState
 
 Load persisted state when available, otherwise create a new default state.
 Also applies small state migrations when needed.
 """
-function _load_or_create_state()::AppState
+function load_or_create_state()::AppState
     app_state = load_state()
 
     if app_state === nothing
@@ -151,7 +157,7 @@ function _load_or_create_state()::AppState
 
     @info "Loaded saved state" theme=app_state.dark ? "dark" : "light"
 
-    if _merge_missing_layout_defaults!(app_state)
+    if merge_layout_defaults!(app_state)
         save_state(app_state)
     end
 
@@ -159,12 +165,12 @@ function _load_or_create_state()::AppState
 end
 
 """
-    _initialize_irf_runtime!()
+    init_irf_runtime!()
 
 Load IRF-related globals used by lifetime fitting and FFT-based operations.
 Falls back to `nothing` values when loading fails.
 """
-function _initialize_irf_runtime!()
+function init_irf_runtime!()
     try
         global irf = get_irf()
         global irf_bin_size = get_irf_bin_size()
@@ -206,13 +212,13 @@ function run_app()
     initialize_directories()
     
     # Load or create persistent state
-    app_state = _load_or_create_state()
+    app_state = load_or_create_state()
     
     # Initialize runtime state
     runtime_state = AppRun()
     
     # Load IRF for lifetime analysis
-    _initialize_irf_runtime!()
+    init_irf_runtime!()
     
     # Create GUI
     @info "Creating GUI..."

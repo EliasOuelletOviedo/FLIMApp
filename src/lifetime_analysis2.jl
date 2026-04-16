@@ -20,11 +20,11 @@ const IRF_CHANNEL_CACHE = Dict{Int, Matrix{Float64}}()
 # Helpers IRF
 # -----------------------------------------------------------------------------
 
-function _reshape_to_vec_no_python(file::Vector{UInt16}, num_rows::Int)::Vector{Float64}
+function reshape_to_vec_no_python(file::Vector{UInt16}, num_rows::Int)::Vector{Float64}
     return sum(reshape(file, (num_rows, :)), dims=2)[:, 1]
 end
 
-function _open_sdt_file_no_python(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
+function open_sdt_file_no_python(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
     open(filepath, "r") do io
         seek(io, 14)
         header = read!(io, Vector{UInt8}(undef, 12))
@@ -57,13 +57,13 @@ function _open_sdt_file_no_python(filepath::String)::Tuple{Vector{UInt16}, Int, 
         file_data = Vector{UInt8}(undef, shift_2)
         read!(zip_file, file_data)
 
-        vector = _reshape_to_vec_no_python(reinterpret(UInt16, file_data), histogram_resolution)
+        vector = reshape_to_vec_no_python(reinterpret(UInt16, file_data), histogram_resolution)
         return convert.(UInt16, vector), histogram_resolution, time
     end
 end
 
-function _irf_from_sdt_without_python(filepath::AbstractString; channel::Int=1)::Matrix{Float64}
-    counts_raw, histogram_resolution, time = _open_sdt_file_no_python(String(filepath))
+function irf_from_sdt_without_python(filepath::AbstractString; channel::Int=1)::Matrix{Float64}
+    counts_raw, histogram_resolution, time = open_sdt_file_no_python(String(filepath))
 
     counts = Float64.(counts_raw)
     if isempty(counts)
@@ -107,10 +107,10 @@ function get_irf(; channel=1)
         end
     end
 
-    return _irf_from_sdt_without_python(filepath; channel=channel)
+    return irf_from_sdt_without_python(filepath; channel=channel)
 end
 
-function _compute_irf_bin_size(irf_data::Matrix{Float64})::Float64
+function compute_irf_bin_size(irf_data::Matrix{Float64})::Float64
     h = Inf
     for i in 2:size(irf_data, 1)
         dt = irf_data[i, 1] - irf_data[i-1, 1]
@@ -123,7 +123,7 @@ end
 
 function get_irf_bin_size()
     data_irf = get_irf()
-    return _compute_irf_bin_size(data_irf)
+    return compute_irf_bin_size(data_irf)
 end
 
 # -----------------------------------------------------------------------------
@@ -141,7 +141,7 @@ var"irf_bin_size" = nothing
 var"tcspc_window_size" = nothing
 var"irf_cache_source_id" = UInt(0)
 
-function _ensure_fft_plans(size::Int)
+function ensure_fft_plans(size::Int)
     if fft_plan_size != size
         global fft_plan = plan_fft(zeros(Float64, size))
         global ifft_plan = plan_ifft(zeros(Float64, size))
@@ -149,7 +149,7 @@ function _ensure_fft_plans(size::Int)
     end
 end
 
-function _get_x_data(total_channels::Int, bin_size::Float64)::Vector{Float64}
+function get_x_data(total_channels::Int, bin_size::Float64)::Vector{Float64}
     key = (total_channels, bin_size)
     cached = get(X_DATA_CACHE, key, nothing)
     if cached !== nothing
@@ -161,7 +161,7 @@ function _get_x_data(total_channels::Int, bin_size::Float64)::Vector{Float64}
     return x_data
 end
 
-function _get_gating_function(total_channels::Int, low_cut_idx::Int, high_cut_idx::Int)::Vector{UInt8}
+function get_gating_function(total_channels::Int, low_cut_idx::Int, high_cut_idx::Int)::Vector{UInt8}
     if total_channels <= 0
         return UInt8[]
     end
@@ -187,7 +187,7 @@ function _get_gating_function(total_channels::Int, low_cut_idx::Int, high_cut_id
     return gating
 end
 
-function _get_irf_for_channels(total_channels::Int)::Matrix{Float64}
+function get_irf_for_channels(total_channels::Int)::Matrix{Float64}
     if size(irf, 1) == total_channels
         return irf
     end
@@ -206,7 +206,7 @@ function _get_irf_for_channels(total_channels::Int)::Matrix{Float64}
     return new_irf
 end
 
-function _fit_optim_options(number_of_lifetimes::Int, first_fit::Bool)
+function fit_optim_options(number_of_lifetimes::Int, first_fit::Bool)
     if number_of_lifetimes == 1
         if first_fit
             return Optim.Options(outer_iterations=14, iterations=64, x_abstol=5e-7, outer_x_abstol=5e-7, f_reltol=1e-5, outer_f_reltol=1e-4, f_calls_limit=280, time_limit=0.060, allow_f_increases=true)
@@ -225,7 +225,7 @@ function _fit_optim_options(number_of_lifetimes::Int, first_fit::Bool)
     return Optim.Options(outer_iterations=4, iterations=16, f_reltol=1e-4, outer_f_reltol=1e-3, x_abstol=1e-6, outer_x_abstol=1e-6, f_calls_limit=80, time_limit=0.012)
 end
 
-function _clamp_initial_point!(params_copy::Vector{Float64}, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64}; eps=1e-6)
+function clamp_initial_point!(params_copy::Vector{Float64}, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64}; eps=1e-6)
     @inbounds for i in eachindex(params_copy)
         lo = lower_bounds[i] + eps
         hi = upper_bounds[i] - eps
@@ -238,12 +238,12 @@ function _clamp_initial_point!(params_copy::Vector{Float64}, lower_bounds::Vecto
     return params_copy
 end
 
-function _ensure_runtime_state!()
+function ensure_runtime_state!()
     if irf === nothing
         error("IRF not loaded. Define global irf = get_irf() before calling vec_to_lifetime.")
     end
     if irf_bin_size === nothing || !isfinite(irf_bin_size)
-        error("irf_bin_size not initialized. Define global irf_bin_size = _compute_irf_bin_size(irf).")
+        error("irf_bin_size not initialized. Define global irf_bin_size = compute_irf_bin_size(irf).")
     end
     if tcspc_window_size === nothing || !isfinite(tcspc_window_size) || tcspc_window_size <= 0
         error("tcspc_window_size not initialized. Define global tcspc_window_size from irf.")
@@ -255,7 +255,7 @@ function _ensure_runtime_state!()
         global irf_cache_source_id = src_id
     end
 
-    _ensure_fft_plans(size(irf, 1))
+    ensure_fft_plans(size(irf, 1))
     return nothing
 end
 
@@ -268,7 +268,7 @@ function convolve(irf_vec::Vector{Float64}, decay::Vector{Float64}; histogram_re
         error("IRF and decay vectors must have same length: $(length(irf_vec)) vs $(length(decay))")
     end
 
-    _ensure_fft_plans(length(irf_vec))
+    ensure_fft_plans(length(irf_vec))
     y = real.(ifft_plan * ((fft_plan * irf_vec) .* (fft_plan * decay)))
 
     lo = clamp(tcspc_low_cut_index, 1, histogram_resolution)
@@ -452,14 +452,14 @@ function MLE_iterative_reconvolution_jl(data_irf::Matrix{Float64}, data_xy::Vect
         deleteat!(upper_bounds, fixed_indices)
     end
 
-    _clamp_initial_point!(params_copy, lower_bounds, upper_bounds)
+    clamp_initial_point!(params_copy, lower_bounds, upper_bounds)
 
     if number_of_lifetimes in (1, 2)
-        fit = Optim.optimize(x -> MLE_model_func(x, fixed_parameters, x_data, y_data, data_irf, gating_function, histogram_resolution, number_of_previous_pulses, laser_pulse_period, tcspc_low_cut_index, tcspc_high_cut_index), lower_bounds, upper_bounds, params_copy, Fminbox(LBFGS(linesearch=LineSearches.BackTracking())), _fit_optim_options(number_of_lifetimes, first_fit))
+        fit = Optim.optimize(x -> MLE_model_func(x, fixed_parameters, x_data, y_data, data_irf, gating_function, histogram_resolution, number_of_previous_pulses, laser_pulse_period, tcspc_low_cut_index, tcspc_high_cut_index), lower_bounds, upper_bounds, params_copy, Fminbox(LBFGS(linesearch=LineSearches.BackTracking())), fit_optim_options(number_of_lifetimes, first_fit))
     else
         lower_c, upper_c = Float64[1.0], Float64[1.0]
         constraint = TwiceDifferentiableConstraints(fit_3lifetime_fraction_constraints_jl!, lower_bounds, upper_bounds, lower_c, upper_c)
-        fit = Optim.optimize(x -> MLE_model_func(x, fixed_parameters, x_data, y_data, data_irf, gating_function, histogram_resolution, number_of_previous_pulses, laser_pulse_period, tcspc_low_cut_index, tcspc_high_cut_index), constraint, params_copy, IPNewton(), _fit_optim_options(number_of_lifetimes, first_fit))
+        fit = Optim.optimize(x -> MLE_model_func(x, fixed_parameters, x_data, y_data, data_irf, gating_function, histogram_resolution, number_of_previous_pulses, laser_pulse_period, tcspc_low_cut_index, tcspc_high_cut_index), constraint, params_copy, IPNewton(), fit_optim_options(number_of_lifetimes, first_fit))
     end
 
     res = Optim.minimizer(fit)
@@ -518,7 +518,7 @@ end
 # -----------------------------------------------------------------------------
 
 function vec_to_lifetime(x; bin_size=0.04886091184430619, hist_size_threshold=500, method="MLE", guess=[3.0, 1.0, 1e-6], laser_pulse_period=12.5, histogram_resolution=256, number_of_previous_pulses=5, tac_low_cut=5.0980392, tac_high_cut=94.901962, IRF_delay=NaN, IRF_width=NaN, IRF_cutoff=NaN, lifetime_estimation=NaN, standard_deviation_estimation=NaN, fixed_parameters=Float64[NaN, NaN, NaN], use_lifetime_estimation_as_guess::Bool=true, first_fit::Bool=false)
-    _ensure_runtime_state!()
+    ensure_runtime_state!()
 
     requested_channels = round(Int, laser_pulse_period * histogram_resolution / tcspc_window_size)
     total_channels = requested_channels
@@ -541,10 +541,10 @@ function vec_to_lifetime(x; bin_size=0.04886091184430619, hist_size_threshold=50
         x_vec = x_vec[1:total_channels]
     end
 
-    _ensure_fft_plans(total_channels)
-    irf_local = _get_irf_for_channels(total_channels)
+    ensure_fft_plans(total_channels)
+    irf_local = get_irf_for_channels(total_channels)
 
-    x_data = _get_x_data(total_channels, Float64(bin_size))
+    x_data = get_x_data(total_channels, Float64(bin_size))
 
     if sum(x_vec) < hist_size_threshold
         if method == "Estimate"
@@ -573,7 +573,7 @@ function vec_to_lifetime(x; bin_size=0.04886091184430619, hist_size_threshold=50
         tcspc_high_cut_index = 0
     end
 
-    gating_function = _get_gating_function(total_channels, low_cut_index, high_cut_start)
+    gating_function = get_gating_function(total_channels, low_cut_index, high_cut_start)
 
     data_xy = [x_data, x_vec]
 

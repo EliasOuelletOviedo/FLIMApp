@@ -345,6 +345,25 @@ AXIS_COUNTS_ATTRS = Dict{Symbol, Any}(
     # :zoombutton         => true,
 )
 
+PROGRESS_BAR_ATTRS = Dict{Symbol, Any}(
+    :backgroundcolor    => :transparent,
+    :bottomspinecolor   => COLOR_5,
+    :bottomspinevisible => false,
+    :height             => 25,
+    :leftspinecolor     => COLOR_5,
+    :leftspinevisible   => false,
+    :rightspinecolor    => COLOR_5,
+    :rightspinevisible  => false,
+    :topspinecolor      => COLOR_5,
+    :topspinevisible    => false,
+    :xgridvisible       => false,
+    :xticksvisible      => false,
+    :xlabelvisible      => false,
+    :ygridvisible       => false,
+    :yticksvisible      => false,
+    :ylabelvisible      => false,
+)
+
 BUTTON_ATTRS = Dict{Symbol, Any}(
     :alignmode          => Inside(),
     :buttoncolor        => COLOR_3,

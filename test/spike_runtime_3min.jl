@@ -18,7 +18,7 @@ end
 
 function init_context!()
     global irf = get_irf()
-    global irf_bin_size = _compute_irf_bin_size(irf)
+    global irf_bin_size = compute_irf_bin_size(irf)
     global tcspc_window_size = round(irf[end, 1] + irf[2, 1], sigdigits=4)
 
     n = size(irf, 1)
@@ -134,7 +134,7 @@ function run_for_duration(files::Vector{String}, data_path::String; seconds::Flo
             if skip_fit_frames > 0
                 skip_fit_frames -= 1
             end
-            x_data = _get_x_data(histogram_resolution)
+            x_data = get_x_data(histogram_resolution)
             data = [x_data, Float64.(final_vector)]
         end
         t3 = time_ns()

@@ -20,79 +20,6 @@ using Base.Threads
 
 const LIFETIME_WARMUP_DONE = Ref(false)
 
-function lifetime_smooth_level(layout::Dict{Symbol, Any})::Int
-    raw = get(layout, :smoothing, 0)
-    val = raw isa Number ? Float64(raw) : 0.0
-    return clamp(round(Int, val), 0, 10)
-end
-
-@inline function _smooth_strength_factor(level::Int)::Float64
-    # Keep level 1 unchanged and map level 10 to ~10x stronger smoothing.
-    clamped_level = clamp(level, 1, 10)
-    return 10.0 ^ ((clamped_level - 1) / 9)
-end
-
-function _local_scale(values::Vector{Float64}, idx::Int, window::Int)::Float64
-    if idx <= 1
-        return 1.0e-6
-    end
-
-    start_idx = max(2, idx - window + 1)
-    s = 0.0
-    n = 0
-    for k in start_idx:idx
-        v1 = values[k]
-        v0 = values[k - 1]
-        if isfinite(v1) && isfinite(v0)
-            s += abs(v1 - v0)
-            n += 1
-        end
-    end
-
-    return max(n > 0 ? (s / n) : 1.0e-6, 1.0e-6)
-end
-
-function _compute_lifetime_smooth_at(
-    values::Vector{Float64},
-    idx::Int,
-    level::Int,
-    prev_smooth::Float64
-)::Float64
-    if idx <= 0 || idx > length(values)
-        return NaN
-    end
-
-    x = values[idx]
-    if !isfinite(x)
-        return NaN
-    end
-
-    # Level 0 disables the smooth trace to avoid curve overlap with raw lifetime.
-    if level <= 0
-        return NaN
-    end
-
-    if !isfinite(prev_smooth)
-        return x
-    end
-
-    window = 4 + 5 * level
-    scale = _local_scale(values, idx, window)
-    innovation = x - prev_smooth
-    smooth_factor = _smooth_strength_factor(level)
-
-    q = max(scale * scale * (0.24 - 0.009 * level), 1.0e-12)
-    r = max(scale * scale * (0.95 + 0.14 * level) * smooth_factor, 1.0e-12)
-
-    gain = q / (q + r)
-    innovation_ratio = abs(innovation) / (abs(innovation) + 2.0 * scale)
-    gain_boost = 0.45 * innovation_ratio / smooth_factor
-    k_min = 0.03 / smooth_factor
-    k = clamp(gain + gain_boost, k_min, 0.90)
-
-    return prev_smooth + k * innovation
-end
-
 function recompute_lifetime_smooth!(app, app_run)
     # Snapshot mutable vectors to avoid transient length races with the consumer task.
     lifetime_values = copy(app_run.lifetime[])
@@ -108,7 +35,7 @@ function recompute_lifetime_smooth!(app, app_run)
     prev = NaN
 
     for idx in 1:n_common
-        y = _compute_lifetime_smooth_at(lifetime_values, idx, level, prev)
+        y = compute_lifetime_smooth_at(lifetime_values, idx, level, prev)
         smoothed[idx] = y
         prev = y
     end
@@ -126,7 +53,7 @@ function append_lifetime_smooth!(app, app_run)
     level = lifetime_smooth_level(app.layout)
     prev = isempty(app_run.lifetime_smooth[]) ? NaN : app_run.lifetime_smooth[][end]
 
-    y = _compute_lifetime_smooth_at(app_run.lifetime[], idx, level, prev)
+    y = compute_lifetime_smooth_at(app_run.lifetime[], idx, level, prev)
     push!(app_run.lifetime_smooth[], y)
 
     return nothing
@@ -363,7 +290,7 @@ function lookup_plot_series(app_run, plot_label)
     return (Float64[], Float64[])
 end
 
-function _notify_runtime_observables!(app_run)
+function notify_runtime_observables!(app_run)
     notify(app_run.photons)
     notify(app_run.lifetime)
     notify(app_run.lifetime_smooth)
@@ -376,7 +303,7 @@ function _notify_runtime_observables!(app_run)
     return nothing
 end
 
-function _autoscale_plot_selection!(app, app_run, axis, plot_label)
+function autoscale_plot_selection!(app, app_run, axis, plot_label)
     if plot_label == "Histogram"
         autoscale_values!(axis)
         return nothing
@@ -405,10 +332,24 @@ function consumer_loop(app, app_run, blocks; rate=30)
     publish_interval_s = 1.0 / rate
     plot_1_axis = blocks[:plot_1_axis]
     plot_2_axis = blocks[:plot_2_axis]
+    last_histogram = nothing
+    last_fit = nothing
+    last_photons = NaN
 
     try
         for sample in app_run.channel
+            while app_run.running[] && app_run.paused[]
+                sleep(0.02)
+            end
+
+            if !app_run.running[]
+                break
+            end
+
             histogram, fit, photons, command1, command2, lifetime, concentration, timestamp, protocol_setpoint, frame_idx = sample
+            last_histogram = histogram
+            last_fit = fit
+            last_photons = photons
 
             push!(app_run.photons[], photons)
             push!(app_run.lifetime[], lifetime)
@@ -427,13 +368,48 @@ function consumer_loop(app, app_run, blocks; rate=30)
                 app_run.fit[] = fit
                 app_run.counts[] = photons
 
-                _notify_runtime_observables!(app_run)
+                notify_runtime_observables!(app_run)
 
                 last_publish_time = now_s
 
-                _autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout[:plot1])
-                _autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout[:plot2])
+                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout[:plot1])
+                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout[:plot2])
             end
+        end
+
+        if last_histogram !== nothing && last_fit !== nothing
+            app_run.histogram[] = last_histogram
+            app_run.fit[] = last_fit
+            app_run.counts[] = last_photons
+
+            notify_runtime_observables!(app_run)
+
+            save_completed = isfinite(app_run.save_progress[]) && app_run.save_progress[] >= 100.0
+            if save_completed
+                autolimits!(plot_1_axis)
+                autolimits!(plot_2_axis)
+                lim1 = plot_1_axis.finallimits[]
+                lim2 = plot_2_axis.finallimits[]
+                xmax1 = lim1.origin[1] + lim1.widths[1]
+                xmax2 = lim2.origin[1] + lim2.widths[1]
+                xlims!(plot_1_axis, 0.0, max(Float64(xmax1), 0.0))
+                xlims!(plot_2_axis, 0.0, max(Float64(xmax2), 0.0))
+            else
+                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout[:plot1])
+                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout[:plot2])
+            end
+        end
+
+        if !app_run.running[]
+            app_run.save_progress[] = NaN
+        end
+
+        if haskey(blocks, :start_button)
+            blocks[:start_button].label[] = "START"
+        end
+
+        if haskey(blocks, :stop_button)
+            blocks[:stop_button].label[] = "CLEAR"
         end
     catch e
         @error "Consumer error" e
@@ -444,6 +420,11 @@ function infos_loop(app_run, info_label; rate=1.0)
     last_i = app_run.i[]
     dt = 1/float(rate)
     while app_run.running[]
+        if app_run.paused[]
+            sleep(min(dt, 0.05))
+            continue
+        end
+
         sleep(dt)
         try
             i = app_run.i[]
@@ -460,20 +441,20 @@ function infos_loop(app_run, info_label; rate=1.0)
 end
 
 """
-    _last_or_nan(values::Vector{Float64})::Float64
+    last_or_nan(values::Vector{Float64})::Float64
 
 Return the latest value of a series, or `NaN` when empty.
 """
-function _last_or_nan(values::Vector{Float64})::Float64
+function last_or_nan(values::Vector{Float64})::Float64
     return isempty(values) ? NaN : values[end]
 end
 
 """
-    _safe_frequency(controller::Dict{Symbol, Any})::Int
+    safe_frequency(controller::Dict{Symbol, Any})::Int
 
 Read PWM frequency from controller config and clamp to a positive integer.
 """
-function _safe_frequency(controller::Dict{Symbol, Any})::Int
+function safe_frequency(controller::Dict{Symbol, Any})::Int
     raw = try
         Float64(get(controller, :freq, 1000))
     catch
@@ -483,11 +464,11 @@ function _safe_frequency(controller::Dict{Symbol, Any})::Int
 end
 
 """
-    _write_pwm_command!(serial_conn, channel::Int, frequency::Int, command::Float64)
+    write_pwm_command!(serial_conn, channel::Int, frequency::Int, command::Float64)
 
 Emit the proper command for PWM/analog output depending on command saturation.
 """
-function _write_pwm_command!(serial_conn, channel::Int, frequency::Int, command::Float64)
+function write_pwm_command!(serial_conn, channel::Int, frequency::Int, command::Float64)
     cmd = isfinite(command) ? clamp(command, 0.0, 100.0) : 0.0
 
     if cmd <= 0.0
@@ -546,7 +527,7 @@ function warmup_lifetime_fit!()
     return LIFETIME_WARMUP_DONE[]
 end
 
-function _normalize_protocol_config(raw_protocol)::Dict{Symbol, Any}
+function normalize_protocol_config(raw_protocol)::Dict{Symbol, Any}
     times_raw = get(raw_protocol, :times, Float64[])
     setpoints_raw = get(raw_protocol, :setpoints, Float64[])
 
@@ -569,7 +550,7 @@ function _normalize_protocol_config(raw_protocol)::Dict{Symbol, Any}
 end
 
 function sync_runtime_protocol!(app, app_run)
-    app_run.protocol[] = _normalize_protocol_config(app.protocol)
+    app_run.protocol[] = normalize_protocol_config(app.protocol)
     return nothing
 end
 
@@ -582,6 +563,11 @@ function serial_signal_loop(app, app_run; rate=10.0)
     dt = 1 / float(rate)
 
     while app_run.running[]
+        if app_run.paused[]
+            sleep(min(dt, 0.05))
+            continue
+        end
+
         serial_conn = app_run.serial_conn
 
         if serial_conn === nothing
@@ -590,12 +576,12 @@ function serial_signal_loop(app, app_run; rate=10.0)
         end
 
         try
-            frequency = _safe_frequency(app.controller)
-            cmd1 = _last_or_nan(app_run.command1[])
-            cmd2 = _last_or_nan(app_run.command2[])
+            frequency = safe_frequency(app.controller)
+            cmd1 = last_or_nan(app_run.command1[])
+            cmd2 = last_or_nan(app_run.command2[])
 
-            _write_pwm_command!(serial_conn, 1, frequency, cmd1)
-            _write_pwm_command!(serial_conn, 2, frequency, cmd2)
+            write_pwm_command!(serial_conn, 1, frequency, cmd1)
+            write_pwm_command!(serial_conn, 2, frequency, cmd2)
         catch e
             @warn "Serial signal send failed" error=string(e)
 
@@ -652,6 +638,7 @@ function start_pressed(app, app_run, blocks)
     
     @info "Starting test function"
     app_run.running[] = true
+    app_run.paused[] = false
     app_run.channel = Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}}(32)
 
     # reset time-series data
@@ -665,6 +652,7 @@ function start_pressed(app, app_run, blocks)
     empty!(app_run.command2[])
     empty!(app_run.timestamps[])
     app_run.i[] = 0
+    app_run.save_progress[] = NaN
 
     # worker & consumer
     selected_mode = haskey(blocks, :mode_menu) ? blocks[:mode_menu].selection[] : "Playback"
@@ -685,28 +673,59 @@ function start_pressed(app, app_run, blocks)
         [3.0, 0.5, 0.5, 0.0, 5.0e-5]
     end
 
-    playback = selected_mode == "Playback"
-
     sync_runtime_protocol!(app, app_run)
     protocol_config = app_run.protocol
 
-    if playback
+    if selected_mode == "Playback"
         app_run.worker_task = @async start_playback(
             app_run.channel,
             app_run.running,
             app.layout,
             app.controller;
             initial_guess=initial_guess,
-            protocol=protocol_config
+            protocol=protocol_config,
+            paused=app_run.paused,
+            target_frequency=60.0
         )
-    else
+    elseif selected_mode == "Realtime"
         app_run.worker_task = @async start_realtime(
             app_run.channel,
             app_run.running,
             app.layout,
             app.controller;
             initial_guess=initial_guess,
-            protocol=protocol_config
+            protocol=protocol_config,
+            paused=app_run.paused
+        )
+    elseif selected_mode == "Save"
+        app_run.save_progress[] = 0.0
+
+        save_progress_cb = function (pct)
+            app_run.save_progress[] = Float64(pct)
+            return nothing
+        end
+
+        app_run.worker_task = @async start_save(
+            app_run.channel,
+            app_run.running,
+            app.layout,
+            app.controller;
+            initial_guess=initial_guess,
+            protocol=protocol_config,
+            paused=app_run.paused,
+            progress_cb=save_progress_cb
+        )
+    else
+        @warn "Unknown acquisition mode selected; falling back to Playback" selected_mode=selected_mode
+        app_run.worker_task = @async start_playback(
+            app_run.channel,
+            app_run.running,
+            app.layout,
+            app.controller;
+            initial_guess=initial_guess,
+            protocol=protocol_config,
+            paused=app_run.paused,
+            target_frequency=60.0
         )
     end
 
@@ -720,6 +739,20 @@ function start_pressed(app, app_run, blocks)
     app_run.infos_task = @async infos_loop(app_run, blocks[:info_label]; rate=1)
     # end
 
+    return nothing
+end
+
+function pause_pressed(app_run)
+    if app_run.running[]
+        app_run.paused[] = true
+    end
+    return nothing
+end
+
+function resume_pressed(app_run)
+    if app_run.running[]
+        app_run.paused[] = false
+    end
     return nothing
 end
 
@@ -744,12 +777,14 @@ function stop_pressed(app_run)
     end
 
     if !app_run.running[]
+        app_run.save_progress[] = NaN
         @info "Not running"
         return
     end
 
     @info "Stopping test function"
     
+    app_run.paused[] = false
     app_run.running[] = false
     if app_run.channel !== nothing && isopen(app_run.channel)
         close(app_run.channel)
@@ -773,5 +808,6 @@ function stop_pressed(app_run)
     app_run.serial_task = nothing
 
     app_run.channel = nothing
+    app_run.save_progress[] = NaN
     return nothing
 end
