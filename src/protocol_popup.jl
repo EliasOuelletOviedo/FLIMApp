@@ -14,12 +14,12 @@ end
 end
 
 function write_protocol_csv(
-    csv_path::AbstractString;
-    repeats::Int,
-    delay::Int,
-    times::Vector{Float64},
-    setpoints::Vector{Float64}
-)
+            csv_path::AbstractString;
+            repeats::Int,
+            delay::Int,
+            times::Vector{Float64},
+            setpoints::Vector{Float64}
+        )
     row_count = min(length(times), length(setpoints))
     mkpath(dirname(String(csv_path)))
 

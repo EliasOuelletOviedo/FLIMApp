@@ -47,11 +47,11 @@ function local_scale(values::Vector{Float64}, idx::Int, window::Int)::Float64
 end
 
 function compute_lifetime_smooth_at(
-    values::Vector{Float64},
-    idx::Int,
-    level::Int,
-    prev_smooth::Float64
-)::Float64
+            values::Vector{Float64},
+            idx::Int,
+            level::Int,
+            prev_smooth::Float64
+        )::Float64
     if idx <= 0 || idx > length(values)
         return NaN
     end
@@ -94,12 +94,12 @@ Update a local adaptive Kalman smoother used by PID error computation.
 Returns `(lifetime_for_pid, new_prev_smooth, new_prev_raw, new_scale_est)`.
 """
 function update_pid_lifetime_kalman(
-    current_lifetime::Float64,
-    prev_smooth::Float64,
-    prev_raw::Float64,
-    scale_est::Float64,
-    level::Int
-)::NTuple{4, Float64}
+            current_lifetime::Float64,
+            prev_smooth::Float64,
+            prev_raw::Float64,
+            scale_est::Float64,
+            level::Int
+        )::NTuple{4, Float64}
     if !isfinite(current_lifetime)
         return (current_lifetime, prev_smooth, prev_raw, scale_est)
     end

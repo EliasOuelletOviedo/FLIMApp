@@ -197,7 +197,6 @@ function compute_irf_bin_size(irf_data::Matrix{Float64})::Float64
     return h
 end
 
-
 function irf_from_sdt_without_python(filepath::AbstractString; channel::Int=1)::Matrix{Float64}
     counts_raw, histogram_resolution, time = open_sdt_file_no_python(String(filepath))
 

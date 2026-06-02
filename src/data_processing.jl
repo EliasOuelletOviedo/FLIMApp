@@ -459,9 +459,10 @@ The channel tuples contain:
 8. timestamps::Float64 - Cumulative acquisition time
 9. protocol_setpoint::Float64 - Effective protocol setpoint used for control
 10. i::UInt32 - Frame counter
+11. source_file::String - Full path of the source .sdt file
 """
 function start_playback(
-        ch::Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}},
+    ch::Channel{AcquisitionSample},
         running::Threads.Atomic{Bool},
         layout::Dict{Symbol, Any},
         controller::Dict{Symbol, Any};
@@ -683,7 +684,7 @@ function start_playback(
             # Send results; handle closed channel gracefully
             if isopen(ch) && running[]
                 try
-                    put!(ch, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n))
+                    put!(ch, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n, String(filepath)))
                 catch e
                     if isa(e, InvalidStateException)
                         break
@@ -723,7 +724,7 @@ If no file exists yet, or if the newest file was already processed, it waits
 until a new file appears.
 """
 function start_realtime(
-        ch::Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}},
+    ch::Channel{AcquisitionSample},
         running::Threads.Atomic{Bool},
         layout::Dict{Symbol, Any},
         controller::Dict{Symbol, Any};
@@ -959,7 +960,7 @@ function start_realtime(
 
             if isopen(ch) && running[]
                 try
-                    put!(ch, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n))
+                    put!(ch, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n, String(filepath)))
                 catch e
                     if isa(e, InvalidStateException)
                         break
@@ -1000,7 +1001,7 @@ intermediate GUI updates. After the full folder is processed, it pushes all
 results to the channel so the UI can display the complete run.
 """
 function start_save(
-        ch::Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}},
+    ch::Channel{AcquisitionSample},
         running::Threads.Atomic{Bool},
         layout::Dict{Symbol, Any},
         controller::Dict{Symbol, Any};
@@ -1063,7 +1064,7 @@ function start_save(
         pid_prev_raw_lifetime = NaN
         pid_scale_est = 1.0e-6
 
-        buffered_samples = Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}[]
+        buffered_samples = AcquisitionSample[]
         last_progress_pct = -1
 
         if progress_cb !== nothing
@@ -1208,7 +1209,7 @@ function start_save(
                 D_error = 0.0
             end
 
-            push!(buffered_samples, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n))
+            push!(buffered_samples, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n, String(filepath)))
 
             if progress_cb !== nothing
                 progress_pct = clamp(floor(Int, (Int(n) * 100) / nb_files), 0, 100)
@@ -1271,4 +1272,8 @@ function start_save(
     end
 
     return nothing
+end
+
+function start_analysis()
+    
 end

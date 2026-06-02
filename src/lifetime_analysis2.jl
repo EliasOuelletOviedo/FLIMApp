@@ -1,8 +1,18 @@
 """
 lifetime_analysis2.jl
 
-Version simplifiee et orientee performance de vec_to_lifetime.
-Ce fichier garde uniquement les fonctions necessaires au flux MLE/Estimate.
+Fluorescence lifetime fitting algorithms and IRF (Instrument Response Function) management.
+
+This module implements:
+- IRF file loading and manipulation
+- Convolution of IRF with decay models
+- Maximum Likelihood Estimation (MLE) fitting for fluorescence decay
+- Multi-exponential decay component fitting (1, 2, 3+ lifetimes)
+
+References:
+- Bajzer et al. 1991 (MLE methodology)
+- Maus et al. 2001 (MLE for FLIM)
+- Enderlein, 1997 (IRF shift/delay compensation)
 """
 
 using FFTW

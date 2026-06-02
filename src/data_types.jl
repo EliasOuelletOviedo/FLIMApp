@@ -11,6 +11,8 @@ This module defines the primary structures for application state:
 using Observables
 using Base.Threads
 
+const AcquisitionSample = Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32,String}
+
 # =============================================================================
 # PERSISTENT APPLICATION STATE
 # =============================================================================
@@ -95,7 +97,7 @@ Fields:
 - `hist_time::Observable{Vector{Int64}}` - Histogram time-axis values
 """
 mutable struct AppRun
-    channel::Union{Channel{Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}}, Nothing}
+    channel::Union{Channel{AcquisitionSample}, Nothing}
     running::Threads.Atomic{Bool}
     paused::Threads.Atomic{Bool}
     worker_task::Union{Task, Nothing}
