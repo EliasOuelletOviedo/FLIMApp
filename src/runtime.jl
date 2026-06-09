@@ -763,8 +763,8 @@ function serial_signal_loop(app, app_run; rate=10.0)
             cmd1 = last_or_nan(app_run.command1[])
             cmd2 = last_or_nan(app_run.command2[])
 
-            write_pwm_command!(serial_conn, 1, frequency, cmd1)
-            write_pwm_command!(serial_conn, 2, frequency, cmd2)
+            write_pwm_command!(serial_conn, 1, 100, cmd1)
+            write_pwm_command!(serial_conn, 2, 100, cmd2)
         catch e
             @warn "Serial signal send failed" error=string(e)
 
