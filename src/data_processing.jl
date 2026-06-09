@@ -251,7 +251,7 @@ Args:
 Returns:
 - Single-column vector with summed data
 """
-function reshape_to_vec(file::Vector{UInt8}, num_rows::Int)::Vector{Float64}
+@inline function reshape_to_vec(file::Vector{UInt8}, num_rows::Int)::Vector{Float64}
     return sum(reshape(file, (num_rows, :)), dims=2)[:, 1]
 end
 
@@ -462,17 +462,17 @@ The channel tuples contain:
 11. source_file::String - Full path of the source .sdt file
 """
 function start_playback(
-    ch::Channel{AcquisitionSample},
-        running::Threads.Atomic{Bool},
-        layout::Dict{Symbol, Any},
-        controller::Dict{Symbol, Any};
-        initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
-        protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
-    paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
-        dt::Float64 = 0.0000001,
-        use_partial_fit::Bool = true,
-        target_frequency::Float64 = 60.0
-    )
+        ch::Channel{AcquisitionSample},
+            running::Threads.Atomic{Bool},
+            layout::Dict{Symbol, Any},
+            controller::Dict{Symbol, Any};
+            initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
+            protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
+            paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
+            dt::Float64 = 0.0001,
+            use_partial_fit::Bool = true,
+            target_frequency::Float64 = 60.0
+        )
     try
         @info "Playback worker started on thread $(threadid())"
         
@@ -1001,17 +1001,17 @@ intermediate GUI updates. After the full folder is processed, it pushes all
 results to the channel so the UI can display the complete run.
 """
 function start_save(
-    ch::Channel{AcquisitionSample},
-        running::Threads.Atomic{Bool},
-        layout::Dict{Symbol, Any},
-        controller::Dict{Symbol, Any};
-        initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
-        protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
-    paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
-        dt::Float64 = 0.0000001,
-    use_partial_fit::Bool = true,
-    progress_cb::Union{Nothing, Function} = nothing
-    )
+        ch::Channel{AcquisitionSample},
+            running::Threads.Atomic{Bool},
+            layout::Dict{Symbol, Any},
+            controller::Dict{Symbol, Any};
+            initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
+            protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
+            paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
+            dt::Float64 = 0.0000001,
+            use_partial_fit::Bool = true,
+            progress_cb::Union{Nothing, Function} = nothing
+        )
     try
         @info "Save worker started on thread $(threadid())"
 
@@ -1064,7 +1064,6 @@ function start_save(
         pid_prev_raw_lifetime = NaN
         pid_scale_est = 1.0e-6
 
-        buffered_samples = AcquisitionSample[]
         last_progress_pct = -1
 
         if progress_cb !== nothing
@@ -1209,7 +1208,21 @@ function start_save(
                 D_error = 0.0
             end
 
-            push!(buffered_samples, (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n, String(filepath)))
+            sample = (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n, String(filepath))
+
+            if running[] && isopen(ch)
+                try
+                    put!(ch, sample)
+                catch e
+                    if isa(e, InvalidStateException)
+                        break
+                    else
+                        rethrow()
+                    end
+                end
+            else
+                break
+            end
 
             if progress_cb !== nothing
                 progress_pct = clamp(floor(Int, (Int(n) * 100) / nb_files), 0, 100)
@@ -1232,32 +1245,6 @@ function start_save(
             end
         end
 
-        if running[] && isopen(ch)
-            @info "Save mode completed processing; publishing buffered samples" count=length(buffered_samples)
-            for sample in buffered_samples
-                if !running[] || !isopen(ch)
-                    break
-                end
-
-                while running[] && paused !== nothing && paused[]
-                    sleep(min(dt, 0.05))
-                end
-
-                if !running[] || !isopen(ch)
-                    break
-                end
-
-                try
-                    put!(ch, sample)
-                catch e
-                    if isa(e, InvalidStateException)
-                        break
-                    else
-                        rethrow()
-                    end
-                end
-            end
-        end
     catch e
         @error "Save worker error" exception=e
         rethrow()
@@ -1274,6 +1261,6 @@ function start_save(
     return nothing
 end
 
-function start_analysis()
-    
-end
+# function start_analysis()
+
+# end

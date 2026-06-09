@@ -337,6 +337,7 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
     publish_interval_s = 1.0 / rate
     plot_1_axis = blocks[:plot_1_axis]
     plot_2_axis = blocks[:plot_2_axis]
+    publish_live_updates = acquisition_mode != "Save"
     last_histogram = nothing
     last_fit = nothing
     last_photons = NaN
@@ -398,7 +399,7 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
 
             now_s = time()
 
-            if now_s - last_publish_time >= publish_interval_s
+            if publish_live_updates && now_s - last_publish_time >= publish_interval_s
                 app_run.histogram[] = histogram
                 app_run.fit[] = fit
                 app_run.counts[] = photons
@@ -867,7 +868,7 @@ function start_pressed(app, app_run, blocks)
             initial_guess=initial_guess,
             protocol=protocol_config,
             paused=app_run.paused,
-            target_frequency=60.0
+            target_frequency=1000.0
         )
     elseif selected_mode == "Realtime"
         app_run.worker_task = @async start_realtime(

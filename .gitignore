@@ -8,6 +8,9 @@ Thumbs.db
 # VSCode
 .vscode/
 
+# dist
+dist/
+
 # Manifest? (we recommend committing Manifest; omit if you choose not to)
 # Uncomment below to ignore Manifest:
 # Manifest.toml
