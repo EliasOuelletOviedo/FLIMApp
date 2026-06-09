@@ -743,7 +743,7 @@ end
 Periodic task that sends controller commands to the connected serial device.
 """
 function serial_signal_loop(app, app_run; rate=10.0)
-    dt = 1 / float(rate)
+    dt = 1 / float(1)
 
     while app_run.running[]
         if app_run.paused[]
@@ -763,8 +763,8 @@ function serial_signal_loop(app, app_run; rate=10.0)
             cmd1 = last_or_nan(app_run.command1[])
             cmd2 = last_or_nan(app_run.command2[])
 
-            write_pwm_command!(serial_conn, 1, 100, cmd1)
-            write_pwm_command!(serial_conn, 2, 100, cmd2)
+            write_pwm_command!(serial_conn, 1, 10, cmd1)
+            write_pwm_command!(serial_conn, 2, 10, cmd2)
         catch e
             @warn "Serial signal send failed" error=string(e)
 
