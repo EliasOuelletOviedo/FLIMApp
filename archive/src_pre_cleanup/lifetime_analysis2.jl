@@ -30,52 +30,50 @@ const IRF_CHANNEL_CACHE = Dict{Int, Matrix{Float64}}()
 # Helpers IRF
 # -----------------------------------------------------------------------------
 
-function sum_reshaped_channels(file::Vector{UInt16}, num_rows::Int)::Vector{Float64}
+function reshape_to_vec_no_python(file::Vector{UInt16}, num_rows::Int)::Vector{Float64}
     return sum(reshape(file, (num_rows, :)), dims=2)[:, 1]
 end
 
-"""
-    read_sdt_frame(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
+function open_sdt_file_no_python(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
+    open(filepath, "r") do io
+        seek(io, 14)
+        header = read!(io, Vector{UInt8}(undef, 12))
 
-Low-level reader for Becker & Hickl .sdt files, used by both the acquisition
-loop (acquisition.jl) and IRF loading (`load_irf_from_sdt` below).
+        seek(io, header[12] * 0x100 + header[11] + 82)
+        infos = read!(io, Vector{UInt8}(undef, 2))
+        histogram_resolution = infos[2] * 0x100 + infos[1]
 
-Parses the file via the `SdtFile` module (src/io/SdtFile.jl), which handles
-header/block parsing and both uncompressed and ZIP-compressed formats. When
-a block holds multiple repeated histograms (e.g. multiple pixels/frames
-packed into one compressed block), they are summed into a single histogram
-via `sum_reshaped_channels`, matching the previous hand-rolled reader.
+        seek(io, header[12] * 0x100 + header[11] + 215)
+        infos_2 = read!(io, Vector{UInt8}(undef, 4))
+        time = reinterpret(Float32, infos_2)[1]
 
-The one field kept as a direct byte read is `frame_time`: a `Float32` at
-`meas_desc_block_offset + 215` that `SdtFile.MeasureInfo` doesn't expose
-individually (it only names the fields needed for reshape/time-axis
-computation). Reading it directly here preserves exact behavior from the
-previous implementation.
-"""
-function read_sdt_frame(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
-    raw_bytes = read(filepath)
-    sdt = SdtFile.read_sdt(raw_bytes, basename(filepath))
+        if (header[8] * 0x100 + header[7]) in (512, 128)
+            seek(io, header[2] * 0x100 + header[1] + 22)
+            vector = read(io)
+            n = div(length(vector), 2)
+            new_vector = reinterpret(UInt16, vector[1:2*n])
+            return new_vector, histogram_resolution, time
+        end
 
-    isempty(sdt.data) && error("SDT file contains no data blocks: $filepath")
-    isempty(sdt.measure_info) && error("SDT file contains no measurement info: $filepath")
+        seek(io, header[2] * 0x100 + header[1] + 2)
+        file_info = read!(io, Vector{UInt8}(undef, 20))
+        shift_1 = file_info[8] * 0x1000000 + file_info[7] * 0x10000 + file_info[6] * 0x100 + file_info[5] -
+                  (file_info[2] * 0x100 + file_info[1])
+        shift_2 = file_info[20] * 0x1000000 + file_info[19] * 0x10000 + file_info[18] * 0x100 + file_info[17]
 
-    histogram_resolution = Int(sdt.measure_info[1].adc_re)
-    flat_counts = vec(sdt.data[1])
+        buffer = IOBuffer(read(io, shift_1))
+        zip_file = first(ZipFile.Reader(buffer).files)
 
-    counts = if length(flat_counts) == histogram_resolution
-        convert.(UInt16, flat_counts)
-    else
-        convert.(UInt16, sum_reshaped_channels(convert.(UInt16, flat_counts), histogram_resolution))
+        file_data = Vector{UInt8}(undef, shift_2)
+        read!(zip_file, file_data)
+
+        vector = reshape_to_vec_no_python(reinterpret(UInt16, file_data), histogram_resolution)
+        return convert.(UInt16, vector), histogram_resolution, time
     end
-
-    meas_desc_offset = Int(sdt.header.meas_desc_block_offset)
-    frame_time = reinterpret(Float32, raw_bytes[meas_desc_offset+216 : meas_desc_offset+219])[1]
-
-    return counts, histogram_resolution, frame_time
 end
 
-function load_irf_from_sdt(filepath::AbstractString; channel::Int=1)::Matrix{Float64}
-    counts_raw, histogram_resolution, time = read_sdt_frame(String(filepath))
+function irf_from_sdt_without_python(filepath::AbstractString; channel::Int=1)::Matrix{Float64}
+    counts_raw, histogram_resolution, time = open_sdt_file_no_python(String(filepath))
 
     counts = Float64.(counts_raw)
     if isempty(counts)
@@ -119,7 +117,7 @@ function get_irf(; channel=1)
         end
     end
 
-    return load_irf_from_sdt(filepath; channel=channel)
+    return irf_from_sdt_without_python(filepath; channel=channel)
 end
 
 function compute_irf_bin_size(irf_data::Matrix{Float64})::Float64
@@ -357,12 +355,12 @@ end
 # Fit MLE
 # -----------------------------------------------------------------------------
 
-function three_lifetime_fraction_constraints!(c, x)
+function fit_3lifetime_fraction_constraints_jl!(c, x)
     c[1] = x[2] + x[4] + x[6]
     c
 end
 
-function mle_objective(free_params::Vector{Float64}, fixed_params::Vector{Float64}, x_data::Vector{Float64}, y_data::Vector{Float64}, data_irf::Matrix{Float64}, gating_function::Vector{UInt8}, histogram_resolution::Int64, number_of_previous_pulses::Int64, laser_pulse_period::Float64, tcspc_low_cut_index::Int64, tcspc_high_cut_index::Int64)
+function MLE_model_func(free_params::Vector{Float64}, fixed_params::Vector{Float64}, x_data::Vector{Float64}, y_data::Vector{Float64}, data_irf::Matrix{Float64}, gating_function::Vector{UInt8}, histogram_resolution::Int64, number_of_previous_pulses::Int64, laser_pulse_period::Float64, tcspc_low_cut_index::Int64, tcspc_high_cut_index::Int64)
     if length(fixed_params) == 3
         number_of_lifetimes = 1
     elseif length(fixed_params) == 5
@@ -428,7 +426,7 @@ function lifetime_estimate(counts::AbstractVector{<:Real}; bin_size=0.039, tcspc
     return ((mean_data_arrival_time - mean_irf_arrival_time) * bin_size)::Float64
 end
 
-function mle_reconvolution_fit(data_irf::Matrix{Float64}, data_xy::Vector{Vector{Float64}}; params, gating_function=ones(UInt8, 320), histogram_resolution::Int64=256, number_of_previous_pulses::Int64=5, laser_pulse_period::Float64=12.5, fixed_parameters::Vector{Float64}=Float64[NaN, NaN, NaN], tcspc_low_cut_index::Int64=13, tcspc_high_cut_index::Int64=12, use_lifetime_estimation_as_guess::Bool=true, first_fit::Bool=false)
+function MLE_iterative_reconvolution_jl(data_irf::Matrix{Float64}, data_xy::Vector{Vector{Float64}}; params, gating_function=ones(UInt8, 320), histogram_resolution::Int64=256, number_of_previous_pulses::Int64=5, laser_pulse_period::Float64=12.5, fixed_parameters::Vector{Float64}=Float64[NaN, NaN, NaN], tcspc_low_cut_index::Int64=13, tcspc_high_cut_index::Int64=12, use_lifetime_estimation_as_guess::Bool=true, first_fit::Bool=false)
     x_data = vec(data_xy[1])
     y_data = vec(data_xy[2]) .* gating_function
     replace!(x -> smaller_or_eq_zero(x) ? 1e-256 : x, y_data)
@@ -467,11 +465,11 @@ function mle_reconvolution_fit(data_irf::Matrix{Float64}, data_xy::Vector{Vector
     clamp_initial_point!(params_copy, lower_bounds, upper_bounds)
 
     if number_of_lifetimes in (1, 2)
-        fit = Optim.optimize(x -> mle_objective(x, fixed_parameters, x_data, y_data, data_irf, gating_function, histogram_resolution, number_of_previous_pulses, laser_pulse_period, tcspc_low_cut_index, tcspc_high_cut_index), lower_bounds, upper_bounds, params_copy, Fminbox(LBFGS(linesearch=LineSearches.BackTracking())), fit_optim_options(number_of_lifetimes, first_fit))
+        fit = Optim.optimize(x -> MLE_model_func(x, fixed_parameters, x_data, y_data, data_irf, gating_function, histogram_resolution, number_of_previous_pulses, laser_pulse_period, tcspc_low_cut_index, tcspc_high_cut_index), lower_bounds, upper_bounds, params_copy, Fminbox(LBFGS(linesearch=LineSearches.BackTracking())), fit_optim_options(number_of_lifetimes, first_fit))
     else
         lower_c, upper_c = Float64[1.0], Float64[1.0]
-        constraint = TwiceDifferentiableConstraints(three_lifetime_fraction_constraints!, lower_bounds, upper_bounds, lower_c, upper_c)
-        fit = Optim.optimize(x -> mle_objective(x, fixed_parameters, x_data, y_data, data_irf, gating_function, histogram_resolution, number_of_previous_pulses, laser_pulse_period, tcspc_low_cut_index, tcspc_high_cut_index), constraint, params_copy, IPNewton(), fit_optim_options(number_of_lifetimes, first_fit))
+        constraint = TwiceDifferentiableConstraints(fit_3lifetime_fraction_constraints_jl!, lower_bounds, upper_bounds, lower_c, upper_c)
+        fit = Optim.optimize(x -> MLE_model_func(x, fixed_parameters, x_data, y_data, data_irf, gating_function, histogram_resolution, number_of_previous_pulses, laser_pulse_period, tcspc_low_cut_index, tcspc_high_cut_index), constraint, params_copy, IPNewton(), fit_optim_options(number_of_lifetimes, first_fit))
     end
 
     res = Optim.minimizer(fit)
@@ -589,7 +587,7 @@ function vec_to_lifetime(x; bin_size=0.04886091184430619, hist_size_threshold=50
 
     data_xy = [x_data, x_vec]
 
-    tau_fit = mle_reconvolution_fit(
+    tau_fit = MLE_iterative_reconvolution_jl(
         irf_local,
         data_xy,
         params=guess,

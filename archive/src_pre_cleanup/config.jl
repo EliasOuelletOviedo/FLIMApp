@@ -110,13 +110,6 @@ Upper bound index for time-correlated single photon counting.
 """
 const TCSPC_HIGH_CUT_INDEX = 12
 
-"""
-    PROTOCOL_STEP_COUNT::Int
-
-Number of steps in an experimental protocol (times/setpoints vectors).
-"""
-const PROTOCOL_STEP_COUNT = 10
-
 # =============================================================================
 # UI THEME DEFINITIONS
 # =============================================================================
@@ -167,9 +160,110 @@ const LIGHT_MODE_THEME = Dict{Symbol, Any}(
     :text    => :black
 )
 
-# Application state defaults now live as the zero-argument constructors of
-# LayoutSettings / ControllerSettings / ProtocolSettings / RoiSettings /
-# ConsoleSettings, defined in data_types.jl next to AppState.
+# =============================================================================
+# APPLICATION STATE DEFAULTS
+# =============================================================================
+
+"""
+    get_default_layout()::Dict
+
+Returns a dictionary of default layout configuration settings.
+
+Settings control:
+- Time display range (seconds)
+- Histogram binning factor
+- Smoothing parameter
+- Primary and secondary plot selections
+"""
+function get_default_layout()::Dict{Symbol, Any}
+    return Dict{Symbol, Any}(
+        :time_range => 60,
+        :binning    => 1,
+        :smoothing  => 0,
+        :plot1      => "Lifetime",
+        :plot2      => "Ion concentration"
+    )
+end
+
+"""
+    get_default_controller()::Dict
+
+Returns a dictionary of default hardware controller settings.
+
+Includes channel configurations:
+- Channel enable/disable (ch1_on, ch2_on)
+- Inversion flags (ch1_inv, ch2_inv)
+- Output mappings (ch1_out, ch2_out)
+- Operation modes (ch1_mode, ch2_mode)
+- PID parameters (P, I, D for each channel)
+"""
+function get_default_controller()::Dict{Symbol, Any}
+    return Dict{Symbol, Any}(
+        :ch1_inv => false,
+        :ch1_on  => false,
+        :ch1_out => "Out 1",
+        :ch1_mode=> "Digital",
+        :freq    => 1000,
+        :P1      => 0.0,
+        :I1      => 0.0,
+        :D1      => 0.0,
+        :ch2_inv => false,
+        :ch2_on  => false,
+        :ch2_out => "Out 2",
+        :ch2_mode=> "Digital",
+        :P2      => 0.0,
+        :I2      => 0.0,
+        :D2      => 0.0,
+    )
+end
+
+"""
+    get_default_protocol()::Dict
+
+Returns default protocol UI values persisted in AppState.
+
+Stored fields:
+- `:active`    (Bool, enable protocol on next START)
+- `:repeats`   (Int)
+- `:delay`     (Int, seconds)
+- `:times`     (Vector{Float64}, per-step durations)
+- `:setpoints` (Vector{Float64}, per-step setpoints)
+"""
+function get_default_protocol()::Dict{Symbol, Any}
+    step_count = 10
+    return Dict{Symbol, Any}(
+        :active => false,
+        :repeats => 1,
+        :delay => 0,
+        :times => fill(NaN, step_count),
+        :setpoints => fill(NaN, step_count)
+    )
+end
+
+"""
+    get_default_roi()::Dict
+
+Returns default ROI UI values persisted in AppState.
+
+Stored fields:
+- `:active` (Bool, enable ROI handling)
+"""
+function get_default_roi()::Dict{Symbol, Any}
+    return Dict{Symbol, Any}(
+        :active => false
+    )
+end
+
+"""
+    get_default_console()::Dict
+
+Returns a dictionary of default console settings (empty).
+
+To be populated with logging/console output settings as needed.
+"""
+function get_default_console()::Dict{Symbol, Any}
+    return Dict{Symbol, Any}()
+end
 
 # =============================================================================
 # COLOR HELPER FUNCTIONS

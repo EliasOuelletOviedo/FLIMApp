@@ -14,83 +14,6 @@ using Base.Threads
 const AcquisitionSample = Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32,String}
 
 # =============================================================================
-# APPLICATION STATE SETTINGS GROUPS
-# =============================================================================
-#
-# Base.@kwdef gives each struct a zero-argument default constructor (e.g.
-# LayoutSettings()) that doubles as "get the defaults" — no separate
-# get_default_*() function needed. Typed fields mean a typo'd key or a
-# wrong-typed value is a compile-time/construction-time error instead of a
-# silent Dict lookup returning `nothing` at some unrelated call site.
-
-"""
-    LayoutSettings
-
-Display settings: time range, binning, smoothing, and which series each
-plot shows.
-"""
-Base.@kwdef mutable struct LayoutSettings
-    time_range::Int = 60
-    binning::Int = 1
-    smoothing::Int = 0
-    plot1::String = "Lifetime"
-    plot2::String = "Ion concentration"
-end
-
-"""
-    ControllerSettings
-
-Hardware controller configuration for the two PID output channels.
-"""
-Base.@kwdef mutable struct ControllerSettings
-    ch1_inv::Bool = false
-    ch1_on::Bool = false
-    ch1_out::String = "Out 1"
-    ch1_mode::String = "Digital"
-    freq::Int = 1000
-    P1::Float64 = 0.0
-    I1::Float64 = 0.0
-    D1::Float64 = 0.0
-    ch2_inv::Bool = false
-    ch2_on::Bool = false
-    ch2_out::String = "Out 2"
-    ch2_mode::String = "Digital"
-    P2::Float64 = 0.0
-    I2::Float64 = 0.0
-    D2::Float64 = 0.0
-end
-
-"""
-    ProtocolSettings
-
-Experimental protocol schedule: `times`/`setpoints` are parallel vectors of
-`PROTOCOL_STEP_COUNT` per-step durations and setpoints.
-"""
-Base.@kwdef mutable struct ProtocolSettings
-    active::Bool = false
-    repeats::Int = 1
-    delay::Int = 0
-    times::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
-    setpoints::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
-end
-
-"""
-    RoiSettings
-
-ROI panel settings.
-"""
-Base.@kwdef mutable struct RoiSettings
-    active::Bool = false
-end
-
-"""
-    ConsoleSettings
-
-Console/logging settings (no fields yet).
-"""
-Base.@kwdef mutable struct ConsoleSettings end
-
-# =============================================================================
 # PERSISTENT APPLICATION STATE
 # =============================================================================
 
@@ -102,11 +25,11 @@ Persistent configuration state that can be serialized to disk.
 Fields:
 - `dark::Bool` - Dark mode toggle (true for dark, false for light)
 - `current_panel::Symbol` - Currently active UI panel (:layout, :controller, :protocol, :console)
-- `layout::LayoutSettings` - Layout and display settings
-- `controller::ControllerSettings` - Hardware controller configuration
-- `protocol::ProtocolSettings` - Experimental protocol settings
-- `roi::RoiSettings` - ROI settings
-- `console::ConsoleSettings` - Console and logging settings
+- `layout::Dict{Symbol, Any}` - Layout and display settings
+- `controller::Dict{Symbol, Any}` - Hardware controller configuration
+- `protocol::Dict{Symbol, Any}` - Experimental protocol settings
+- `roi::Dict{Symbol, Any}` - ROI settings
+- `console::Dict{Symbol, Any}` - Console and logging settings
 
 This structure is serialized to `STATE_FILE_PATH` to preserve user preferences
 across application sessions.
@@ -114,11 +37,11 @@ across application sessions.
 mutable struct AppState
     dark::Bool
     current_panel::Symbol
-    layout::LayoutSettings
-    controller::ControllerSettings
-    protocol::ProtocolSettings
-    roi::RoiSettings
-    console::ConsoleSettings
+    layout::Dict{Symbol, Any}
+    controller::Dict{Symbol, Any}
+    protocol::Dict{Symbol, Any}
+    roi::Dict{Symbol, Any}
+    console::Dict{Symbol, Any}
 end
 
 """
@@ -136,11 +59,11 @@ function AppState(use_dark::Bool)
     return AppState(
         use_dark,
         :layout,
-        LayoutSettings(),
-        ControllerSettings(),
-        ProtocolSettings(),
-        RoiSettings(),
-        ConsoleSettings()
+        get_default_layout(),
+        get_default_controller(),
+        get_default_protocol(),
+        get_default_roi(),
+        get_default_console()
     )
 end
 
@@ -200,7 +123,7 @@ mutable struct AppRun
     i::Observable{UInt32}
     save_progress::Observable{Float64}
     hist_time::Observable{Vector{Int64}}
-    protocol::Observable{ProtocolSettings}
+    protocol::Observable{Dict{Symbol, Any}}
 end
 
 """
@@ -213,6 +136,7 @@ Returns:
   all tasks set to nothing, and channel set to nothing
 """
 function AppRun()
+    default_protocol = get_default_protocol()
     return AppRun(
         nothing,
         Threads.Atomic{Bool}(false),
@@ -237,6 +161,12 @@ function AppRun()
         Observable{UInt32}(0),
         Observable(NaN),
         Observable(collect(1:DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(ProtocolSettings())
+        Observable(Dict{Symbol, Any}(
+            :active => Bool(get(default_protocol, :active, false)),
+            :delay => Int(round(Float64(get(default_protocol, :delay, 0)))),
+            :repeats => Int(round(Float64(get(default_protocol, :repeats, 1)))),
+            :times => [v isa Number ? Float64(v) : NaN for v in get(default_protocol, :times, Float64[])],
+            :setpoints => [v isa Number ? Float64(v) : NaN for v in get(default_protocol, :setpoints, Float64[])]
+        ))
     )
 end

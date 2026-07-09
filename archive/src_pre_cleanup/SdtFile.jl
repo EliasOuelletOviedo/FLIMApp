@@ -1,8 +1,4 @@
 """
-Included by main.jl. `read_sdt_frame` in lifetime_analysis2.jl delegates its
-histogram/header parsing to this module's `read_sdt`; see that function for
-the one field (frame_time) still read directly for legacy behavioral parity.
-
     SdtFile.jl
 
 Parseur pur Julia pour les fichiers SDT de Becker & Hickl (TCSPC / FLIM).

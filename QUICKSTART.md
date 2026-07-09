@@ -1,9 +1,9 @@
 # Quick Navigation Guide
 
 ## Start Here
-1. **README_PROFESSIONAL.md** - What the app does and how to use it
+1. **README.md** - What the app does and how to use it
 2. **DEVELOPMENT.md** - How the code is organized and how to modify it
-3. **src/main.jl** - Entry point; shows initialization sequence
+3. **src/FLIMApp.jl** - Module definition and entry point; shows the authoritative include order
 
 ## Understanding the Architecture
 
@@ -23,17 +23,22 @@
 #### User Interface
 - [src/GUI.jl](src/GUI.jl) - Makie figure layout and widgets
 - [src/gui_themes.jl](src/gui_themes.jl) - Colors and styling
-- [src/handlers.jl](src/handlers.jl) - Button callbacks and interactions
+- [src/handlers.jl](src/handlers.jl) - Event handler orchestrator
+- [src/handlers_layout.jl](src/handlers_layout.jl), [handlers_controller.jl](src/handlers_controller.jl), [handlers_protocol.jl](src/handlers_protocol.jl), [handlers_console.jl](src/handlers_console.jl) - One file per panel's own controls
 
 #### Analysis & Processing
-- [src/lifetime_analysis.jl](src/lifetime_analysis.jl) - MLE fitting algorithms
-- [src/data_processing.jl](src/data_processing.jl) - File I/O and worker task
+- [src/lifetime_analysis2.jl](src/lifetime_analysis2.jl) - MLE fitting algorithms, IRF/.sdt loading
+- [src/acquisition.jl](src/acquisition.jl) - Playback/Realtime/Save worker tasks
+- [src/serial.jl](src/serial.jl) - Serial port discovery + PID/PWM I/O
+- [src/protocol.jl](src/protocol.jl) - Protocol schedule math
+- [src/session_save.jl](src/session_save.jl) - Realtime-capture session saving
 
 #### Background Tasks
-- [src/runtime.jl](src/runtime.jl) - Async loops (autoscaler, consumer, infos)
+- [src/runtime.jl](src/runtime.jl) - Task lifecycle (consumer_loop, infos_loop, start/pause/stop)
+- [src/plotting.jl](src/plotting.jl) - Axis autoscaling + plot-series lookup
 
 #### Application
-- [src/main.jl](src/main.jl) - Entry point, state management, lifecycle
+- [src/FLIMApp.jl](src/FLIMApp.jl) - Module definition, entry point, state management, lifecycle
 
 ## Common Tasks
 
@@ -41,16 +46,21 @@
 → Edit [src/config.jl](src/config.jl), then reference it by name
 
 ### "How do I add a new button?"
-→ Create in [src/GUI.jl](src/GUI.jl) make_gui(), handle in [src/handlers.jl](src/handlers.jl) make_handlers()
+→ Create in [src/GUI.jl](src/GUI.jl) make_gui() (or its make_*_widgets! helpers), handle it in the relevant `handlers_*.jl` panel file
 
 ### "How do I add a new background task?"
 → Define in [src/runtime.jl](src/runtime.jl), launch in start_pressed()
 
 ### "How do I understand the lifetime fitting?"
-→ Start with [src/lifetime_analysis.jl](src/lifetime_analysis.jl) vec_to_lifetime()
+→ Start with [src/lifetime_analysis2.jl](src/lifetime_analysis2.jl) vec_to_lifetime()
 
 ### "How do I modify the data flow?"
 → Check [src/runtime.jl](src/runtime.jl) consumer_loop() and Channel usage
+
+### "How do I modify acquisition behavior for one mode only?"
+→ Check the thin `start_playback`/`start_realtime`/`start_save` wrappers in
+[src/acquisition.jl](src/acquisition.jl); shared binning/fit/PID logic lives
+in `run_acquisition_loop!` in the same file
 
 ### "Why is something not working?"
 → Check [DEVELOPMENT.md](DEVELOPMENT.md#common-bugs) debugging section
@@ -58,31 +68,17 @@
 ## Code Reading Suggestions
 
 ### For Performance Understanding
-1. [src/data_processing.jl](src/data_processing.jl) - Sliding window optimization
-2. [src/lifetime_analysis.jl](src/lifetime_analysis.jl) - FFT planning
+1. [src/acquisition.jl](src/acquisition.jl) - Sliding window optimization
+2. [src/lifetime_analysis2.jl](src/lifetime_analysis2.jl) - FFT planning
 
 ### For Reactive Programming
 1. [src/data_types.jl](src/data_types.jl) - Observable definitions
 2. [src/runtime.jl](src/runtime.jl) - Observable notifications
-3. [src/handlers.jl](src/handlers.jl) - Binding and updates
+3. [src/handlers_layout.jl](src/handlers_layout.jl) - Binding and updates
 
 ### For Hardware Integration
-1. [src/data_processing.jl](src/data_processing.jl) list_ports() - Serial enumeration
-2. [src/data_processing.jl](src/data_processing.jl) open_SDT_file() - File reading
-
-## File Statistics
-
-| File | Lines | Purpose | Complexity |
-|------|-------|---------|------------|
-| config.jl | ~150 | Configuration | Low |
-| data_types.jl | ~130 | Data structures | Low |
-| gui_themes.jl | ~500 | UI Theme | Medium |
-| GUI.jl | ~300 | Interface | High |
-| handlers.jl | ~400 | Events | High |
-| runtime.jl | ~200 | Tasks | Medium |
-| data_processing.jl | ~350 | I/O | High |
-| lifetime_analysis.jl | ~700 | Analysis | Very High |
-| main.jl | ~150 | Integration | Medium |
+1. [src/serial.jl](src/serial.jl) list_ports() - Serial enumeration
+2. [src/lifetime_analysis2.jl](src/lifetime_analysis2.jl) read_sdt_frame() - File reading
 
 ## Testing
 
@@ -106,13 +102,13 @@ See [test/](test/) directory:
 - **Atom{Bool}**: Thread-safe flag for control
 
 ### Include Order
-Files MUST be included in order defined in [src/main.jl](src/main.jl). Changing this order causes errors!
+Files MUST be included in order defined in [src/FLIMApp.jl](src/FLIMApp.jl). Changing this order causes errors!
 
 ## Debugging Checklist
 
 - [ ] Check Julia console for error messages
-- [ ] Verify include order in main.jl
-- [ ] Check irf is loaded: `println(irf)`
+- [ ] Verify include order in FLIMApp.jl
+- [ ] Check irf is loaded: `println(FLIMApp.irf)` (after `using FLIMApp`)
 - [ ] Check task status: `println(app_run.running[])`
 - [ ] Check channel open: `println(isopen(ch))`
 - [ ] Enable debug logging: `global_logger(ConsoleLogger(stderr, Logging.Debug))`

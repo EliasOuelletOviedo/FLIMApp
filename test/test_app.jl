@@ -2,8 +2,9 @@ using Test
 using GLMakie
 
 # load the application code (this will define AppState, AppRun, etc.)
-include(joinpath(@__DIR__, "../src/main.jl"))
-include(joinpath(@__DIR__, "../src/runtime.jl")) # ensure helper functions available
+# NOTE: this test predates several AppState/AppRun fields (e.g. `roi`) and is
+# broken independently of this include-path update — see DEVELOPMENT.md.
+using FLIMApp
 
 # create a minimal fake GUI environment for the purposes of the test
 app = AppState(dark,

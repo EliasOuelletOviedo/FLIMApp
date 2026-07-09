@@ -25,18 +25,44 @@ It should be read as a Julia docstring for reference.
 
 ## Include Order (CRITICAL)
 
-Files must be included in this order in `main.jl`:
+`src/FLIMApp.jl` defines `module FLIMApp` and its `include(...)` list is the
+single source of truth for include order — read it there rather than
+trusting this doc to stay perfectly in sync. As of the 2026-07 cleanup it
+is, in order:
 
 ```julia
+module FLIMApp
+
 include("config.jl")              # 1. Constants and configuration
 include("data_types.jl")          # 2. Data structures
-include("gui_themes.jl")          # 3. UI styling (no dependencies)
-include("lifetime_analysis.jl")   # 4. Analysis algorithms
-include("data_processing.jl")     # 5. I/O (depends on lifetime_analysis)
-include("runtime.jl")             # 6. Tasks (background workers)
-include("handlers.jl")            # 7. Event handlers (depends on runtime)
-include("GUI.jl")                 # 8. Main UI (depends on all above)
+include("gui_themes.jl")          # 3. UI styling (reuses config.jl's theme dicts)
+include("path_utils.jl")          # 4. Path picker/cache helpers
+include("smoothing.jl")           # 5. Lifetime smoothing/Kalman helpers
+include("serial.jl")              # 6. Serial port discovery + PID/PWM I/O
+include("protocol.jl")            # 7. Protocol schedule math
+include("plotting.jl")            # 8. Axis autoscaling + plot-series lookup
+include("io/SdtFile.jl")          # 9. .sdt block parser (used by read_sdt_frame below)
+include("lifetime_analysis2.jl")  # 10. Analysis algorithms, IRF/.sdt loading
+include("acquisition.jl")         # 11. Playback/Realtime/Save worker tasks
+include("session_save.jl")        # 12. Realtime-capture session saving
+include("runtime.jl")             # 13. Background task lifecycle
+include("protocol_popup.jl")      # 14. Protocol popup UI
+include("roi_popup.jl")           # 15. ROI popup UI
+include("handlers_layout.jl")     # 16. Per-panel handlers...
+include("handlers_controller.jl") #     ...
+include("handlers_protocol.jl")   #     ...
+include("handlers_console.jl")    #     ...
+include("handlers.jl")            # 17. Event handler orchestrator
+include("GUI.jl")                 # 18. Main UI (depends on plotting.jl, handlers.jl)
+
+end # module FLIMApp
 ```
+
+Loading: `using FLIMApp` (from the repo root with `--project=.` active) —
+**not** `include("src/FLIMApp.jl")` directly, since a bare `include` won't go
+through Julia's package/precompilation machinery and `Revise` won't track it.
+`run_app()` is exported; it is no longer called automatically on load — call
+it yourself after `using FLIMApp`.
 
 **Violation of this order will cause MethodError or undefined reference errors!**
 
@@ -107,8 +133,8 @@ All globals should be:
 
 ### New Analysis Algorithm
 
-1. Add to `src/lifetime_analysis.jl` (or create `src/new_analysis.jl`)
-2. Include in `main.jl` after `lifetime_analysis.jl`
+1. Add to `src/lifetime_analysis2.jl` (or create `src/new_analysis.jl`)
+2. Include in `FLIMApp.jl` after `lifetime_analysis2.jl`
 3. Export public functions:
    ```julia
    export my_analysis_function
@@ -201,7 +227,7 @@ println(length(ch))  # This is NOT safe; use try/catch instead
 
 ### MethodError: no method matching
 **Cause**: Called a function before its module was included
-**Fix**: Check include order in `main.jl`
+**Fix**: Check include order in `FLIMApp.jl`
 
 ### UndefVarError: `irf` not defined
 **Cause**: `get_irf()` not called before using `irf` global

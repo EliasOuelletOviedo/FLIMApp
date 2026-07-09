@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p archive)",
+      "Bash(cp -R src archive/src_pre_cleanup)",
+      "Bash(git rm *)",
+      "Bash(git status *)",
+      "Bash(julia -e 'Meta.parseall\\(read\\(\"FLIMApp.jl\", String\\); filename=\"FLIMApp.jl\"\\)')",
+      "Bash(julia --project=. -e ' *)",
+      "Bash(echo \"started PID $!\")",
+      "Bash(cat /tmp/using_flimapp_test.txt)",
+      "Read(//private/tmp/**)"
+    ]
+  }
+}

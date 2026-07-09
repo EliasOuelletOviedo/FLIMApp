@@ -15,17 +15,60 @@ All color definitions are RGB{Float64} for Makie compatibility.
 using Colors
 using GLMakie
 
-# Dark/light color scheme and typography live in config.jl as DARK_MODE_THEME /
-# LIGHT_MODE_THEME (single source of truth — do not redefine them here).
+"""
+    DARK_MODE::Dict
+
+Dark mode color scheme and typography.
+"""
+const DARK_MODE = Dict{Symbol, Any}(
+    :theme   => Dict{Symbol, Any}(
+        :backgroundcolor => :gray12,
+        :textcolor       => :gray80,
+        :fonts           => (; 
+            regular = "Arial", 
+            bold    = "Arial Bold", 
+            italic  = "Arial Italic"
+        )
+    ),
+    :color_1 => :gray14,
+    :color_2 => :gray18,
+    :color_3 => :gray22,
+    :color_4 => :gray26,
+    :color_5 => :gray50,
+    :text    => :white
+)
+
+"""
+    LIGHT_MODE::Dict
+
+Light mode color scheme and typography.
+"""
+const LIGHT_MODE = Dict{Symbol, Any}(
+    :theme   => Dict{Symbol, Any}(
+        :backgroundcolor => :gray88,
+        :textcolor       => :gray20,
+        :fonts           => (; 
+            regular = "Arial", 
+            bold    = "Arial Bold", 
+            italic  = "Arial Italic"
+        )
+    ),
+    :color_1 => :gray80,
+    :color_2 => :gray76,
+    :color_3 => :gray72,
+    :color_4 => :gray68,
+    :color_5 => :gray50,
+    :text    => :black
+)
 
 # Initialize with dark mode by default
 # (Will be updated dynamically by GUI when user switches themes)
-const COLOR_1 = parse(RGB{Float64}, DARK_MODE_THEME[:color_1])
-const COLOR_2 = parse(RGB{Float64}, DARK_MODE_THEME[:color_2])
-const COLOR_3 = parse(RGB{Float64}, DARK_MODE_THEME[:color_3])
-const COLOR_4 = parse(RGB{Float64}, DARK_MODE_THEME[:color_4])
-const COLOR_5 = parse(RGB{Float64}, DARK_MODE_THEME[:color_5])
-const TEXT    = parse(RGB{Float64}, DARK_MODE_THEME[:text])
+const COLOR_1 = parse(RGB{Float64}, DARK_MODE[:color_1])
+const COLOR_2 = parse(RGB{Float64}, DARK_MODE[:color_2])
+const COLOR_3 = parse(RGB{Float64}, DARK_MODE[:color_3])
+const COLOR_4 = parse(RGB{Float64}, DARK_MODE[:color_4])
+const COLOR_5 = parse(RGB{Float64}, DARK_MODE[:color_5])
+const TEXT    = parse(RGB{Float64}, DARK_MODE[:text])
 
 AXIS_PLOTS_ATTRS = Dict{Symbol, Any}(
     # :alignmode          => Outside(10),

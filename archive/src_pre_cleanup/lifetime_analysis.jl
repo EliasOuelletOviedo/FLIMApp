@@ -1,7 +1,4 @@
 """
-ARCHIVED — not included by main.jl, superseded by src/lifetime_analysis2.jl.
-Kept for reference only during the 2026-07 cleanup; do not include or call into this file.
-
 lifetime_analysis.jl
 
 Fluorescence lifetime fitting algorithms and IRF (Instrument Response Function) management.

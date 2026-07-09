@@ -1,9 +1,5 @@
 
 """
-WIP — not yet included by main.jl. Intended to back the ROI popup
-(roi_popup.jl), which is currently an empty shell with no ROI reading wired
-in yet.
-
     ImageJROI.jl
 
 Parseur pur Julia pour les fichiers ROI d'ImageJ (.roi et .zip de ROIs).
