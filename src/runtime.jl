@@ -303,7 +303,7 @@ function start_pressed(app, app_run, blocks)
         return
     end
 
-    @info "Starting test function"
+    @info "Starting acquisition function"
     app_run.running[] = true
     app_run.paused[] = false
     app_run.channel = Channel{AcquisitionSample}(32)

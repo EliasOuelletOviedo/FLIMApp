@@ -9,7 +9,47 @@ its underlying observables, and the protocol-setpoint highlight overlay.
 using GLMakie
 using Observables
 
-# Normalize IRF to the fit amplitude for histogram overlays.
+# -----------------------------------------------------------------------------
+# Histogram plot normalization
+# -----------------------------------------------------------------------------
+#
+# On the Histogram plot, fit and IRF are each normalized to their own peak
+# (max -> 1), so their shapes are comparable regardless of photon counts or
+# IRF units. Counts use the SAME divisor as the fit (not their own max), so
+# they stay on a scale comparable to the fit curve rather than also peaking
+# at 1 — the whole point is showing how far the raw counts sit from the fit,
+# which a self-normalized counts curve would hide.
+
+# Normalize a curve to its own peak (max -> 1).
+function normalize_to_own_max(y::AbstractVector{<:Real})
+    out = zeros(Float64, length(y))
+    isempty(y) && return out
+
+    ymax = maximum(Float64.(y))
+    if !isfinite(ymax) || ymax == 0.0
+        return out
+    end
+
+    out .= Float64.(y) ./ ymax
+    return out
+end
+
+# Normalize counts by the fit's peak, not counts' own peak.
+function normalized_counts_for_histogram(counts::AbstractVector{<:Real}, fit::AbstractVector{<:Real})
+    out = zeros(Float64, length(counts))
+    isempty(fit) && return out
+
+    fit_max = maximum(Float64.(fit))
+    if !isfinite(fit_max) || fit_max == 0.0
+        return out
+    end
+
+    out .= Float64.(counts) ./ fit_max
+    return out
+end
+
+# IRF curve for the Histogram plot overlay, truncated/padded to `fit`'s
+# length and normalized to its own peak (max -> 1).
 function normalized_irf_from_fit(fit::AbstractVector{<:Real})
     nfit = length(fit)
     out = zeros(Float64, nfit)
@@ -24,16 +64,32 @@ function normalized_irf_from_fit(fit::AbstractVector{<:Real})
         return out
     end
 
-    fit_max = maximum(Float64.(fit))
-    irf_max = maximum(irf_y)
-
-    if !isfinite(fit_max) || !isfinite(irf_max) || irf_max == 0.0
-        return out
-    end
-
     n = min(nfit, length(irf_y))
-    out[1:n] .= irf_y[1:n] .* (fit_max / irf_max)
+    out[1:n] .= normalize_to_own_max(irf_y[1:n])
     return out
+end
+
+"""
+    draw_histogram_plot!(axis, app_run)
+
+Draw the Histogram plot's three series onto `axis`: counts as semi
+-transparent bars, fit and IRF as lines on top, all normalized (see the
+functions above) so shapes are comparable regardless of photon counts or
+IRF units. Shared by the Menu-selection handler (handlers_layout.jl) and
+the initial-selection draw at GUI construction time (GUI.jl) — both need
+the exact same rendering, so it lives here once instead of as two copies
+that can drift out of sync.
+"""
+function draw_histogram_plot!(axis, app_run)
+    counts_normalized = lift(normalized_counts_for_histogram, app_run.histogram, app_run.fit)
+    fit_normalized = lift(normalize_to_own_max, app_run.fit)
+    irf_normalized = lift(normalized_irf_from_fit, app_run.fit)
+
+    barplot!(axis, app_run.hist_time, counts_normalized, color=(Makie.wong_colors()[1], 0.25))
+    lines!(axis, app_run.hist_time, fit_normalized, color=Makie.wong_colors()[1])
+    lines!(axis, app_run.hist_time, irf_normalized, color=Makie.wong_colors()[3])
+
+    return nothing
 end
 
 function protocol_setpoint_spans(

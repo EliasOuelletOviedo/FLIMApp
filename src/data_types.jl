@@ -26,8 +26,8 @@ const AcquisitionSample = Tuple{Vector{Float64},Vector{Float64},Float64,Float64,
 """
     LayoutSettings
 
-Display settings: time range, binning, smoothing, and which series each
-plot shows.
+Display settings: time range, binning, smoothing, which series each plot
+shows, and per-plot channel toggles.
 """
 Base.@kwdef mutable struct LayoutSettings
     time_range::Int = 60
@@ -35,6 +35,10 @@ Base.@kwdef mutable struct LayoutSettings
     smoothing::Int = 0
     plot1::String = "Lifetime"
     plot2::String = "Ion concentration"
+    plot1_ch1::Bool = false
+    plot1_ch2::Bool = false
+    plot2_ch1::Bool = false
+    plot2_ch2::Bool = false
 end
 
 """

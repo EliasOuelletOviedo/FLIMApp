@@ -283,18 +283,18 @@ function draw_initial_plot_selections!(app, app_run, plot_1, plot_2)
 
         if selection == "Lifetime"
             add_protocol_setpoint_highlight!(axis, app_run)
-            lines!(axis, lifetime_x, lifetime_y, color=Makie.wong_colors()[1])
-            lines!(axis, smooth_x, smooth_y, color=Makie.wong_colors()[3])
-            lines!(axis, protocol_x, protocol_y, color=Makie.wong_colors()[2])
+            lines!(axis, lifetime_x, lifetime_y, color=(Makie.wong_colors()[1], 0.25))
+            lines!(axis, smooth_x, smooth_y, color=Makie.wong_colors()[1])
+            lines!(axis, protocol_x, protocol_y, color=Makie.wong_colors()[3])
+            return
+        end
+
+        if selection == "Histogram"
+            draw_histogram_plot!(axis, app_run)
             return
         end
 
         lines!(axis, series_data..., color=Makie.wong_colors()[1])
-
-        if selection == "Histogram"
-            lines!(axis, app_run.hist_time, app_run.fit, color=Makie.wong_colors()[6])
-            lines!(axis, app_run.hist_time, lift(f -> normalized_irf_from_fit(f), app_run.fit), color=Makie.wong_colors()[3])
-        end
     end
 
     draw_selection!(plot_1, selection_1, plot_data_1, lifetime_x1, lifetime_y1, smooth_x1, smooth_y1, protocol_x1, protocol_y1)

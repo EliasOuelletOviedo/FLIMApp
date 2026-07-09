@@ -262,7 +262,7 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
             elapsed_time += duration
         end
 
-        vlines!(protocol_axis, elapsed_time, color = Makie.wong_colors()[6])
+        vlines!(protocol_axis, elapsed_time, color = Makie.wong_colors()[3])
 
         preview_repeats = repeat_count == 0 ? 1 : repeat_count
         signal_length = round(Int, max((elapsed_time - delay_seconds) * preview_repeats + delay_seconds + 1, 1))

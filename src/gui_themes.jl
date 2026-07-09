@@ -531,21 +531,21 @@ TEXT_ATTRS = Dict{Symbol, Any}(
 )
 
 TOGGLE_ATTRS = Dict{Symbol, Any}(
-    :active          => false,
-    :alignmode        => Inside(),
+    :active             => false,
+    :alignmode          => Inside(),
     :buttoncolor        => COLOR_2,
     :cornersegments     => 2,
-    :framecolor_active => COLOR_5,
+    :framecolor_active  => COLOR_5,
     :framecolor_inactive => COLOR_4,
     :halign             => :center,
     :height             => 20,
     :length             => 20,
-    :markersize            => 20,
+    :markersize         => 20,
     :orientation        => pi/4,
     :rimfraction        => 1,
     :tellheight         => false,
     :tellwidth          => true,
-    :toggleduration          => 0.15,
+    :toggleduration     => 0.15,
     :valign             => :center, 
     :width              => 20
 )

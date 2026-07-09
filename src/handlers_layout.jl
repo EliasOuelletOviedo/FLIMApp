@@ -115,9 +115,9 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         app.current_panel = :layout
         save_state(app)
 
-        Label(panel_grid[1, 1:3];   merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Time range [s] :"))...)
-        Label(panel_grid[2, 1:3];   merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Binning :"))...)
-        Label(panel_grid[3, 1:3];   merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Smoothing :"))...)
+        Label(panel_grid[1, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Time range [s] :"))...)
+        Label(panel_grid[2, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Binning :"))...)
+        Label(panel_grid[3, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Smoothing :"))...)
 
         Label(panel_grid[4, 1:4]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 1"))...)
         Label(panel_grid[4, 5:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
@@ -129,11 +129,11 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         Box(panel_grid[3, 4:6]; SPINNER_BOX_ATTRS...)
 
         Box(panel_grid[5, 1:4]; SPINNER_BOX_ATTRS...)
-        Box(panel_grid[5, 5]; SPINNER_BOX_ATTRS...)
-        Box(panel_grid[5, 6]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[5, 5]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
+        Box(panel_grid[5, 6]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
         Box(panel_grid[7, 1:4]; SPINNER_BOX_ATTRS...)
-        Box(panel_grid[7, 5]; SPINNER_BOX_ATTRS...)
-        Box(panel_grid[7, 6]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[7, 5]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
+        Box(panel_grid[7, 6]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
 
         options = ["Histogram", "Photon counts", "Lifetime", "Ion concentration", "Command"]
 
@@ -155,11 +155,16 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                             (0, 10, Int)),
             :plot1      =>  Menu(panel_grid[5, 1:4];  merge(MENU_ATTRS, Dict(:default => app.layout.plot1, :options => options))...),
             :plot2      =>  Menu(panel_grid[7, 1:4];  merge(MENU_ATTRS, Dict(:default => app.layout.plot2, :options => options))...),
-            :plot1_ch1  =>  Button(panel_grid[5, 5];  merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "1"))...),
-            :plot1_ch2  =>  Button(panel_grid[5, 6];  merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "2"))...),
-            :plot2_ch1  =>  Button(panel_grid[7, 5];  merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "1"))...),
-            :plot2_ch2  =>  Button(panel_grid[7, 6];  merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "2"))...),
+            :plot1_ch1  =>  Toggle(panel_grid[5, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32))...),
+            :plot1_ch2  =>  Toggle(panel_grid[5, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32))...),
+            :plot2_ch1  =>  Toggle(panel_grid[7, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32))...),
+            :plot2_ch2  =>  Toggle(panel_grid[7, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32))...),
         )
+
+        Label(panel_grid[5, 5]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "1"))...)
+        Label(panel_grid[5, 6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "2"))...)
+        Label(panel_grid[7, 5]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "1"))...)
+        Label(panel_grid[7, 6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "2"))...)
 
         function commit_layout_value!(key::Symbol, value)
             setfield!(app.layout, key, value)
@@ -238,16 +243,13 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                         lifetime_x, lifetime_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime)
                         smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_smooth)
                         protocol_x, protocol_y = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
-                        lines!(axis, lifetime_x, lifetime_y, color=Makie.wong_colors()[1])
-                        lines!(axis, smooth_x, smooth_y, color=Makie.wong_colors()[3])
-                        lines!(axis, protocol_x, protocol_y, color=Makie.wong_colors()[2])
+                        lines!(axis, lifetime_x, lifetime_y, color=(Makie.wong_colors()[1], 0.25))
+                        lines!(axis, smooth_x, smooth_y, color=Makie.wong_colors()[1])
+                        lines!(axis, protocol_x, protocol_y, color=Makie.wong_colors()[3])
+                    elseif selection == "Histogram"
+                        draw_histogram_plot!(axis, app_run)
                     else
                         lines!(axis, xy..., color=Makie.wong_colors()[1])
-                    end
-
-                    if selection == "Histogram"
-                        lines!(axis, app_run.hist_time, app_run.fit, color=Makie.wong_colors()[6])
-                        lines!(axis, app_run.hist_time, lift(f -> normalized_irf_from_fit(f), app_run.fit), color=Makie.wong_colors()[3])
                     end
 
                     if !app_run.running[]
@@ -260,12 +262,9 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                     commit_layout_value!(symbol, selection)
                 end
 
-            elseif block isa Button
-                # Channel toggle buttons (plot1_ch1/plot1_ch2/plot2_ch1/plot2_ch2):
-                # just flip color for now, same on/off scheme as the panel
-                # selection buttons (COLOR_2 = active, COLOR_3 = inactive).
-                on(block.clicks) do _
-                    block.buttoncolor[] = block.buttoncolor[] == COLOR_2 ? COLOR_3 : COLOR_2
+            elseif block isa Toggle
+                on(block.active) do state
+                    commit_layout_value!(symbol, state)
                 end
             end
         end
