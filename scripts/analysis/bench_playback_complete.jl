@@ -8,7 +8,7 @@ using Observables
 const ROOT = normpath(joinpath(@__DIR__, ".."))
 
 include(joinpath(ROOT, "src", "config.jl"))
-include(joinpath(ROOT, "src", "lifetime_analysis2.jl"))
+include(joinpath(ROOT, "src", "lifetime_analysis.jl"))
 include(joinpath(ROOT, "src", "data_processing.jl"))
 
 const PlaybackTuple = Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32}

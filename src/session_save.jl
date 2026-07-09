@@ -132,9 +132,9 @@ function save_realtime_capture!(app, app_run, per_file_df::DataFrame)
             :frame_index_latest => app_run.i[]
         ),
         :per_file_dataframe => deepcopy(per_file_df),
-        :irf => (!(@isdefined irf) || irf === nothing) ? nothing : copy(irf),
-        :irf_bin_size => @isdefined(irf_bin_size) ? irf_bin_size : nothing,
-        :tcspc_window_size => @isdefined(tcspc_window_size) ? tcspc_window_size : nothing,
+        :irf => RUNTIME[].irf === nothing ? nothing : copy(RUNTIME[].irf),
+        :irf_bin_size => RUNTIME[].irf_bin_size,
+        :tcspc_window_size => RUNTIME[].tcspc_window_size,
         :data_root_path => get_data_root_path()
     )
 

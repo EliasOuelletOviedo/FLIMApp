@@ -14,7 +14,8 @@ function normalized_irf_from_fit(fit::AbstractVector{<:Real})
     nfit = length(fit)
     out = zeros(Float64, nfit)
 
-    if nfit == 0 || !(@isdefined irf) || irf === nothing || size(irf, 2) < 2
+    irf = RUNTIME[].irf
+    if nfit == 0 || irf === nothing || size(irf, 2) < 2
         return out
     end
 

@@ -1,5 +1,5 @@
 """
-Included by main.jl. `read_sdt_frame` in lifetime_analysis2.jl delegates its
+Included by FLIMApp.jl. `read_sdt_frame` in lifetime_analysis.jl delegates its
 histogram/header parsing to this module's `read_sdt`; see that function for
 the one field (frame_time) still read directly for legacy behavioral parity.
 

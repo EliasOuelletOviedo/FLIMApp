@@ -115,19 +115,25 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         app.current_panel = :layout
         save_state(app)
 
-        Label(panel_grid[1, 1];   merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Time range [s] :"))...)
-        Label(panel_grid[2, 1];   merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Binning :"))...)
-        Label(panel_grid[3, 1];   merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Smoothing :"))...)
+        Label(panel_grid[1, 1:3];   merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Time range [s] :"))...)
+        Label(panel_grid[2, 1:3];   merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Binning :"))...)
+        Label(panel_grid[3, 1:3];   merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Smoothing :"))...)
 
-        Label(panel_grid[4, 1:2]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 1"))...)
-        Label(panel_grid[6, 1:2]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 2"))...)
+        Label(panel_grid[4, 1:4]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 1"))...)
+        Label(panel_grid[4, 5:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
+        Label(panel_grid[6, 1:4]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 2"))...)
+        Label(panel_grid[6, 5:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
 
-        Box(panel_grid[1, 2]; SPINNER_BOX_ATTRS...)
-        Box(panel_grid[2, 2]; SPINNER_BOX_ATTRS...)
-        Box(panel_grid[3, 2]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[1, 4:6]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[2, 4:6]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[3, 4:6]; SPINNER_BOX_ATTRS...)
 
-        Box(panel_grid[5, 1:2]; SPINNER_BOX_ATTRS...)
-        Box(panel_grid[7, 1:2]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[5, 1:4]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[5, 5]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[5, 6]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[7, 1:4]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[7, 5]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[7, 6]; SPINNER_BOX_ATTRS...)
 
         options = ["Histogram", "Photon counts", "Lifetime", "Ion concentration", "Command"]
 
@@ -135,20 +141,24 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         app.layout.smoothing = smoothing_value
 
         layout_params = Dict{Symbol, Any}(
-            :time_range => (Textbox(panel_grid[1, 2]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout.time_range), :stored_string => string(app.layout.time_range)))...),
-                            Button(panel_grid[1, 2];  SPINNER_UP_ATTRS...),
-                            Button(panel_grid[1, 2];  SPINNER_DOWN_ATTRS...),
+            :time_range => (Textbox(panel_grid[1, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout.time_range), :stored_string => string(app.layout.time_range)))...),
+                            Button(panel_grid[1, 4:6];  SPINNER_UP_ATTRS...),
+                            Button(panel_grid[1, 4:6];  SPINNER_DOWN_ATTRS...),
                             (1, 99999, Int)),
-            :binning    => (Textbox(panel_grid[2, 2]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout.binning), :stored_string => string(app.layout.binning)))...),
-                            Button(panel_grid[2, 2];  SPINNER_UP_ATTRS...),
-                            Button(panel_grid[2, 2];  SPINNER_DOWN_ATTRS...),
+            :binning    => (Textbox(panel_grid[2, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout.binning), :stored_string => string(app.layout.binning)))...),
+                            Button(panel_grid[2, 4:6];  SPINNER_UP_ATTRS...),
+                            Button(panel_grid[2, 4:6];  SPINNER_DOWN_ATTRS...),
                             (1, 100, Int)),
-            :smoothing  => (Textbox(panel_grid[3, 2]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(smoothing_value), :stored_string => string(smoothing_value)))...),
-                            Button(panel_grid[3, 2];  SPINNER_UP_ATTRS...),
-                            Button(panel_grid[3, 2];  SPINNER_DOWN_ATTRS...),
+            :smoothing  => (Textbox(panel_grid[3, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(smoothing_value), :stored_string => string(smoothing_value)))...),
+                            Button(panel_grid[3, 4:6];  SPINNER_UP_ATTRS...),
+                            Button(panel_grid[3, 4:6];  SPINNER_DOWN_ATTRS...),
                             (0, 10, Int)),
-            :plot1      =>  Menu(panel_grid[5, 1:2];  merge(MENU_ATTRS, Dict(:default => app.layout.plot1, :options => options))...),
-            :plot2      =>  Menu(panel_grid[7, 1:2];  merge(MENU_ATTRS, Dict(:default => app.layout.plot2, :options => options))...),
+            :plot1      =>  Menu(panel_grid[5, 1:4];  merge(MENU_ATTRS, Dict(:default => app.layout.plot1, :options => options))...),
+            :plot2      =>  Menu(panel_grid[7, 1:4];  merge(MENU_ATTRS, Dict(:default => app.layout.plot2, :options => options))...),
+            :plot1_ch1  =>  Button(panel_grid[5, 5];  merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "1"))...),
+            :plot1_ch2  =>  Button(panel_grid[5, 6];  merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "2"))...),
+            :plot2_ch1  =>  Button(panel_grid[7, 5];  merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "1"))...),
+            :plot2_ch2  =>  Button(panel_grid[7, 6];  merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "2"))...),
         )
 
         function commit_layout_value!(key::Symbol, value)
@@ -249,11 +259,19 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
 
                     commit_layout_value!(symbol, selection)
                 end
+
+            elseif block isa Button
+                # Channel toggle buttons (plot1_ch1/plot1_ch2/plot2_ch1/plot2_ch2):
+                # just flip color for now, same on/off scheme as the panel
+                # selection buttons (COLOR_2 = active, COLOR_3 = inactive).
+                on(block.clicks) do _
+                    block.buttoncolor[] = block.buttoncolor[] == COLOR_2 ? COLOR_3 : COLOR_2
+                end
             end
         end
 
-        colsize!(panel_grid, 1, 80)
-        colsize!(panel_grid, 2, 80)
+        [colsize!(panel_grid, n, 28) for n in 1:6]
+        colgap!(panel_grid, 8)
         rowgap!(panel_grid, 3, 32)
         rowgap!(panel_grid, 4, 8)
         rowgap!(panel_grid, 6, 8)

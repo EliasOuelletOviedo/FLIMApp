@@ -42,7 +42,7 @@ include("serial.jl")              # 6. Serial port discovery + PID/PWM I/O
 include("protocol.jl")            # 7. Protocol schedule math
 include("plotting.jl")            # 8. Axis autoscaling + plot-series lookup
 include("io/SdtFile.jl")          # 9. .sdt block parser (used by read_sdt_frame below)
-include("lifetime_analysis2.jl")  # 10. Analysis algorithms, IRF/.sdt loading
+include("lifetime_analysis.jl")  # 10. Analysis algorithms, IRF/.sdt loading
 include("acquisition.jl")         # 11. Playback/Realtime/Save worker tasks
 include("session_save.jl")        # 12. Realtime-capture session saving
 include("runtime.jl")             # 13. Background task lifecycle
@@ -133,8 +133,8 @@ All globals should be:
 
 ### New Analysis Algorithm
 
-1. Add to `src/lifetime_analysis2.jl` (or create `src/new_analysis.jl`)
-2. Include in `FLIMApp.jl` after `lifetime_analysis2.jl`
+1. Add to `src/lifetime_analysis.jl` (or create `src/new_analysis.jl`)
+2. Include in `FLIMApp.jl` after `lifetime_analysis.jl`
 3. Export public functions:
    ```julia
    export my_analysis_function

@@ -13,8 +13,6 @@ using GLMakie
 using Observables
 using DataFrames
 
-const LIFETIME_WARMUP_DONE = Ref(false)
-
 """
 consumer_loop(app_run)
 
@@ -170,43 +168,6 @@ function infos_loop(app_run, info_label; rate=1.0)
     return nothing
 end
 
-function warmup_lifetime_fit!()
-    if LIFETIME_WARMUP_DONE[]
-        return true
-    end
-
-    if !(@isdefined irf) || irf === nothing || !(@isdefined irf_bin_size) || irf_bin_size === nothing ||
-       !(@isdefined tcspc_window_size) || tcspc_window_size === nothing
-        return false
-    end
-
-    try
-        n = DEFAULT_HISTOGRAM_RESOLUTION
-        x = collect(1.0:1.0:n)
-        synthetic_hist = @. 1800.0 * exp(-x / 36.0) + 20.0
-
-        t0 = time_ns()
-        params_raw, data = vec_to_lifetime(
-            Float64.(synthetic_hist);
-            guess=[3.0, 0.5, 0.5, 0.0, 5.0e-5],
-            histogram_resolution=n
-        )
-
-        if !isempty(params_raw) && !isnan(params_raw[1])
-            _ = conv_irf_data(data[1], Tuple(params_raw), irf; histogram_resolution=n)
-        end
-
-        LIFETIME_WARMUP_DONE[] = true
-        @info "Lifetime warmup completed" elapsed_ms=((time_ns() - t0) / 1e6)
-    catch e
-        @warn "Lifetime warmup failed; continuing" error=string(e)
-    end
-
-    return LIFETIME_WARMUP_DONE[]
-end
-
-
-
 # -----------------------------------------------------------------------------
 # button handlers
 # -----------------------------------------------------------------------------
@@ -335,14 +296,12 @@ function start_pressed(app, app_run, blocks)
     end
 
     # Check if IRF is loaded before starting
-    @info "Checking IRF before start: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
-    if irf === nothing || tcspc_window_size === nothing
+    @info "Checking IRF before start: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
+    if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
         @error "Cannot start acquisition: IRF not loaded. Please load an IRF file first."
-        @error "IRF status: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
+        @error "IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
         return
     end
-
-    warmup_lifetime_fit!()
 
     @info "Starting test function"
     app_run.running[] = true

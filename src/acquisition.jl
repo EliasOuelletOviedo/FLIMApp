@@ -81,6 +81,12 @@ function run_acquisition_loop!(
     pid_prev_raw_lifetime = NaN
     pid_scale_est = 1.0e-6
 
+    # Captured once, not per-iteration: RuntimeContext is mutable and RUNTIME[]
+    # always returns the same object, so this stays live if init_irf_runtime!()
+    # reloads the IRF mid-run — while letting the compiler specialize the loop
+    # body on ctx's concrete field types instead of re-reading an untyped global.
+    ctx = RUNTIME[]
+
     while running[]
         filepath = next_file!(n)
         if filepath === nothing
@@ -144,18 +150,22 @@ function run_acquisition_loop!(
 
         histogram = data[2]
         photons = sum(histogram)
-        fit = conv_irf_data(data[1], Tuple(params), irf; histogram_resolution=histogram_resolution) * photons
+        fit = conv_irf_data(data[1], Tuple(params), ctx.irf; histogram_resolution=histogram_resolution) * photons
         lifetime = params[1]
         concentration = (9.5 / lifetime - 1) / 0.025
         timestamps += frame_time
         n += 1
 
         current_protocol = resolve_protocol_config(protocol)
-        setpoint_ns = if current_protocol === nothing || !current_protocol.active
-            fallback_setpoint_ns
-        else
-            protocol_setpoint_at_timestamp(current_protocol, timestamps)
-        end
+        protocol_active = current_protocol !== nothing && current_protocol.active
+        setpoint_ns = protocol_active ? protocol_setpoint_at_timestamp(current_protocol, timestamps) : fallback_setpoint_ns
+
+        # Distinct from setpoint_ns: PID control keeps regulating toward the
+        # fallback setpoint even without an active protocol, but the plotted
+        # series/highlight should only reflect a genuine protocol schedule —
+        # otherwise the Lifetime plot shows a spurious line and vspan at the
+        # fallback value whenever the protocol is off.
+        plot_setpoint_ns = protocol_active ? setpoint_ns : NaN
 
         smooth_level = layout_smoothing_level(layout)
         lifetime_for_pid, pid_prev_smooth_lifetime, pid_prev_raw_lifetime, pid_scale_est =
@@ -211,7 +221,7 @@ function run_acquisition_loop!(
             break
         end
 
-        sample = (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, setpoint_ns, n, String(filepath))
+        sample = (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, plot_setpoint_ns, n, String(filepath))
         if !emit!(sample, n)
             break
         end
@@ -246,10 +256,10 @@ function start_playback(
     try
         @info "Playback worker started on thread $(threadid())"
 
-        @info "Checking IRF status: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
-        if irf === nothing || tcspc_window_size === nothing
+        @info "Checking IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
+        if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
             @error "IRF not loaded - cannot start data processing. Please load an IRF file first."
-            @error "IRF status: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
+            @error "IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
             return nothing
         end
 
@@ -351,29 +361,28 @@ function start_realtime(
     try
         @info "Real-time worker started on thread $(threadid())"
 
-        @info "Checking IRF status: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
-        if irf === nothing || tcspc_window_size === nothing
+        @info "Checking IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
+        if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
             @error "IRF not loaded - cannot start data processing. Please load an IRF file first."
-            @error "IRF status: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
+            @error "IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
             return nothing
         end
 
         path = get_data_root_path()
         @info "Real-time mode active: waiting for new .sdt files in $path"
 
-        last_processed_filepath = Ref("")
         last_dir_mtime = Ref(0.0)
-        known_sdt_files = Ref(String[])
         next_scan_at = Ref(0.0)
 
-        # Build initial file list once.
-        for entry in readdir(path; join=true)
-            if isfile(entry) && endswith(lowercase(entry), ".sdt")
-                push!(known_sdt_files[], entry)
-            end
-        end
+        # Build the initial queue sorted, so the oldest file is processed
+        # first — the first file shown in the plots should be the first
+        # file read, not whichever file happens to be newest when the mode
+        # starts on a folder that already has a backlog.
+        initial_files = sort(filter(f -> isfile(f) && endswith(lowercase(f), ".sdt"), readdir(path; join=true)))
+        pending_queue = Ref(initial_files)
+        known_sdt_files = Ref(Set{String}(initial_files))
 
-        if isempty(known_sdt_files[])
+        if isempty(pending_queue[])
             @warn "No .sdt files found yet in real-time folder" path=path
         end
 
@@ -382,6 +391,10 @@ function start_realtime(
                 if paused !== nothing && paused[]
                     sleep(min(dt, 0.05))
                     continue
+                end
+
+                if !isempty(pending_queue[])
+                    return popfirst!(pending_queue[])
                 end
 
                 now_t = time()
@@ -407,45 +420,23 @@ function start_realtime(
                 if current_dir_mtime != last_dir_mtime[]
                     last_dir_mtime[] = current_dir_mtime
 
-                    known_sdt_files[] = String[]
+                    new_files = String[]
                     for entry in readdir(path; join=true)
-                        if isfile(entry) && endswith(lowercase(entry), ".sdt")
+                        if isfile(entry) && endswith(lowercase(entry), ".sdt") && !(entry in known_sdt_files[])
+                            push!(new_files, entry)
                             push!(known_sdt_files[], entry)
                         end
                     end
-                end
 
-                if isempty(known_sdt_files[])
-                    sleep(poll_interval_s)
-                    continue
-                end
-
-                latest_filepath = known_sdt_files[][1]
-                latest_mtime = try
-                    stat(latest_filepath).mtime
-                catch
-                    0.0
-                end
-
-                for f in known_sdt_files[]
-                    mt = try
-                        stat(f).mtime
-                    catch
-                        -1.0
-                    end
-                    if mt > latest_mtime
-                        latest_mtime = mt
-                        latest_filepath = f
+                    if !isempty(new_files)
+                        append!(pending_queue[], sort(new_files))
                     end
                 end
 
-                if latest_filepath == last_processed_filepath[]
+                if isempty(pending_queue[])
                     sleep(poll_interval_s)
                     continue
                 end
-
-                last_processed_filepath[] = latest_filepath
-                return latest_filepath
             end
             return nothing
         end
@@ -506,10 +497,10 @@ function start_save(
     try
         @info "Save worker started on thread $(threadid())"
 
-        @info "Checking IRF status: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
-        if irf === nothing || tcspc_window_size === nothing
+        @info "Checking IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
+        if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
             @error "IRF not loaded - cannot start data processing. Please load an IRF file first."
-            @error "IRF status: irf=$(irf !== nothing), tcspc_window_size=$(tcspc_window_size !== nothing)"
+            @error "IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
             return nothing
         end
 

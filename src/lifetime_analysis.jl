@@ -1,5 +1,5 @@
 """
-lifetime_analysis2.jl
+lifetime_analysis.jl
 
 Fluorescence lifetime fitting algorithms and IRF (Instrument Response Function) management.
 
@@ -145,20 +145,80 @@ end
 isnotnan(x) = !isnan(x)
 smaller_or_eq_zero(x) = x <= 0
 
-var"fft_plan" = plan_fft(zeros(Float64, 256))
-var"ifft_plan" = plan_ifft(zeros(Float64, 256))
-var"fft_plan_size" = 256
-var"irf" = nothing
-var"irf_bin_size" = nothing
-var"tcspc_window_size" = nothing
-var"irf_cache_source_id" = UInt(0)
+# Concrete FFTW plan types, computed once rather than hardcoded — each is
+# empirically stable across input lengths (length isn't part of a Vector's
+# type), but deriving them this way stays correct even if FFTW.jl's internal
+# parametrization changes across versions. `plan_fft` and `plan_ifft` are
+# NOT the same type as each other: `plan_ifft` wraps its plan in an
+# `AbstractFFTs.ScaledPlan` for the 1/N normalization, so they need separate
+# aliases rather than one shared `FFTPlanType`.
+const FFTPlanType = typeof(plan_fft(zeros(Float64, 1)))
+const IFFTPlanType = typeof(plan_ifft(zeros(Float64, 1)))
+
+"""
+    RuntimeContext
+
+IRF and FFT-plan state shared by the lifetime-fitting and acquisition code.
+Held behind the `const` `RUNTIME` `Ref` below so every field access is
+concretely typed (unlike a bare untyped `global`), which matters here since
+this is read from the acquisition hot loop (up to 1kHz in Playback mode).
+
+Fields:
+- `irf` - Loaded Instrument Response Function, or `nothing` before/if loading fails
+- `irf_bin_size` - IRF time-bin width in ns
+- `tcspc_window_size` - Total TCSPC acquisition window in ns
+- `fft_plan` / `ifft_plan` - Planned FFTW transforms, sized `fft_plan_size`
+- `fft_plan_size` - Histogram resolution the current plans were built for
+- `irf_cache_source_id` - `objectid(irf)` at last cache build, to detect a
+  newly-loaded IRF and invalidate `IRF_CHANNEL_CACHE`
+"""
+mutable struct RuntimeContext
+    irf::Union{Nothing, Matrix{Float64}}
+    irf_bin_size::Union{Nothing, Float64}
+    tcspc_window_size::Union{Nothing, Float64}
+    fft_plan::FFTPlanType
+    ifft_plan::IFFTPlanType
+    fft_plan_size::Int
+    irf_cache_source_id::UInt
+end
+
+"""
+    RUNTIME::Ref{RuntimeContext}
+
+Populated in `__init__()` below, not here, with a 256-point FFT plan default
+(matching histogram resolution) and no IRF loaded yet. Always defined by the
+time any application code runs — callers never need to guard against it not
+existing, only against `RUNTIME[].irf` still being `nothing`.
+
+FFTW plans wrap a raw C pointer (`fftw_plan`) that is only valid within the
+process that created it. Building the initial plans here, in a top-level
+`const` initializer, would run them once during precompilation and bake that
+now-stale pointer into the precompiled package cache — the next process to
+load the package from that cache would execute a dangling pointer and
+segfault (confirmed empirically: this crashed 100% of the time on the first
+FFT execution after a precompiled load, and disappeared once construction
+moved into `__init__()`). `__init__()` is Julia's mechanism for exactly this
+case: it reruns in every fresh process, precompiled or not.
+"""
+const RUNTIME = Ref{RuntimeContext}()
+
+function __init__()
+    RUNTIME[] = RuntimeContext(
+        nothing, nothing, nothing,
+        plan_fft(zeros(Float64, 256)), plan_ifft(zeros(Float64, 256)), 256,
+        UInt(0)
+    )
+    return nothing
+end
 
 function ensure_fft_plans(size::Int)
-    if fft_plan_size != size
-        global fft_plan = plan_fft(zeros(Float64, size))
-        global ifft_plan = plan_ifft(zeros(Float64, size))
-        global fft_plan_size = size
+    ctx = RUNTIME[]
+    if ctx.fft_plan_size != size
+        ctx.fft_plan = plan_fft(zeros(Float64, size))
+        ctx.ifft_plan = plan_ifft(zeros(Float64, size))
+        ctx.fft_plan_size = size
     end
+    return nothing
 end
 
 function get_x_data(total_channels::Int, bin_size::Float64)::Vector{Float64}
@@ -200,8 +260,9 @@ function get_gating_function(total_channels::Int, low_cut_idx::Int, high_cut_idx
 end
 
 function get_irf_for_channels(total_channels::Int)::Matrix{Float64}
-    if size(irf, 1) == total_channels
-        return irf
+    ctx = RUNTIME[]
+    if size(ctx.irf, 1) == total_channels
+        return ctx.irf
     end
 
     cached = get(IRF_CHANNEL_CACHE, total_channels, nothing)
@@ -210,9 +271,9 @@ function get_irf_for_channels(total_channels::Int)::Matrix{Float64}
     end
 
     new_irf = zeros(Float64, total_channels, 2)
-    new_irf[:, 1] = collect(irf_bin_size:irf_bin_size:irf_bin_size * total_channels)
-    ncopy = min(total_channels, size(irf, 1))
-    new_irf[1:ncopy, 2] = irf[1:ncopy, 2]
+    new_irf[:, 1] = collect(ctx.irf_bin_size:ctx.irf_bin_size:ctx.irf_bin_size * total_channels)
+    ncopy = min(total_channels, size(ctx.irf, 1))
+    new_irf[1:ncopy, 2] = ctx.irf[1:ncopy, 2]
 
     IRF_CHANNEL_CACHE[total_channels] = new_irf
     return new_irf
@@ -251,23 +312,24 @@ function clamp_initial_point!(params_copy::Vector{Float64}, lower_bounds::Vector
 end
 
 function ensure_runtime_state!()
-    if irf === nothing
-        error("IRF not loaded. Define global irf = get_irf() before calling vec_to_lifetime.")
+    ctx = RUNTIME[]
+    if ctx.irf === nothing
+        error("IRF not loaded. Call init_irf_runtime!() (or set RUNTIME[].irf) before calling vec_to_lifetime.")
     end
-    if irf_bin_size === nothing || !isfinite(irf_bin_size)
-        error("irf_bin_size not initialized. Define global irf_bin_size = compute_irf_bin_size(irf).")
+    if ctx.irf_bin_size === nothing || !isfinite(ctx.irf_bin_size)
+        error("irf_bin_size not initialized. Set RUNTIME[].irf_bin_size = compute_irf_bin_size(RUNTIME[].irf).")
     end
-    if tcspc_window_size === nothing || !isfinite(tcspc_window_size) || tcspc_window_size <= 0
-        error("tcspc_window_size not initialized. Define global tcspc_window_size from irf.")
+    if ctx.tcspc_window_size === nothing || !isfinite(ctx.tcspc_window_size) || ctx.tcspc_window_size <= 0
+        error("tcspc_window_size not initialized. Set RUNTIME[].tcspc_window_size from RUNTIME[].irf.")
     end
 
-    src_id = objectid(irf)
-    if irf_cache_source_id != src_id
+    src_id = objectid(ctx.irf)
+    if ctx.irf_cache_source_id != src_id
         empty!(IRF_CHANNEL_CACHE)
-        global irf_cache_source_id = src_id
+        ctx.irf_cache_source_id = src_id
     end
 
-    ensure_fft_plans(size(irf, 1))
+    ensure_fft_plans(size(ctx.irf, 1))
     return nothing
 end
 
@@ -281,7 +343,8 @@ function convolve(irf_vec::Vector{Float64}, decay::Vector{Float64}; histogram_re
     end
 
     ensure_fft_plans(length(irf_vec))
-    y = real.(ifft_plan * ((fft_plan * irf_vec) .* (fft_plan * decay)))
+    ctx = RUNTIME[]
+    y = real.(ctx.ifft_plan * ((ctx.fft_plan * irf_vec) .* (ctx.fft_plan * decay)))
 
     lo = clamp(tcspc_low_cut_index, 1, histogram_resolution)
     hi = clamp(histogram_resolution - tcspc_high_cut_index, lo, histogram_resolution)
@@ -423,7 +486,7 @@ function find_mean_arrival_time(counts::AbstractVector{<:Real}; tcspc_high_cut_i
 end
 
 function lifetime_estimate(counts::AbstractVector{<:Real}; bin_size=0.039, tcspc_high_cut_index::Int64=0)
-    mean_irf_arrival_time = find_mean_arrival_time(irf[:, 2], tcspc_high_cut_index=tcspc_high_cut_index)
+    mean_irf_arrival_time = find_mean_arrival_time(RUNTIME[].irf[:, 2], tcspc_high_cut_index=tcspc_high_cut_index)
     mean_data_arrival_time = find_mean_arrival_time(counts, tcspc_high_cut_index=tcspc_high_cut_index)
     return ((mean_data_arrival_time - mean_irf_arrival_time) * bin_size)::Float64
 end
@@ -440,6 +503,7 @@ function mle_reconvolution_fit(data_irf::Matrix{Float64}, data_xy::Vector{Vector
         return fixed_parameters
     end
 
+    irf_bin_size = RUNTIME[].irf_bin_size
     if number_of_lifetimes == 1
         if use_lifetime_estimation_as_guess
             params_copy[1] = lifetime_estimate(y_data, bin_size=irf_bin_size, tcspc_high_cut_index=tcspc_high_cut_index)
@@ -531,6 +595,7 @@ end
 
 function vec_to_lifetime(x; bin_size=0.04886091184430619, hist_size_threshold=500, method="MLE", guess=[3.0, 1.0, 1e-6], laser_pulse_period=12.5, histogram_resolution=256, number_of_previous_pulses=5, tac_low_cut=5.0980392, tac_high_cut=94.901962, IRF_delay=NaN, IRF_width=NaN, IRF_cutoff=NaN, lifetime_estimation=NaN, standard_deviation_estimation=NaN, fixed_parameters=Float64[NaN, NaN, NaN], use_lifetime_estimation_as_guess::Bool=true, first_fit::Bool=false)
     ensure_runtime_state!()
+    tcspc_window_size = RUNTIME[].tcspc_window_size
 
     requested_channels = round(Int, laser_pulse_period * histogram_resolution / tcspc_window_size)
     total_channels = requested_channels
@@ -570,7 +635,7 @@ function vec_to_lifetime(x; bin_size=0.04886091184430619, hist_size_threshold=50
     end
 
     if method != "MLE"
-        error("Unsupported method in simplified lifetime_analysis2.jl: $method. Supported methods: \"MLE\", \"Estimate\".")
+        error("Unsupported method in simplified lifetime_analysis.jl: $method. Supported methods: \"MLE\", \"Estimate\".")
     end
 
     low_cut_index = round(Int, tac_low_cut / 100 * histogram_resolution)

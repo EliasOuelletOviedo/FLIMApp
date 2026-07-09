@@ -457,7 +457,7 @@ SPINNER_TEXT_ATTRS = Dict{Symbol, Any}(
     :reset_on_defocus            => true,
     :textcolor_placeholder       => TEXT,
     :textpadding                 => (8, 0, 0, 4),
-    :width                       => 56
+    :width                       => 76
 )
 
 SPINNER_UP_ATTRS = Dict{Symbol, Any}(

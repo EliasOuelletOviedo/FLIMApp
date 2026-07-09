@@ -10,7 +10,7 @@ using LineSearches
 const ROOT = normpath(joinpath(@__DIR__, ".."))
 
 include(joinpath(ROOT, "src", "config.jl"))
-include(joinpath(ROOT, "src", "lifetime_analysis2.jl"))
+include(joinpath(ROOT, "src", "lifetime_analysis.jl"))
 include(joinpath(ROOT, "src", "data_processing.jl"))
 
 function percentile(values::Vector{Float64}, p::Float64)

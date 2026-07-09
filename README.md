@@ -43,7 +43,7 @@ FLIMApp/
 │   ├── serial.jl               # Serial port discovery + PID/PWM command I/O
 │   ├── protocol.jl             # Protocol schedule math
 │   ├── plotting.jl             # Plot-axis autoscaling and plot-series lookup
-│   ├── lifetime_analysis2.jl   # Lifetime fitting algorithms (MLE), IRF loading
+│   ├── lifetime_analysis.jl   # Lifetime fitting algorithms (MLE), IRF loading
 │   ├── acquisition.jl          # Playback/Realtime/Save acquisition worker tasks
 │   ├── session_save.jl         # Realtime-capture session saving (.jls + CSV)
 │   ├── runtime.jl              # Background task lifecycle (start/pause/stop)
@@ -56,7 +56,7 @@ FLIMApp/
 │   ├── handlers.jl             # Event handler orchestrator
 │   ├── GUI.jl                  # Makie GUI construction
 │   └── io/
-│       ├── SdtFile.jl          # SDT block parser; used by lifetime_analysis2.jl's read_sdt_frame
+│       ├── SdtFile.jl          # SDT block parser; used by lifetime_analysis.jl's read_sdt_frame
 │       └── ImageJROI.jl        # WIP: ImageJ ROI reader (not yet wired in)
 ├── test/
 │   ├── runtests.jl             # Test suite
@@ -109,7 +109,7 @@ Binary format for time-correlated single photon counting (TCSPC) data. The appli
 - Time resolution information
 - Multi-channel recording data
 
-The reader (`read_sdt_frame` in `lifetime_analysis2.jl`) delegates header/block
+The reader (`read_sdt_frame` in `lifetime_analysis.jl`) delegates header/block
 parsing to the `SdtFile` module (`src/io/SdtFile.jl`), which handles both
 compressed (ZIP) and uncompressed formats.
 
@@ -125,7 +125,7 @@ module FLIMApp
         ↓
     plotting.jl
         ↓
-    lifetime_analysis2.jl
+    lifetime_analysis.jl
         ↓
     acquisition.jl   session_save.jl
         ↓
@@ -157,7 +157,7 @@ Core data structures:
 - **AppState**: Persistent user settings (serialized to AppState.jls)
 - **AppRun**: Runtime state with observables for reactive GUI updates
 
-#### `lifetime_analysis2.jl`
+#### `lifetime_analysis.jl`
 Maximum Likelihood Estimation fitting for fluorescence decay, plus IRF/.sdt loading:
 - Single to 4-exponential decay models
 - IRF shift/delay compensation

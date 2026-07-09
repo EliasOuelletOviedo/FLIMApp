@@ -27,7 +27,7 @@
 - [src/handlers_layout.jl](src/handlers_layout.jl), [handlers_controller.jl](src/handlers_controller.jl), [handlers_protocol.jl](src/handlers_protocol.jl), [handlers_console.jl](src/handlers_console.jl) - One file per panel's own controls
 
 #### Analysis & Processing
-- [src/lifetime_analysis2.jl](src/lifetime_analysis2.jl) - MLE fitting algorithms, IRF/.sdt loading
+- [src/lifetime_analysis.jl](src/lifetime_analysis.jl) - MLE fitting algorithms, IRF/.sdt loading
 - [src/acquisition.jl](src/acquisition.jl) - Playback/Realtime/Save worker tasks
 - [src/serial.jl](src/serial.jl) - Serial port discovery + PID/PWM I/O
 - [src/protocol.jl](src/protocol.jl) - Protocol schedule math
@@ -52,7 +52,7 @@
 → Define in [src/runtime.jl](src/runtime.jl), launch in start_pressed()
 
 ### "How do I understand the lifetime fitting?"
-→ Start with [src/lifetime_analysis2.jl](src/lifetime_analysis2.jl) vec_to_lifetime()
+→ Start with [src/lifetime_analysis.jl](src/lifetime_analysis.jl) vec_to_lifetime()
 
 ### "How do I modify the data flow?"
 → Check [src/runtime.jl](src/runtime.jl) consumer_loop() and Channel usage
@@ -69,7 +69,7 @@ in `run_acquisition_loop!` in the same file
 
 ### For Performance Understanding
 1. [src/acquisition.jl](src/acquisition.jl) - Sliding window optimization
-2. [src/lifetime_analysis2.jl](src/lifetime_analysis2.jl) - FFT planning
+2. [src/lifetime_analysis.jl](src/lifetime_analysis.jl) - FFT planning
 
 ### For Reactive Programming
 1. [src/data_types.jl](src/data_types.jl) - Observable definitions
@@ -78,7 +78,7 @@ in `run_acquisition_loop!` in the same file
 
 ### For Hardware Integration
 1. [src/serial.jl](src/serial.jl) list_ports() - Serial enumeration
-2. [src/lifetime_analysis2.jl](src/lifetime_analysis2.jl) read_sdt_frame() - File reading
+2. [src/lifetime_analysis.jl](src/lifetime_analysis.jl) read_sdt_frame() - File reading
 
 ## Testing
 

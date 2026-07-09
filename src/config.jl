@@ -24,20 +24,21 @@ using Colors
 
 Path to the serialized application state file.
 
-Named `AppState_v2.jls` (not `AppState.jls`) because `AppState`'s settings
-fields changed from `Dict{Symbol,Any}` to typed structs in this version.
-`Serialization.deserialize` does not reliably error on that kind of field
--type change — empirically, reading an old `AppState.jls` back sometimes
-reconstructs a type-inconsistent object (e.g. `layout` holding a raw `Dict`
-in a field declared `::LayoutSettings`) and sometimes doesn't, depending on
-process/session state, which makes a post-hoc `isa` check on the result an
-unreliable guard on its own (see `valid_app_state` in FLIMApp.jl, kept as
-defense-in-depth for *future* schema changes, not relied on for *this*
-one). Using a new filename sidesteps the ambiguity entirely: old files are
-simply never read by this version, deterministically falling through to
-`load_or_create_state()`'s fresh-defaults path.
+`save_state` serializes a plain `Dict` (via `struct_to_dict`), not the raw
+`AppState` struct. Serializing a custom struct directly ties the file to the
+exact module identity (`Base.PkgId(uuid, "FLIMApp")`) active when it was
+saved — if the app is loaded differently next time (e.g. `using FLIMApp`
+vs. running `src/FLIMApp.jl` directly, which VS Code's "Run File" does),
+that identity doesn't match and `deserialize` throws a `KeyError` on the
+`PkgId` lookup, even though nothing about the data itself is wrong
+(confirmed empirically: save under one loading mode, load under the other,
+every time). Plain `Dict`/`Vector`/`Float64`/etc. values have no such
+identity to resolve, so they survive regardless of how the app was loaded.
+`load_state` falls through to `load_or_create_state()`'s fresh-defaults path
+for any file it can't read (wrong format, corrupted, etc.) rather than
+trying to detect and migrate it.
 """
-const STATE_FILE_PATH = joinpath("docs", "AppState_v2.jls")
+const STATE_FILE_PATH = joinpath("docs", "AppState.jls")
 
 """
     IRF_FILEPATH_CACHE::String

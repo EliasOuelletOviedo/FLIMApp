@@ -49,13 +49,13 @@ include("protocol.jl")
 # Plot-axis autoscaling and plot-series lookup (needed by runtime.jl and GUI.jl)
 include("plotting.jl")
 
-# Becker & Hickl .sdt file parser (used by lifetime_analysis2.jl's read_sdt_frame)
+# Becker & Hickl .sdt file parser (used by lifetime_analysis.jl's read_sdt_frame)
 include("io/SdtFile.jl")
 
 # Analysis algorithms (lifetime fitting)
-include("lifetime_analysis2.jl")
+include("lifetime_analysis.jl")
 
-# Acquisition worker tasks (depends on lifetime_analysis2, protocol.jl, smoothing.jl)
+# Acquisition worker tasks (depends on lifetime_analysis, protocol.jl, smoothing.jl)
 include("acquisition.jl")
 
 # Realtime-capture session saving (depends on data_types.jl, path_utils.jl)
@@ -87,9 +87,39 @@ include("GUI.jl")
 # =============================================================================
 
 """
+    struct_to_dict(x)
+
+Recursively convert a struct (and any nested structs) into a plain
+`Dict{Symbol,Any}`, leaving `Bool`/`Int`/`Float64`/`String`/`Symbol` values
+and vectors (copied, to avoid aliasing the original) untouched.
+
+Used to strip `AppState` down to plain, module-independent data before
+serializing — see `STATE_FILE_PATH`'s docstring for why serializing the
+struct directly is unsafe.
+"""
+struct_to_dict(x::Union{Bool, Int, Float64, String, Symbol, Nothing}) = x
+struct_to_dict(x::AbstractVector) = copy(x)
+struct_to_dict(x) = Dict{Symbol, Any}(name => struct_to_dict(getfield(x, name)) for name in fieldnames(typeof(x)))
+
+"""
+    dict_to_struct(::Type{T}, d::Dict) where T
+
+Inverse of `struct_to_dict`: reconstruct a `T` from a plain `Dict`, using
+`T`'s default positional constructor (every struct has one, whether or not
+it's `Base.@kwdef`, as long as no inner constructor suppresses it — true for
+`AppState` and all of its settings structs). A value that is itself a
+`Dict` is recursively reconstructed via the corresponding field's declared
+type.
+"""
+function dict_to_struct(::Type{T}, d::Dict) where T
+    values = (d[name] isa Dict ? dict_to_struct(fieldtype(T, name), d[name]) : d[name] for name in fieldnames(T))
+    return T(values...)
+end
+
+"""
     save_state(state::AppState; path::String)
 
-Serialize application state to disk.
+Serialize application state to disk as a plain `Dict` (see `struct_to_dict`).
 
 Args:
 - `state::AppState` - Persistent configuration to save
@@ -99,7 +129,7 @@ function save_state(state::AppState; path::String=STATE_FILE_PATH)
     try
         mkpath(dirname(path))
         open(path, "w") do io
-            serialize(io, state)
+            serialize(io, struct_to_dict(state))
         end
         @info "State saved" path=path
     catch e
@@ -110,19 +140,14 @@ end
 """
     valid_app_state(state)::Bool
 
-Check that a deserialized object is actually a well-formed `AppState` with
+Check that a reconstructed object is actually a well-formed `AppState` with
 each settings field holding its expected struct type.
 
-This matters because `Serialization.deserialize` does **not** error on a
-type mismatch the way you'd expect: a state file saved before settings
-became typed structs (when `layout` etc. were `Dict{Symbol,Any}`)
-deserializes *without throwing*, reconstructing an `AppState` whose
-`layout` field is still a bare `Dict` — type-inconsistent with the current
-`AppState` definition. Left unchecked, that object passes `load_state()`
-silently and only fails later (e.g. the first `app.layout.time_range`
-access deep inside `make_gui`), which is a confusing place to discover a
-stale save file. Checking eagerly here turns that into the same, already
--handled "revert to defaults" path as any other load failure.
+`dict_to_struct` always builds proper `AppState`/`LayoutSettings`/etc.
+instances (or throws, e.g. a `KeyError` on a missing field from an
+older-format file — caught by `load_state`'s `try/catch`), so this is
+defense-in-depth for future schema changes rather than something load_state
+relies on today.
 """
 function valid_app_state(state)::Bool
     return state isa AppState &&
@@ -153,9 +178,16 @@ function load_state(path::String=STATE_FILE_PATH)
     end
 
     try
-        result = open(path, "r") do io
+        raw = open(path, "r") do io
             deserialize(io)
         end
+
+        if !(raw isa Dict)
+            @warn "Saved state has an outdated format; reverting to defaults" path=path
+            return nothing
+        end
+
+        result = dict_to_struct(AppState, raw)
 
         if !valid_app_state(result)
             @warn "Saved state has an outdated format; reverting to defaults" path=path
@@ -200,23 +232,29 @@ end
 """
     init_irf_runtime!()
 
-Load IRF-related globals used by lifetime fitting and FFT-based operations.
-Falls back to `nothing` values when loading fails.
+Load the IRF into `RUNTIME[]`, used by lifetime fitting and FFT-based
+operations. Falls back to `nothing` fields when loading fails.
+
+Doesn't touch `RUNTIME[].fft_plan`/`ifft_plan` — those already have a valid
+256-point default from `RUNTIME`'s initialization, and `ensure_fft_plans`
+(called from `ensure_runtime_state!` on every fit) replans on demand for
+whatever size is actually needed, so redoing the same 256-point plan here
+on every call would just be wasted work.
 """
 function init_irf_runtime!()
+    ctx = RUNTIME[]
     try
-        global irf = get_irf()
-        global irf_bin_size = get_irf_bin_size()
-        global tcspc_window_size = round(irf[end, 1] + irf[2, 1], sigdigits=4)
-        global fft_plan = plan_fft(zeros(Float64, 256))
-        global ifft_plan = plan_ifft(zeros(Float64, 256))
+        new_irf = get_irf()
+        ctx.irf = new_irf
+        ctx.irf_bin_size = get_irf_bin_size()
+        ctx.tcspc_window_size = round(new_irf[end, 1] + new_irf[2, 1], sigdigits=4)
 
-        @info "IRF loaded successfully" size=size(irf) bin_size=irf_bin_size window_size=tcspc_window_size
+        @info "IRF loaded successfully" size=size(ctx.irf) bin_size=ctx.irf_bin_size window_size=ctx.tcspc_window_size
     catch e
         @error "Failed to load IRF; lifetime fitting will not work" error=string(e)
-        global irf = nothing
-        global irf_bin_size = nothing
-        global tcspc_window_size = nothing
+        ctx.irf = nothing
+        ctx.irf_bin_size = nothing
+        ctx.tcspc_window_size = nothing
     end
 
     return nothing
