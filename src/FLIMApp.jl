@@ -108,11 +108,38 @@ function save_state(state::AppState; path::String=STATE_FILE_PATH)
 end
 
 """
+    valid_app_state(state)::Bool
+
+Check that a deserialized object is actually a well-formed `AppState` with
+each settings field holding its expected struct type.
+
+This matters because `Serialization.deserialize` does **not** error on a
+type mismatch the way you'd expect: a state file saved before settings
+became typed structs (when `layout` etc. were `Dict{Symbol,Any}`)
+deserializes *without throwing*, reconstructing an `AppState` whose
+`layout` field is still a bare `Dict` — type-inconsistent with the current
+`AppState` definition. Left unchecked, that object passes `load_state()`
+silently and only fails later (e.g. the first `app.layout.time_range`
+access deep inside `make_gui`), which is a confusing place to discover a
+stale save file. Checking eagerly here turns that into the same, already
+-handled "revert to defaults" path as any other load failure.
+"""
+function valid_app_state(state)::Bool
+    return state isa AppState &&
+           state.layout isa LayoutSettings &&
+           state.controller isa ControllerSettings &&
+           state.protocol isa ProtocolSettings &&
+           state.roi isa RoiSettings &&
+           state.console isa ConsoleSettings
+end
+
+"""
     load_state(path::String)::AppState
 
 Deserialize application state from disk.
 
-Returns cached state if file exists; otherwise returns nothing.
+Returns cached state if file exists and is well-formed (see
+`valid_app_state`); otherwise returns nothing.
 
 Args:
 - `path::String` - File path (default: STATE_FILE_PATH from config)
@@ -126,9 +153,16 @@ function load_state(path::String=STATE_FILE_PATH)
     end
 
     try
-        open(path, "r") do io
-            return deserialize(io)
+        result = open(path, "r") do io
+            deserialize(io)
         end
+
+        if !valid_app_state(result)
+            @warn "Saved state has an outdated format; reverting to defaults" path=path
+            return nothing
+        end
+
+        return result
     catch e
         @warn "Failed to load state; reverting to defaults" path=path error=string(e)
         return nothing

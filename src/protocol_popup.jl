@@ -141,18 +141,21 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
         return
     end
 
-    default_protocol = get_default_protocol()
-    default_step_count = length(default_protocol[:times])
+    default_step_count = PROTOCOL_STEP_COUNT
 
-    saved_repeats = protocol_int_from_any(get(app.protocol, :repeats, default_protocol[:repeats]), default_protocol[:repeats]; min_value=0)
-    saved_delay = protocol_int_from_any(get(app.protocol, :delay, default_protocol[:delay]), default_protocol[:delay]; min_value=0)
-    saved_times = protocol_normalize_vector(get(app.protocol, :times, default_protocol[:times]), default_step_count)
-    saved_setpoints = protocol_normalize_vector(get(app.protocol, :setpoints, default_protocol[:setpoints]), default_step_count)
+    # times/setpoints are length-normalized defensively: the struct guarantees
+    # Vector{Float64}, but not that its length still matches PROTOCOL_STEP_COUNT
+    # (e.g. a future schema change). repeats/delay are already Int; only the
+    # non-negativity business rule needs enforcing here.
+    saved_repeats = max(app.protocol.repeats, 0)
+    saved_delay = max(app.protocol.delay, 0)
+    saved_times = protocol_normalize_vector(app.protocol.times, default_step_count)
+    saved_setpoints = protocol_normalize_vector(app.protocol.setpoints, default_step_count)
 
-    app.protocol[:repeats] = saved_repeats
-    app.protocol[:delay] = saved_delay
-    app.protocol[:times] = copy(saved_times)
-    app.protocol[:setpoints] = copy(saved_setpoints)
+    app.protocol.repeats = saved_repeats
+    app.protocol.delay = saved_delay
+    app.protocol.times = copy(saved_times)
+    app.protocol.setpoints = copy(saved_setpoints)
     sync_runtime_protocol!(app, app_run)
     save_state(app)
 
@@ -284,10 +287,10 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
     end
 
     function persist_protocol_state!()
-        app.protocol[:repeats] = protocol_parse_int_or(repeats_input.stored_string[], 1)
-        app.protocol[:delay] = protocol_parse_int_or(delay_input.stored_string[], 0)
-        app.protocol[:times] = copy(step_duration_values)
-        app.protocol[:setpoints] = copy(step_setpoint_values)
+        app.protocol.repeats = protocol_parse_int_or(repeats_input.stored_string[], 1)
+        app.protocol.delay = protocol_parse_int_or(delay_input.stored_string[], 0)
+        app.protocol.times = copy(step_duration_values)
+        app.protocol.setpoints = copy(step_setpoint_values)
         sync_runtime_protocol!(app, app_run)
         save_state(app)
         return nothing

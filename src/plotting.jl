@@ -119,7 +119,7 @@ function autoscale_values!(app, ax, xs::AbstractVector; pad_ratio=0.05)
         return
     end
 
-    time_range = app.layout[:time_range]
+    time_range = app.layout.time_range
     xmin, xmax = minimum(xs), maximum(xs)
 
     if xmax < time_range
@@ -145,7 +145,7 @@ function autoscale_values!(app, ax, xs::AbstractVector, ys::AbstractVector; pad_
     if isempty(xs) || isempty(ys)
         return
     end
-    time_range = app.layout[:time_range]
+    time_range = app.layout.time_range
 
     # remove NaNs from the series
     valid = .!isnan.(ys)

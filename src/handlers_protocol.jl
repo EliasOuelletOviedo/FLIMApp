@@ -24,13 +24,12 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
         save_state(app)
 
         protocol_button = Button(panel_grid[1, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Protocol"))...)
-        protocol_active = Bool(get(app.protocol, :active, false))
-        app.protocol[:active] = protocol_active
+        protocol_active = app.protocol.active
         sync_runtime_protocol!(app, app_run)
         protocol_toggle = Toggle(panel_grid[2, 1]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => protocol_active))...)
 
         on(protocol_toggle.active) do is_active
-            app.protocol[:active] = Bool(is_active)
+            app.protocol.active = is_active
             sync_runtime_protocol!(app, app_run)
             save_state(app)
         end
@@ -40,12 +39,11 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
         end
 
         roi_button = Button(panel_grid[3, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "ROI"))...)
-        roi_active = Bool(get(app.roi, :active, false))
-        app.roi[:active] = roi_active
+        roi_active = app.roi.active
         roi_toggle = Toggle(panel_grid[4, 1]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => roi_active))...)
 
         on(roi_toggle.active) do is_active
-            app.roi[:active] = Bool(is_active)
+            app.roi.active = is_active
             save_state(app)
         end
 

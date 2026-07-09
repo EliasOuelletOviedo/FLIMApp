@@ -21,8 +21,6 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         return
     end
 
-    roi_active = Bool(get(app.roi, :active, false))
-    app.roi[:active] = roi_active
     save_state(app)
 
     popup_figure = Figure(size = (600, 400))

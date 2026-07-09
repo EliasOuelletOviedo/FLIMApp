@@ -48,7 +48,7 @@ function run_acquisition_loop!(
         next_file!::Function,
         emit!::Function;
         initial_guess::Vector{Float64},
-        protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable},
+        protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable},
         use_partial_fit::Bool
     )
     timestamps = 0.0
@@ -151,7 +151,7 @@ function run_acquisition_loop!(
         n += 1
 
         current_protocol = resolve_protocol_config(protocol)
-        setpoint_ns = if current_protocol === nothing || !Bool(get(current_protocol, :active, false))
+        setpoint_ns = if current_protocol === nothing || !current_protocol.active
             fallback_setpoint_ns
         else
             protocol_setpoint_at_timestamp(current_protocol, timestamps)
@@ -237,7 +237,7 @@ function start_playback(
         layout::LayoutSettings,
         controller::ControllerSettings;
         initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
-        protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
+        protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable} = nothing,
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         dt::Float64 = 0.0001,
         use_partial_fit::Bool = true,
@@ -343,7 +343,7 @@ function start_realtime(
         layout::LayoutSettings,
         controller::ControllerSettings;
         initial_guess::Vector{Float64} = [3.0, 0.5, 0.5, 0.0, 5.0e-5],
-        protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
+        protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable} = nothing,
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         dt::Float64 = 0.0001,
         poll_interval_s::Float64 = 0.1
@@ -497,7 +497,7 @@ function start_save(
         layout::LayoutSettings,
         controller::ControllerSettings;
         initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
-        protocol::Union{Nothing, Dict{Symbol, Any}, Observables.AbstractObservable} = nothing,
+        protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable} = nothing,
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         dt::Float64 = 0.0000001,
         use_partial_fit::Bool = true,

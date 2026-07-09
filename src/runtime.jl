@@ -98,8 +98,8 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
 
                 last_publish_time = now_s
 
-                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout[:plot1])
-                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout[:plot2])
+                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout.plot1)
+                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout.plot2)
             end
         end
 
@@ -121,8 +121,8 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                 xlims!(plot_1_axis, 0.0, max(Float64(xmax1), 0.0))
                 xlims!(plot_2_axis, 0.0, max(Float64(xmax2), 0.0))
             else
-                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout[:plot1])
-                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout[:plot2])
+                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout.plot1)
+                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout.plot2)
             end
         end
 

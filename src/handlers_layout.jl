@@ -131,19 +131,15 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
 
         options = ["Histogram", "Photon counts", "Lifetime", "Ion concentration", "Command"]
 
-        smoothing_value = get(app.layout, :smoothing, 0)
-        if !(smoothing_value isa Number)
-            smoothing_value = 0
-        end
-        smoothing_value = clamp(round(Int, Float64(smoothing_value)), 0, 10)
-        app.layout[:smoothing] = smoothing_value
+        smoothing_value = clamp(app.layout.smoothing, 0, 10)
+        app.layout.smoothing = smoothing_value
 
         layout_params = Dict{Symbol, Any}(
-            :time_range => (Textbox(panel_grid[1, 2]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout[:time_range]), :stored_string => string(app.layout[:time_range])))...),
+            :time_range => (Textbox(panel_grid[1, 2]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout.time_range), :stored_string => string(app.layout.time_range)))...),
                             Button(panel_grid[1, 2];  SPINNER_UP_ATTRS...),
                             Button(panel_grid[1, 2];  SPINNER_DOWN_ATTRS...),
                             (1, 99999, Int)),
-            :binning    => (Textbox(panel_grid[2, 2]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout[:binning]), :stored_string => string(app.layout[:binning])))...),
+            :binning    => (Textbox(panel_grid[2, 2]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout.binning), :stored_string => string(app.layout.binning)))...),
                             Button(panel_grid[2, 2];  SPINNER_UP_ATTRS...),
                             Button(panel_grid[2, 2];  SPINNER_DOWN_ATTRS...),
                             (1, 100, Int)),
@@ -151,12 +147,12 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                             Button(panel_grid[3, 2];  SPINNER_UP_ATTRS...),
                             Button(panel_grid[3, 2];  SPINNER_DOWN_ATTRS...),
                             (0, 10, Int)),
-            :plot1      =>  Menu(panel_grid[5, 1:2];  merge(MENU_ATTRS, Dict(:default => app.layout[:plot1], :options => options))...),
-            :plot2      =>  Menu(panel_grid[7, 1:2];  merge(MENU_ATTRS, Dict(:default => app.layout[:plot2], :options => options))...),
+            :plot1      =>  Menu(panel_grid[5, 1:2];  merge(MENU_ATTRS, Dict(:default => app.layout.plot1, :options => options))...),
+            :plot2      =>  Menu(panel_grid[7, 1:2];  merge(MENU_ATTRS, Dict(:default => app.layout.plot2, :options => options))...),
         )
 
         function commit_layout_value!(key::Symbol, value)
-            app.layout[key] = value
+            setfield!(app.layout, key, value)
             if key == :smoothing
                 recompute_lifetime_smooth!(app, app_run)
                 notify(app_run.lifetime_smooth)

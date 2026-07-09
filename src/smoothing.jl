@@ -10,13 +10,11 @@ Responsibilities:
 - Reuse the same PID smoothing state update across runtime and workers
 """
 
-function lifetime_smooth_level(layout::Dict{Symbol, Any})::Int
-    raw = get(layout, :smoothing, 0)
-    val = raw isa Number ? Float64(raw) : 0.0
-    return clamp(round(Int, val), 0, 10)
+function lifetime_smooth_level(layout::LayoutSettings)::Int
+    return clamp(layout.smoothing, 0, 10)
 end
 
-@inline function layout_smoothing_level(layout::Dict{Symbol, Any})::Int
+@inline function layout_smoothing_level(layout::LayoutSettings)::Int
     return lifetime_smooth_level(layout)
 end
 

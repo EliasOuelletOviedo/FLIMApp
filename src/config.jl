@@ -23,8 +23,21 @@ using Colors
     STATE_FILE_PATH::String
 
 Path to the serialized application state file.
+
+Named `AppState_v2.jls` (not `AppState.jls`) because `AppState`'s settings
+fields changed from `Dict{Symbol,Any}` to typed structs in this version.
+`Serialization.deserialize` does not reliably error on that kind of field
+-type change — empirically, reading an old `AppState.jls` back sometimes
+reconstructs a type-inconsistent object (e.g. `layout` holding a raw `Dict`
+in a field declared `::LayoutSettings`) and sometimes doesn't, depending on
+process/session state, which makes a post-hoc `isa` check on the result an
+unreliable guard on its own (see `valid_app_state` in FLIMApp.jl, kept as
+defense-in-depth for *future* schema changes, not relied on for *this*
+one). Using a new filename sidesteps the ambiguity entirely: old files are
+simply never read by this version, deterministically falling through to
+`load_or_create_state()`'s fresh-defaults path.
 """
-const STATE_FILE_PATH = joinpath("docs", "AppState.jls")
+const STATE_FILE_PATH = joinpath("docs", "AppState_v2.jls")
 
 """
     IRF_FILEPATH_CACHE::String

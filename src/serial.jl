@@ -232,17 +232,12 @@ function last_or_nan(values::Vector{Float64})::Float64
 end
 
 """
-    safe_frequency(controller::Dict{Symbol, Any})::Int
+    safe_frequency(controller::ControllerSettings)::Int
 
 Read PWM frequency from controller config and clamp to a positive integer.
 """
-function safe_frequency(controller::Dict{Symbol, Any})::Int
-    raw = try
-        Float64(get(controller, :freq, 1000))
-    catch
-        1000.0
-    end
-    return max(1, Int(round(raw)))
+function safe_frequency(controller::ControllerSettings)::Int
+    return max(1, controller.freq)
 end
 
 """

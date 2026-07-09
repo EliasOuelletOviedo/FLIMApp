@@ -129,8 +129,8 @@ NamedTuple of the created axes.
 function make_plot_axes!(left_grid, app, app_run)
     counts_axis = Axis(left_grid[2:3, 2]; AXIS_COUNTS_ATTRS...)
 
-    plot_1 = Axis(left_grid[2, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 1\n($(app.layout[:plot1]))"))...)
-    plot_2 = Axis(left_grid[3, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 2\n($(app.layout[:plot2]))"))...)
+    plot_1 = Axis(left_grid[2, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 1\n($(app.layout.plot1))"))...)
+    plot_2 = Axis(left_grid[3, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 2\n($(app.layout.plot2))"))...)
 
     save_progress_axis = Axis(left_grid[4, 2:4]; PROGRESS_BAR_ATTRS...)
     hidedecorations!(save_progress_axis)
@@ -247,7 +247,7 @@ end
 """
     draw_initial_plot_selections!(app, app_run, plot_1, plot_2)
 
-Draw the initially-selected series (per `app.layout[:plot1]`/`:plot2`) onto
+Draw the initially-selected series (per `app.layout.plot1`/`.plot2`) onto
 the two plot axes at GUI construction time.
 """
 function draw_initial_plot_selections!(app, app_run, plot_1, plot_2)
@@ -259,8 +259,8 @@ function draw_initial_plot_selections!(app, app_run, plot_1, plot_2)
         "Command"         => (app_run.timestamps, app_run.command1)
     )
 
-    selection_1 = app.layout[:plot1]
-    selection_2 = app.layout[:plot2]
+    selection_1 = app.layout.plot1
+    selection_2 = app.layout.plot2
 
     plot_data_1 = get(mapping, selection_1, nothing)
     plot_data_2 = get(mapping, selection_2, nothing)
