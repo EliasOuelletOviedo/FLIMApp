@@ -16,6 +16,7 @@ function make_handlers(app, app_run, blocks)
     panel = blocks[:panel_buttons]
     panel_grid = blocks[:panel_grid]
     protocol_popup_screen = Ref{Union{Nothing, GLMakie.Screen}}(nothing)
+    roi_popup_screen = Ref{Union{Nothing, GLMakie.Screen}}(nothing)
 
     # helper used by layout panel spinners – compute the "next"
     # value in a user‑friendly series (1,2,5,10,20,...).
@@ -396,6 +397,20 @@ function make_handlers(app, app_run, blocks)
             
             on(protocol_button.clicks) do _
                 open_protocol_popup!(app, app_run, protocol_popup_screen)
+            end
+
+            roi_button = Button(panel_grid[3, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "ROI"))...)
+            roi_active = Bool(get(app.roi, :active, false))
+            app.roi[:active] = roi_active
+            roi_toggle = Toggle(panel_grid[4, 1]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => roi_active))...)
+
+            on(roi_toggle.active) do is_active
+                app.roi[:active] = Bool(is_active)
+                save_state(app)
+            end
+
+            on(roi_button.clicks) do _
+                open_roi_popup!(app, app_run, roi_popup_screen)
             end
         end
     end

@@ -28,6 +28,7 @@ Fields:
 - `layout::Dict{Symbol, Any}` - Layout and display settings
 - `controller::Dict{Symbol, Any}` - Hardware controller configuration
 - `protocol::Dict{Symbol, Any}` - Experimental protocol settings
+- `roi::Dict{Symbol, Any}` - ROI settings
 - `console::Dict{Symbol, Any}` - Console and logging settings
 
 This structure is serialized to `STATE_FILE_PATH` to preserve user preferences
@@ -39,6 +40,7 @@ mutable struct AppState
     layout::Dict{Symbol, Any}
     controller::Dict{Symbol, Any}
     protocol::Dict{Symbol, Any}
+    roi::Dict{Symbol, Any}
     console::Dict{Symbol, Any}
 end
 
@@ -60,6 +62,7 @@ function AppState(use_dark::Bool)
         get_default_layout(),
         get_default_controller(),
         get_default_protocol(),
+        get_default_roi(),
         get_default_console()
     )
 end

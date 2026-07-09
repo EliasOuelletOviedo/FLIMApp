@@ -241,6 +241,20 @@ function get_default_protocol()::Dict{Symbol, Any}
 end
 
 """
+    get_default_roi()::Dict
+
+Returns default ROI UI values persisted in AppState.
+
+Stored fields:
+- `:active` (Bool, enable ROI handling)
+"""
+function get_default_roi()::Dict{Symbol, Any}
+    return Dict{Symbol, Any}(
+        :active => false
+    )
+end
+
+"""
     get_default_console()::Dict
 
 Returns a dictionary of default console settings (empty).

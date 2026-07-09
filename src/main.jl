@@ -54,6 +54,9 @@ include("runtime.jl")
 # Protocol popup UI module
 include("protocol_popup.jl")
 
+# ROI popup UI module
+include("roi_popup.jl")
+
 # Event handlers (depends on runtime)
 include("handlers.jl")
 
@@ -140,6 +143,32 @@ function merge_layout_defaults!(app_state::AppState)::Bool
 end
 
 """
+    merge_roi_defaults!(app_state::AppState)::Bool
+
+Ensure ROI defaults exist in persisted state.
+
+Returns `true` when the state was changed.
+"""
+function merge_roi_defaults!(app_state::AppState)::Bool
+    defaults = get_default_roi()
+    has_updates = false
+
+    if !isdefined(app_state, :roi)
+        app_state.roi = defaults
+        return true
+    end
+
+    for (key, value) in defaults
+        if !haskey(app_state.roi, key)
+            app_state.roi[key] = value
+            has_updates = true
+        end
+    end
+
+    return has_updates
+end
+
+"""
     load_or_create_state()::AppState
 
 Load persisted state when available, otherwise create a new default state.
@@ -157,7 +186,10 @@ function load_or_create_state()::AppState
 
     @info "Loaded saved state" theme=app_state.dark ? "dark" : "light"
 
-    if merge_layout_defaults!(app_state)
+    layout_updated = merge_layout_defaults!(app_state)
+    roi_updated = merge_roi_defaults!(app_state)
+
+    if layout_updated || roi_updated
         save_state(app_state)
     end
 

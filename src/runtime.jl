@@ -601,6 +601,7 @@ function snapshot_app_state(app)::AppState
         deepcopy(app.layout),
         deepcopy(app.controller),
         deepcopy(app.protocol),
+        deepcopy(app.roi),
         deepcopy(app.console)
     )
 end
