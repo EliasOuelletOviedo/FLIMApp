@@ -265,27 +265,15 @@ function draw_initial_plot_selections!(app, app_run, plot_1, plot_2)
     plot_data_1 = get(mapping, selection_1, nothing)
     plot_data_2 = get(mapping, selection_2, nothing)
 
-    # aligned_xy_observables is defined in plotting.jl
-    lifetime_x1, lifetime_y1 = aligned_xy_observables(app_run.timestamps, app_run.lifetime)
-    smooth_x1, smooth_y1 = aligned_xy_observables(app_run.timestamps, app_run.lifetime_smooth)
-    protocol_x1, protocol_y1 = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
-
-    lifetime_x2, lifetime_y2 = aligned_xy_observables(app_run.timestamps, app_run.lifetime)
-    smooth_x2, smooth_y2 = aligned_xy_observables(app_run.timestamps, app_run.lifetime_smooth)
-    protocol_x2, protocol_y2 = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
-
-    function draw_selection!(axis, selection, series_data, lifetime_x, lifetime_y, smooth_x, smooth_y, protocol_x, protocol_y)
+    function draw_selection!(axis, selection, series_data)
         if selection == "Command"
-            lines!(axis, app_run.timestamps, app_run.command1, color=Makie.wong_colors()[1])
-            lines!(axis, app_run.timestamps, app_run.command2, color=Makie.wong_colors()[2])
+            lines!(axis, app_run.timestamps, app_run.command1, color=PLOT_COLOR_CH1)
+            lines!(axis, app_run.timestamps, app_run.command2, color=PLOT_COLOR_CH2)
             return
         end
 
         if selection == "Lifetime"
-            add_protocol_setpoint_highlight!(axis, app_run)
-            lines!(axis, lifetime_x, lifetime_y, color=(Makie.wong_colors()[1], 0.25))
-            lines!(axis, smooth_x, smooth_y, color=Makie.wong_colors()[1])
-            lines!(axis, protocol_x, protocol_y, color=Makie.wong_colors()[3])
+            draw_lifetime_plot!(axis, app_run)
             return
         end
 
@@ -294,11 +282,16 @@ function draw_initial_plot_selections!(app, app_run, plot_1, plot_2)
             return
         end
 
-        lines!(axis, series_data..., color=Makie.wong_colors()[1])
+        if selection == "Ion concentration"
+            draw_ion_concentration_plot!(axis, app_run)
+            return
+        end
+
+        lines!(axis, series_data..., color=PLOT_COLOR_CH1)
     end
 
-    draw_selection!(plot_1, selection_1, plot_data_1, lifetime_x1, lifetime_y1, smooth_x1, smooth_y1, protocol_x1, protocol_y1)
-    draw_selection!(plot_2, selection_2, plot_data_2, lifetime_x2, lifetime_y2, smooth_x2, smooth_y2, protocol_x2, protocol_y2)
+    draw_selection!(plot_1, selection_1, plot_data_1)
+    draw_selection!(plot_2, selection_2, plot_data_2)
 
     return nothing
 end

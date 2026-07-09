@@ -171,6 +171,8 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
             if key == :smoothing
                 recompute_lifetime_smooth!(app, app_run)
                 notify(app_run.lifetime_smooth)
+                recompute_concentration_smooth!(app, app_run)
+                notify(app_run.concentration_smooth)
             end
             save_state(app)
             return nothing
@@ -236,20 +238,16 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                     # aligned_xy_observables is defined in plotting.jl
 
                     if selection == "Command"
-                        lines!(axis, app_run.timestamps, app_run.command1, color=Makie.wong_colors()[1])
-                        lines!(axis, app_run.timestamps, app_run.command2, color=Makie.wong_colors()[2])
+                        lines!(axis, app_run.timestamps, app_run.command1, color=PLOT_COLOR_CH1)
+                        lines!(axis, app_run.timestamps, app_run.command2, color=PLOT_COLOR_CH2)
                     elseif selection == "Lifetime"
-                        add_protocol_setpoint_highlight!(axis, app_run)
-                        lifetime_x, lifetime_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime)
-                        smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_smooth)
-                        protocol_x, protocol_y = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
-                        lines!(axis, lifetime_x, lifetime_y, color=(Makie.wong_colors()[1], 0.25))
-                        lines!(axis, smooth_x, smooth_y, color=Makie.wong_colors()[1])
-                        lines!(axis, protocol_x, protocol_y, color=Makie.wong_colors()[3])
+                        draw_lifetime_plot!(axis, app_run)
                     elseif selection == "Histogram"
                         draw_histogram_plot!(axis, app_run)
+                    elseif selection == "Ion concentration"
+                        draw_ion_concentration_plot!(axis, app_run)
                     else
-                        lines!(axis, xy..., color=Makie.wong_colors()[1])
+                        lines!(axis, xy..., color=PLOT_COLOR_CH1)
                     end
 
                     if !app_run.running[]

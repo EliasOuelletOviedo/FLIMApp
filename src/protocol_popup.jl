@@ -253,16 +253,16 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
 
             duration = isnan(duration) ? 0.0 : max(duration, 0.0)
 
-            lines!(protocol_axis, [elapsed_time, elapsed_time + duration], [setpoint, setpoint], color = Makie.wong_colors()[1])
+            lines!(protocol_axis, [elapsed_time, elapsed_time + duration], [setpoint, setpoint], color = PLOT_COLOR_CH1)
 
             if !isnan(setpoint)
-                vspan!(protocol_axis, elapsed_time, elapsed_time + duration, color = Makie.wong_colors()[1], alpha = 0.1)
+                vspan!(protocol_axis, elapsed_time, elapsed_time + duration, color = PLOT_COLOR_CH1, alpha = 0.1)
             end
 
             elapsed_time += duration
         end
 
-        vlines!(protocol_axis, elapsed_time, color = Makie.wong_colors()[3])
+        vlines!(protocol_axis, elapsed_time, color = PLOT_COLOR_REF)
 
         preview_repeats = repeat_count == 0 ? 1 : repeat_count
         signal_length = round(Int, max((elapsed_time - delay_seconds) * preview_repeats + delay_seconds + 1, 1))

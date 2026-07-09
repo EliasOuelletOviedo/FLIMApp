@@ -174,6 +174,7 @@ Fields:
 - `lifetime_smooth::Observable{Vector{Float64}}` - Smoothed time-series of fitted lifetimes
 - `protocol_setpoint::Observable{Vector{Float64}}` - Time-series of protocol setpoints used by PID
 - `concentration::Observable{Vector{Float64}}` - Time-series of ion concentrations
+- `concentration_smooth::Observable{Vector{Float64}}` - Smoothed time-series of ion concentrations
 - `command1::Observable{Vector{Float64}}` - Time-series of PID command values (controller 1)
 - `command2::Observable{Vector{Float64}}` - Time-series of PID command values (controller 2)
 - `timestamps::Observable{Vector{Float64}}` - Time-series timestamps
@@ -198,6 +199,7 @@ mutable struct AppRun
     lifetime_smooth::Observable{Vector{Float64}}
     protocol_setpoint::Observable{Vector{Float64}}
     concentration::Observable{Vector{Float64}}
+    concentration_smooth::Observable{Vector{Float64}}
     command1::Observable{Vector{Float64}}
     command2::Observable{Vector{Float64}}
     timestamps::Observable{Vector{Float64}}
@@ -231,6 +233,7 @@ function AppRun()
         Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
         Observable(Float64[]),
         Observable(0.0),
+        Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),

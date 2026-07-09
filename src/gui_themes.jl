@@ -27,6 +27,15 @@ const COLOR_4 = parse(RGB{Float64}, DARK_MODE_THEME[:color_4])
 const COLOR_5 = parse(RGB{Float64}, DARK_MODE_THEME[:color_5])
 const TEXT    = parse(RGB{Float64}, DARK_MODE_THEME[:text])
 
+# Plot series colors (channel 1, channel 2, reference/setpoint traces).
+# Single source of truth for plot line/bar colors — change these to
+# recolor every plot at once instead of editing Makie.wong_colors()[n]
+# calls scattered across GUI.jl / handlers_layout.jl / plotting.jl /
+# protocol_popup.jl.
+const PLOT_COLOR_CH1 = Makie.wong_colors()[1]
+const PLOT_COLOR_CH2 = Makie.wong_colors()[2]
+const PLOT_COLOR_REF = Makie.wong_colors()[3]
+
 AXIS_PLOTS_ATTRS = Dict{Symbol, Any}(
     # :alignmode          => Outside(10),
     :alignmode          => Inside(),

@@ -79,10 +79,11 @@ function write_realtime_capture_csv!(csv_path::AbstractString, app_run, per_file
         lifetime_smooth = app_run.lifetime_smooth[]
         protocol_setpoint = app_run.protocol_setpoint[]
         concentration = app_run.concentration[]
+        concentration_smooth = app_run.concentration_smooth[]
         command1 = app_run.command1[]
         command2 = app_run.command2[]
 
-        maxlen = maximum(map(length, (ts, photons, lifetime, lifetime_smooth, protocol_setpoint, concentration, command1, command2)))
+        maxlen = maximum(map(length, (ts, photons, lifetime, lifetime_smooth, protocol_setpoint, concentration, concentration_smooth, command1, command2)))
 
         df_runtime = DataFrame(
             timestamp = pad_to_length(Float64.(ts), maxlen),
@@ -91,6 +92,7 @@ function write_realtime_capture_csv!(csv_path::AbstractString, app_run, per_file
             lifetime_smooth = pad_to_length(Float64.(lifetime_smooth), maxlen),
             protocol_setpoint = pad_to_length(Float64.(protocol_setpoint), maxlen),
             concentration = pad_to_length(Float64.(concentration), maxlen),
+            concentration_smooth = pad_to_length(Float64.(concentration_smooth), maxlen),
             command1 = pad_to_length(Float64.(command1), maxlen),
             command2 = pad_to_length(Float64.(command2), maxlen)
         )
@@ -124,6 +126,7 @@ function save_realtime_capture!(app, app_run, per_file_df::DataFrame)
             :lifetime_smooth => copy(app_run.lifetime_smooth[]),
             :protocol_setpoint => copy(app_run.protocol_setpoint[]),
             :concentration => copy(app_run.concentration[]),
+            :concentration_smooth => copy(app_run.concentration_smooth[]),
             :command1 => copy(app_run.command1[]),
             :command2 => copy(app_run.command2[]),
             :histogram_latest => copy(app_run.histogram[]),

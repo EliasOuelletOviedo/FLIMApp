@@ -59,9 +59,9 @@ function compute_lifetime_smooth_at(
         return NaN
     end
 
-    # Level 0 disables the smooth trace to avoid curve overlap with raw lifetime.
+    # Level 0: smooth trace is an exact passthrough of the raw value.
     if level <= 0
-        return NaN
+        return x
     end
 
     if !isfinite(prev_smooth)
@@ -138,17 +138,25 @@ function update_pid_lifetime_kalman(
 end
 
 # -----------------------------------------------------------------------------
-# lifetime smoothing series helpers (used by consumer_loop / runtime.jl)
+# smoothed series helpers (used by consumer_loop / runtime.jl)
 # -----------------------------------------------------------------------------
+#
+# Generic over which raw/smoothed observable pair they operate on, so
+# lifetime and ion concentration go through the exact same smoothing
+# function with the exact same parameters (compute_lifetime_smooth_at) —
+# not two copies that could drift apart. recompute_lifetime_smooth! /
+# append_lifetime_smooth! / recompute_concentration_smooth! /
+# append_concentration_smooth! below are the named entry points used at
+# call sites; the shared logic lives here once.
 
-function recompute_lifetime_smooth!(app, app_run)
+function recompute_smooth_series!(app, source::Observable{Vector{Float64}}, target::Observable{Vector{Float64}}, timestamps::Observable{Vector{Float64}})
     # Snapshot mutable vectors to avoid transient length races with the consumer task.
-    lifetime_values = copy(app_run.lifetime[])
-    timestamps_values = copy(app_run.timestamps[])
+    source_values = copy(source[])
+    timestamps_values = copy(timestamps[])
 
-    n_lifetime = length(lifetime_values)
+    n_source = length(source_values)
     n_timestamps = length(timestamps_values)
-    n_common = min(n_lifetime, n_timestamps)
+    n_common = min(n_source, n_timestamps)
 
     smoothed = fill(NaN, n_timestamps)
 
@@ -156,26 +164,32 @@ function recompute_lifetime_smooth!(app, app_run)
     prev = NaN
 
     for idx in 1:n_common
-        y = compute_lifetime_smooth_at(lifetime_values, idx, level, prev)
+        y = compute_lifetime_smooth_at(source_values, idx, level, prev)
         smoothed[idx] = y
         prev = y
     end
 
-    app_run.lifetime_smooth[] = smoothed
+    target[] = smoothed
     return nothing
 end
 
-function append_lifetime_smooth!(app, app_run)
-    idx = length(app_run.lifetime[])
+function append_smooth_value!(app, source::Observable{Vector{Float64}}, target::Observable{Vector{Float64}})
+    idx = length(source[])
     if idx == 0
         return nothing
     end
 
     level = lifetime_smooth_level(app.layout)
-    prev = isempty(app_run.lifetime_smooth[]) ? NaN : app_run.lifetime_smooth[][end]
+    prev = isempty(target[]) ? NaN : target[][end]
 
-    y = compute_lifetime_smooth_at(app_run.lifetime[], idx, level, prev)
-    push!(app_run.lifetime_smooth[], y)
+    y = compute_lifetime_smooth_at(source[], idx, level, prev)
+    push!(target[], y)
 
     return nothing
 end
+
+recompute_lifetime_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.lifetime, app_run.lifetime_smooth, app_run.timestamps)
+append_lifetime_smooth!(app, app_run) = append_smooth_value!(app, app_run.lifetime, app_run.lifetime_smooth)
+
+recompute_concentration_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.concentration, app_run.concentration_smooth, app_run.timestamps)
+append_concentration_smooth!(app, app_run) = append_smooth_value!(app, app_run.concentration, app_run.concentration_smooth)

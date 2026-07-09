@@ -85,9 +85,9 @@ function draw_histogram_plot!(axis, app_run)
     fit_normalized = lift(normalize_to_own_max, app_run.fit)
     irf_normalized = lift(normalized_irf_from_fit, app_run.fit)
 
-    barplot!(axis, app_run.hist_time, counts_normalized, color=(Makie.wong_colors()[1], 0.25))
-    lines!(axis, app_run.hist_time, fit_normalized, color=Makie.wong_colors()[1])
-    lines!(axis, app_run.hist_time, irf_normalized, color=Makie.wong_colors()[3])
+    barplot!(axis, app_run.hist_time, counts_normalized, color=(PLOT_COLOR_CH1, 0.25))
+    lines!(axis, app_run.hist_time, fit_normalized, color=PLOT_COLOR_CH1)
+    lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_REF)
 
     return nothing
 end
@@ -144,7 +144,49 @@ function add_protocol_setpoint_highlight!(ax, app_run)
 
     span_starts = lift(x -> x[1], spans)
     span_ends = lift(x -> x[2], spans)
-    vspan!(ax, span_starts, span_ends, color = (Makie.wong_colors()[2], 0.05))
+    vspan!(ax, span_starts, span_ends, color = (PLOT_COLOR_REF, 0.05))
+
+    return nothing
+end
+
+"""
+    draw_lifetime_plot!(axis, app_run)
+
+Draw the Lifetime plot's series onto `axis`: the protocol-setpoint
+highlight, raw lifetime, smoothed lifetime, and the protocol setpoint
+trace. Shared by the Menu-selection handler (handlers_layout.jl) and the
+initial-selection draw at GUI construction time (GUI.jl) — see
+`draw_histogram_plot!` above for why this needs to be one function, not two
+copies.
+"""
+function draw_lifetime_plot!(axis, app_run)
+    add_protocol_setpoint_highlight!(axis, app_run)
+
+    lifetime_x, lifetime_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime)
+    smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_smooth)
+    protocol_x, protocol_y = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
+
+    lines!(axis, lifetime_x, lifetime_y, color=(PLOT_COLOR_CH1, 0.25))
+    lines!(axis, smooth_x, smooth_y, color=PLOT_COLOR_CH1)
+    lines!(axis, protocol_x, protocol_y, color=PLOT_COLOR_REF)
+
+    return nothing
+end
+
+"""
+    draw_ion_concentration_plot!(axis, app_run)
+
+Draw the Ion concentration plot's series onto `axis`: raw concentration and
+its smoothed trace, using the exact same smoothing (compute_lifetime_smooth_at,
+see smoothing.jl) as the Lifetime plot. Shared by the Menu-selection handler
+and the initial-selection draw for the same reason as `draw_lifetime_plot!`.
+"""
+function draw_ion_concentration_plot!(axis, app_run)
+    concentration_x, concentration_y = aligned_xy_observables(app_run.timestamps, app_run.concentration)
+    smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, app_run.concentration_smooth)
+
+    lines!(axis, concentration_x, concentration_y, color=(PLOT_COLOR_CH1, 0.25))
+    lines!(axis, smooth_x, smooth_y, color=PLOT_COLOR_CH1)
 
     return nothing
 end
@@ -296,7 +338,10 @@ function lookup_plot_series(app_run, plot_label)
     end
 
     if plot_label == "Ion concentration"
-        return (app_run.timestamps[], app_run.concentration[])
+        return (
+            vcat(app_run.timestamps[], app_run.timestamps[]),
+            vcat(app_run.concentration[], app_run.concentration_smooth[])
+        )
     end
 
     if plot_label == "Command"
@@ -315,6 +360,7 @@ function notify_runtime_observables!(app_run)
     notify(app_run.lifetime_smooth)
     notify(app_run.protocol_setpoint)
     notify(app_run.concentration)
+    notify(app_run.concentration_smooth)
     notify(app_run.command1)
     notify(app_run.command2)
     notify(app_run.timestamps)
