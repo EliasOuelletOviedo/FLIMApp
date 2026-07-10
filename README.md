@@ -16,17 +16,13 @@ This application provides:
 
 ### Julia Packages
 
-Install required packages in Julia:
+All dependencies are declared in `Project.toml`/`Manifest.toml`. From the
+repository root:
 
 ```julia
 using Pkg
-Pkg.add("GLMakie")      # GUI framework
-Pkg.add("Observables")  # Reactive programming
-Pkg.add("FFTW")         # Fast Fourier Transform
-Pkg.add("Optim")        # Optimization library
-Pkg.add("LineSearches") # Line search algorithms
-Pkg.add("NativeFileDialog") # File dialogs
-Pkg.add("ZipFile")      # ZIP archive reading
+Pkg.activate(".")
+Pkg.instantiate()   # installs the exact locked dependency versions
 ```
 
 ## Directory Structure
@@ -36,8 +32,9 @@ FLIMApp/
 ├── src/
 │   ├── FLIMApp.jl               # Module definition, entry point, application lifecycle
 │   ├── config.jl               # Configuration, constants, defaults
-│   ├── data_types.jl           # Data structures (AppState, AppRun)
+│   ├── data_types.jl           # Data structures (AppState, AppRun, ChannelSeries)
 │   ├── gui_themes.jl           # UI theme definitions and styling
+│   ├── gui_blocks.jl           # GuiBlocks: typed container of GUI elements
 │   ├── path_utils.jl           # Shared path-picker/cache helpers
 │   ├── smoothing.jl            # Lifetime smoothing/Kalman helpers
 │   ├── serial.jl               # Serial port discovery + PID/PWM command I/O
@@ -59,18 +56,19 @@ FLIMApp/
 │       ├── SdtFile.jl          # SDT block parser; used by lifetime_analysis.jl's read_sdt_frame
 │       └── ImageJROI.jl        # WIP: ImageJ ROI reader (not yet wired in)
 ├── test/
-│   ├── runtests.jl             # Test suite
-│   ├── test_app.jl             # Application tests
-│   └── test_simple.jl          # Basic sanity test
+│   └── runtests.jl             # Test suite (run with `Pkg.test()`)
 ├── scripts/analysis/           # Ad-hoc profiling/benchmark/spike scripts (not run by CI)
-├── archive/                    # Superseded code kept for reference (see src_pre_cleanup/)
-├── docs/
-│   ├── AppState.jls            # Serialized app state (auto-created)
-│   └── irf_filepath.txt        # IRF file path cache (auto-created)
+├── build/
+│   ├── create_app.jl           # Standalone executable build (PackageCompiler)
+│   └── precompile_app.jl       # Precompile workload for the app build
 ├── Project.toml                # Julia project manifest
 ├── Manifest.toml               # Dependency lock file
 └── README.md                   # This file
 ```
+
+Runtime state (saved settings, IRF/data-folder path caches) lives outside
+the repository in `~/.flimapp/`, so running the app never dirties the git
+working tree.
 
 ## Quick Start
 
@@ -102,6 +100,25 @@ stutter during a fit.
 
 For a hot-reloading dev workflow, `using Revise` before `using FLIMApp` —
 edits to any `src/*.jl` file take effect without restarting Julia.
+(Install Revise in your global environment: `julia -e 'using Pkg; Pkg.add("Revise")'` —
+it is a dev tool, not a dependency of the package.)
+
+### Standalone Executable (double-clickable app)
+
+To build a standalone app that launches without installing Julia:
+
+```
+julia -t auto --project=build build/create_app.jl
+```
+
+- On **macOS** this produces `dist/FLIMApp.app` — double-click it in Finder
+  (first launch: right-click → Open, since the bundle is unsigned).
+- On **Windows** (run the same command on a Windows machine — the build is
+  native-only) this produces `dist/FLIMApp/` with a double-clickable
+  `FLIMApp.bat`.
+
+The build takes tens of minutes and bundles Julia + all libraries
+(~1 GB). See `build/create_app.jl` for details.
 
 ### Initial Setup
 
@@ -245,12 +262,14 @@ Save AppState on exit
 
 ## Configuration
 
-Edit `src/config.jl` to customize:
+The data folder is normally picked in the GUI ("Folder path" button) and
+remembered across sessions. Before a folder has been picked, the fallback
+is the `FLIM_DATA_PATH` environment variable when set, otherwise
+`~/FLIMApp_data`.
+
+Physics constants and themes live in `src/config.jl`:
 
 ```julia
-# Data path
-const DATA_ROOT_PATH = "/path/to/sdt/files"
-
 # Physics
 const LASER_PULSE_PERIOD = 12.5  # ns between pulses
 const DEFAULT_HISTOGRAM_RESOLUTION = 256
@@ -279,18 +298,21 @@ load_state(path::String)::Union{AppState, Nothing}
 
 ```julia
 AppState
-    dark::Bool              # Dark mode toggle
-    current_panel::Symbol   # Active UI panel
-    layout::Dict            # Display settings
-    controller::Dict        # Hardware config
-    protocol::Dict          # Experiment settings
-    console::Dict           # Logging settings
+    dark::Bool                      # Dark mode toggle
+    current_panel::Symbol           # Active UI panel
+    layout::LayoutSettings          # Display settings
+    controller::ControllerSettings  # Hardware config
+    protocol::ProtocolSettings      # Experiment settings
+    roi::RoiSettings                # ROI settings
+    console::ConsoleSettings        # Logging settings
 
 AppRun
-    channel::Channel        # Worker→Consumer communication
-    running::Atomic{Bool}   # Task control flag
-    *_task::Task            # Background tasks
-    *::Observable           # Reactive UI data
+    channel::Channel                # Worker→Consumer communication
+    running::Atomic{Bool}           # Task control flag
+    *_task::Task                    # Background tasks
+    ch1::ChannelSeries              # Channel 1 runtime observables
+    ch2::ChannelSeries              # Channel 2 runtime observables
+    timestamps, command1, ...       # Channel-agnostic observables
 ```
 
 ### Key Analysis Functions
@@ -318,7 +340,8 @@ list_ports()::Vector{String}
 The cached IRF path is invalid. Select a new .sdt file when prompted.
 
 ### "No .sdt files found"
-Check that `DATA_ROOT_PATH` in config.jl points to a directory with .sdt files.
+Pick the folder containing your .sdt files with the "Folder path" button
+(or set the `FLIM_DATA_PATH` environment variable before launching).
 
 ### Fitting returns NaN values
 - Photon count too low (< 100 counts)

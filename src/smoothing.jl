@@ -145,10 +145,9 @@ end
 # lifetime and ion concentration (each channel) go through the exact same
 # smoothing function with the exact same parameters
 # (compute_lifetime_smooth_at) — not separate copies that could drift
-# apart. recompute_lifetime_ch1_smooth! / append_lifetime_ch1_smooth! /
-# recompute_concentration_ch1_smooth! / append_concentration_ch1_smooth!
-# (and their _ch2 counterparts) below are the named entry points used at
-# call sites; the shared logic lives here once.
+# apart. Call sites pass the pair straight from a `ChannelSeries`
+# (e.g. `series.lifetime`/`series.lifetime_smooth`), or use
+# `recompute_channel_smooth!` below to redo a whole channel at once.
 
 """
     RECOMPUTE_LOOKBACK_MARGIN::Int
@@ -227,14 +226,17 @@ function append_smooth_value!(app, source::Observable{Vector{Float64}}, target::
     return nothing
 end
 
-recompute_lifetime_ch1_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.lifetime_ch1, app_run.lifetime_ch1_smooth, app_run.timestamps)
-append_lifetime_ch1_smooth!(app, app_run) = append_smooth_value!(app, app_run.lifetime_ch1, app_run.lifetime_ch1_smooth)
+"""
+    recompute_channel_smooth!(app, app_run, series::ChannelSeries)
 
-recompute_concentration_ch1_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.concentration_ch1, app_run.concentration_ch1_smooth, app_run.timestamps)
-append_concentration_ch1_smooth!(app, app_run) = append_smooth_value!(app, app_run.concentration_ch1, app_run.concentration_ch1_smooth)
-
-recompute_lifetime_ch2_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.lifetime_ch2, app_run.lifetime_ch2_smooth, app_run.timestamps)
-append_lifetime_ch2_smooth!(app, app_run) = append_smooth_value!(app, app_run.lifetime_ch2, app_run.lifetime_ch2_smooth)
-
-recompute_concentration_ch2_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.concentration_ch2, app_run.concentration_ch2_smooth, app_run.timestamps)
-append_concentration_ch2_smooth!(app, app_run) = append_smooth_value!(app, app_run.concentration_ch2, app_run.concentration_ch2_smooth)
+Recompute one channel's smoothed lifetime and concentration series (see
+`recompute_smooth_series!`) and notify their observables. Used when the
+smoothing level changes (handlers_layout.jl).
+"""
+function recompute_channel_smooth!(app, app_run, series::ChannelSeries)
+    recompute_smooth_series!(app, series.lifetime, series.lifetime_smooth, app_run.timestamps)
+    notify(series.lifetime_smooth)
+    recompute_smooth_series!(app, series.concentration, series.concentration_smooth, app_run.timestamps)
+    notify(series.concentration_smooth)
+    return nothing
+end

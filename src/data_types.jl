@@ -6,10 +6,44 @@ Core data structures for the FLIM application.
 This module defines the primary structures for application state:
 - AppState: Persistent configuration that is serialized to disk
 - AppRun: Runtime transient state with observables and background tasks
+- ChannelFrame / ChannelSeries: one TCSPC channel's per-frame results and
+  runtime observables, so per-channel logic is written once and instantiated
+  per channel instead of duplicated `_ch1`/`_ch2` copies
 """
 
 using Observables
 using Base.Threads
+using LibSerialPort: SerialPort
+
+# =============================================================================
+# ACQUISITION SAMPLES (worker -> consumer payload)
+# =============================================================================
+
+"""
+    ChannelFrame
+
+One TCSPC channel's slice of a single acquisition frame: the binned
+histogram, its fitted decay curve, and the scalar fit results. Two of these
+(one per channel) make up an `AcquisitionSample`. The "absent channel"
+convention (a file with only one TCSPC channel) uses the same sentinels as
+everywhere else: `NaN` for scalars, `Float64[]` for vectors — see
+`ChannelFrame()` below and `process_channel_frame!` in acquisition.jl.
+"""
+struct ChannelFrame
+    histogram::Vector{Float64}
+    fit::Vector{Float64}
+    photons::Float64
+    lifetime::Float64
+    concentration::Float64
+end
+
+"""
+    ChannelFrame()
+
+The "absent channel" frame: empty vectors and `NaN` scalars, emitted for
+channel 2 when the source file has only one TCSPC channel.
+"""
+ChannelFrame() = ChannelFrame(Float64[], Float64[], NaN, NaN, NaN)
 
 """
     AcquisitionSample
@@ -17,23 +51,12 @@ using Base.Threads
 One frame's worth of acquisition results, emitted onto the acquisition
 channel by `run_acquisition_loop!` (acquisition.jl) and consumed by
 `consumer_loop` (runtime.jl). A struct rather than a positional tuple —
-16 fields is too many to destructure positionally without risking a
-silently-mismatched order. Channel-2 fields use the same "absent" sentinels
-as everywhere else in this file: `NaN` for scalars, `Float64[]` for vectors,
-set when the source file has only one TCSPC channel (see
-`process_channel_frame!` in acquisition.jl).
+too many fields to destructure positionally without risking a
+silently-mismatched order.
 """
 struct AcquisitionSample
-    histogram1::Vector{Float64}
-    fit1::Vector{Float64}
-    photons1::Float64
-    lifetime1::Float64
-    concentration1::Float64
-    histogram2::Vector{Float64}
-    fit2::Vector{Float64}
-    photons2::Float64
-    lifetime2::Float64
-    concentration2::Float64
+    ch1::ChannelFrame
+    ch2::ChannelFrame
     command1::Float64
     command2::Float64
     timestamps::Float64
@@ -132,17 +155,17 @@ Base.@kwdef mutable struct ConsoleSettings end
 
 Persistent configuration state that can be serialized to disk.
 
-Fields:
-- `dark::Bool` - Dark mode toggle (true for dark, false for light)
-- `current_panel::Symbol` - Currently active UI panel (:layout, :controller, :protocol, :console)
-- `layout::LayoutSettings` - Layout and display settings
-- `controller::ControllerSettings` - Hardware controller configuration
-- `protocol::ProtocolSettings` - Experimental protocol settings
-- `roi::RoiSettings` - ROI settings
-- `console::ConsoleSettings` - Console and logging settings
+# Fields
+- `dark::Bool`: dark mode toggle (true for dark, false for light)
+- `current_panel::Symbol`: currently active UI panel (:layout, :controller, :protocol, :console)
+- `layout::LayoutSettings`: layout and display settings
+- `controller::ControllerSettings`: hardware controller configuration
+- `protocol::ProtocolSettings`: experimental protocol settings
+- `roi::RoiSettings`: ROI settings
+- `console::ConsoleSettings`: console and logging settings
 
-This structure is serialized to `STATE_FILE_PATH` to preserve user preferences
-across application sessions.
+This structure is serialized to `state_file_path()` to preserve user
+preferences across application sessions.
 """
 mutable struct AppState
     dark::Bool
@@ -159,11 +182,11 @@ end
 
 Constructor creating AppState with default values.
 
-Args:
-- `use_dark::Bool` - Initialize with dark theme if true
+# Arguments
+- `use_dark::Bool`: initialize with dark theme if true
 
-Returns:
-- AppState with all settings initialized to defaults
+# Returns
+- `AppState` with all settings initialized to defaults
 """
 function AppState(use_dark::Bool)
     return AppState(
@@ -182,41 +205,80 @@ end
 # =============================================================================
 
 """
+    ChannelSeries
+
+One TCSPC channel's runtime observables: the latest histogram/fit/counts
+plus the accumulated per-frame time series. `AppRun` holds one instance per
+channel (`ch1`/`ch2`), so every "do X for each channel" site loops over
+`(app_run.ch1, app_run.ch2)` instead of duplicating `_ch1`/`_ch2` code.
+
+# Fields
+- `histogram::Observable{Vector{Float64}}`: current histogram data
+- `fit::Observable{Vector{Float64}}`: fitted decay curve
+- `photons::Observable{Vector{Float64}}`: time-series of photon counts
+- `counts::Observable{Float64}`: current photon count
+- `lifetime::Observable{Vector{Float64}}`: time-series of fitted lifetimes
+- `lifetime_smooth::Observable{Vector{Float64}}`: smoothed lifetime time-series
+- `concentration::Observable{Vector{Float64}}`: time-series of ion concentrations
+- `concentration_smooth::Observable{Vector{Float64}}`: smoothed concentration time-series
+"""
+struct ChannelSeries
+    histogram::Observable{Vector{Float64}}
+    fit::Observable{Vector{Float64}}
+    photons::Observable{Vector{Float64}}
+    counts::Observable{Float64}
+    lifetime::Observable{Vector{Float64}}
+    lifetime_smooth::Observable{Vector{Float64}}
+    concentration::Observable{Vector{Float64}}
+    concentration_smooth::Observable{Vector{Float64}}
+end
+
+function ChannelSeries()
+    return ChannelSeries(
+        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
+        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
+        Observable(Float64[]),
+        Observable(0.0),
+        Observable(Float64[]),
+        Observable(Float64[]),
+        Observable(Float64[]),
+        Observable(Float64[])
+    )
+end
+
+"""
+    channel_series(app_run) -> (ChannelSeries, ChannelSeries)
+
+Both channels' runtime series, in channel order — the idiomatic way to
+iterate "for each channel" over an `AppRun`.
+"""
+channel_series(app_run) = (app_run.ch1, app_run.ch2)
+
+"""
     AppRun
 
 Runtime state for the application. This structure holds references to
 background tasks, communication channels, and observables that update
 during execution. It is NOT serialized.
 
-Fields:
-- `channel::Union{Channel, Nothing}` - Communication channel for worker->consumer data
-- `running::Threads.Atomic{Bool}` - Flag controlling background task lifetime
-- `worker_task::Union{Task, Nothing}` - Background worker processing task
-- `consumer_task::Union{Task, Nothing}` - Data consumer and GUI update task
-- `autoscaler_task::Union{Task, Nothing}` - Periodic axis autoscaling task
-- `infos_task::Union{Task, Nothing}` - Periodic info/status update task
-- `histogram_ch1::Observable{Vector{Float64}}` - Current histogram data (channel 1)
-- `fit_ch1::Observable{Vector{Float64}}` - Fitted decay curve (channel 1)
-- `photons_ch1::Observable{Vector{Float64}}` - Time-series of photon counts (channel 1)
-- `counts_ch1::Observable{Float64}` - Current photon count (channel 1)
-- `lifetime_ch1::Observable{Vector{Float64}}` - Time-series of fitted lifetimes (channel 1)
-- `lifetime_ch1_smooth::Observable{Vector{Float64}}` - Smoothed time-series of fitted lifetimes (channel 1)
-- `protocol_setpoint::Observable{Vector{Float64}}` - Time-series of protocol setpoints used by PID
-- `concentration_ch1::Observable{Vector{Float64}}` - Time-series of ion concentrations (channel 1)
-- `concentration_ch1_smooth::Observable{Vector{Float64}}` - Smoothed time-series of ion concentrations (channel 1)
-- `histogram_ch2::Observable{Vector{Float64}}` - Current histogram data (channel 2)
-- `fit_ch2::Observable{Vector{Float64}}` - Fitted decay curve (channel 2)
-- `photons_ch2::Observable{Vector{Float64}}` - Time-series of photon counts (channel 2)
-- `counts_ch2::Observable{Float64}` - Current photon count (channel 2)
-- `lifetime_ch2::Observable{Vector{Float64}}` - Time-series of fitted lifetimes (channel 2)
-- `lifetime_ch2_smooth::Observable{Vector{Float64}}` - Smoothed time-series of fitted lifetimes (channel 2)
-- `concentration_ch2::Observable{Vector{Float64}}` - Time-series of ion concentrations (channel 2)
-- `concentration_ch2_smooth::Observable{Vector{Float64}}` - Smoothed time-series of ion concentrations (channel 2)
-- `command1::Observable{Vector{Float64}}` - Time-series of PID command values (controller 1)
-- `command2::Observable{Vector{Float64}}` - Time-series of PID command values (controller 2)
-- `timestamps::Observable{Vector{Float64}}` - Time-series timestamps
-- `i::Observable{UInt32}` - Current frame/iteration counter
-- `hist_time::Observable{Vector{Int64}}` - Histogram time-axis values
+# Fields
+- `channel::Union{Channel{AcquisitionSample}, Nothing}`: worker->consumer data channel
+- `running::Threads.Atomic{Bool}`: flag controlling background task lifetime
+- `paused::Threads.Atomic{Bool}`: flag pausing the background tasks
+- `worker_task::Union{Task, Nothing}`: background worker processing task
+- `consumer_task::Union{Task, Nothing}`: data consumer and GUI update task
+- `autoscaler_task::Union{Task, Nothing}`: periodic axis autoscaling task
+- `infos_task::Union{Task, Nothing}`: periodic info/status update task
+- `serial_task::Union{Task, Nothing}`: periodic serial command task
+- `serial_conn::Union{SerialPort, Nothing}`: open serial connection, if any
+- `ch1::ChannelSeries` / `ch2::ChannelSeries`: per-channel runtime observables
+- `protocol_setpoint::Observable{Vector{Float64}}`: time-series of protocol setpoints used by PID
+- `command1::Observable{Vector{Float64}}` / `command2`: time-series of PID command values
+- `timestamps::Observable{Vector{Float64}}`: time-series timestamps
+- `i::Observable{UInt32}`: current frame/iteration counter
+- `save_progress::Observable{Float64}`: Save-mode progress (percent, `NaN` when idle)
+- `hist_time::Observable{Vector{Int64}}`: histogram time-axis values
+- `protocol::Observable{ProtocolSettings}`: normalized protocol config for the worker
 """
 mutable struct AppRun
     channel::Union{Channel{AcquisitionSample}, Nothing}
@@ -227,24 +289,10 @@ mutable struct AppRun
     autoscaler_task::Union{Task, Nothing}
     infos_task::Union{Task, Nothing}
     serial_task::Union{Task, Nothing}
-    serial_conn::Union{Any, Nothing}
-    histogram_ch1::Observable{Vector{Float64}}
-    fit_ch1::Observable{Vector{Float64}}
-    photons_ch1::Observable{Vector{Float64}}
-    counts_ch1::Observable{Float64}
-    lifetime_ch1::Observable{Vector{Float64}}
-    lifetime_ch1_smooth::Observable{Vector{Float64}}
+    serial_conn::Union{SerialPort, Nothing}
+    ch1::ChannelSeries
+    ch2::ChannelSeries
     protocol_setpoint::Observable{Vector{Float64}}
-    concentration_ch1::Observable{Vector{Float64}}
-    concentration_ch1_smooth::Observable{Vector{Float64}}
-    histogram_ch2::Observable{Vector{Float64}}
-    fit_ch2::Observable{Vector{Float64}}
-    photons_ch2::Observable{Vector{Float64}}
-    counts_ch2::Observable{Float64}
-    lifetime_ch2::Observable{Vector{Float64}}
-    lifetime_ch2_smooth::Observable{Vector{Float64}}
-    concentration_ch2::Observable{Vector{Float64}}
-    concentration_ch2_smooth::Observable{Vector{Float64}}
     command1::Observable{Vector{Float64}}
     command2::Observable{Vector{Float64}}
     timestamps::Observable{Vector{Float64}}
@@ -259,8 +307,8 @@ end
 
 Constructor creating AppRun with initialized observables and null task references.
 
-Returns:
-- AppRun with all observables initialized to empty vectors/defaults,
+# Returns
+- `AppRun` with all observables initialized to empty vectors/defaults,
   all tasks set to nothing, and channel set to nothing
 """
 function AppRun()
@@ -274,22 +322,8 @@ function AppRun()
         nothing,
         nothing,
         nothing,
-        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(Float64[]),
-        Observable(0.0),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(Float64[]),
-        Observable(0.0),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        Observable(Float64[]),
+        ChannelSeries(),
+        ChannelSeries(),
         Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),

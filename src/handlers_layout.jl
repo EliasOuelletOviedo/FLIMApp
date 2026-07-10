@@ -169,10 +169,9 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         function commit_layout_value!(key::Symbol, value)
             setfield!(app.layout, key, value)
             if key == :smoothing
-                recompute_lifetime_ch1_smooth!(app, app_run)
-                notify(app_run.lifetime_ch1_smooth)
-                recompute_concentration_ch1_smooth!(app, app_run)
-                notify(app_run.concentration_ch1_smooth)
+                for series in channel_series(app_run)
+                    recompute_channel_smooth!(app, app_run, series)
+                end
             end
             save_state(app)
             return nothing

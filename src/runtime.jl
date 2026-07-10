@@ -15,24 +15,48 @@ using DataFrames
 using Base.Threads
 
 """
-consumer_loop(app_run)
+    accumulate_channel_sample!(app, series::ChannelSeries, frame::ChannelFrame)
+
+Append one frame's scalar results (photons, lifetime, concentration and
+their smoothed values) onto one channel's time-series observables.
+"""
+function accumulate_channel_sample!(app, series::ChannelSeries, frame::ChannelFrame)
+    push!(series.photons[], frame.photons)
+    push!(series.lifetime[], frame.lifetime)
+    append_smooth_value!(app, series.lifetime, series.lifetime_smooth)
+    push!(series.concentration[], frame.concentration)
+    append_smooth_value!(app, series.concentration, series.concentration_smooth)
+    return nothing
+end
+
+"""
+    publish_channel_frame!(series::ChannelSeries, frame::ChannelFrame)
+
+Publish one frame's histogram/fit/counts onto one channel's "latest value"
+observables (the throttled GUI-facing update, as opposed to the per-frame
+time-series accumulation above).
+"""
+function publish_channel_frame!(series::ChannelSeries, frame::ChannelFrame)
+    series.histogram[] = frame.histogram
+    series.fit[] = frame.fit
+    series.counts[] = frame.photons
+    return nothing
+end
+
+"""
+    consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback")
 
 Consumes data from the channel and updates the app_run observables.
-Notifications are throttled to approximately 30 Hz to avoid overwhelming
+Notifications are throttled to approximately `rate` Hz to avoid overwhelming
 the GUI with too frequent updates.
 """
 function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback")
     last_publish_time = time()
     publish_interval_s = 1.0 / rate
-    plot_1_axis = blocks[:plot_1_axis]
-    plot_2_axis = blocks[:plot_2_axis]
+    plot_1_axis = blocks.plot_1_axis
+    plot_2_axis = blocks.plot_2_axis
     publish_live_updates = acquisition_mode != "Save"
-    last_histogram_ch1 = nothing
-    last_fit_ch1 = nothing
-    last_photons_ch1 = NaN
-    last_histogram_ch2 = nothing
-    last_fit_ch2 = nothing
-    last_photons_ch2 = NaN
+    last_sample = nothing
     is_realtime_mode = acquisition_mode == "Realtime"
     realtime_frame_df = DataFrame(
         frame_idx=UInt32[],
@@ -63,76 +87,42 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                 break
             end
 
-            histogram_ch1 = sample.histogram1
-            fit_ch1 = sample.fit1
-            photons_ch1 = sample.photons1
-            lifetime_ch1 = sample.lifetime1
-            concentration_ch1 = sample.concentration1
-            histogram_ch2 = sample.histogram2
-            fit_ch2 = sample.fit2
-            photons_ch2 = sample.photons2
-            lifetime_ch2 = sample.lifetime2
-            concentration_ch2 = sample.concentration2
-            command1 = sample.command1
-            command2 = sample.command2
-            timestamp = sample.timestamps
-            protocol_setpoint = sample.protocol_setpoint
-            frame_idx = sample.frame_index
-            source_file = sample.source_file
-
-            last_histogram_ch1 = histogram_ch1
-            last_fit_ch1 = fit_ch1
-            last_photons_ch1 = photons_ch1
-            last_histogram_ch2 = histogram_ch2
-            last_fit_ch2 = fit_ch2
-            last_photons_ch2 = photons_ch2
+            last_sample = sample
 
             if is_realtime_mode
                 push!(realtime_frame_df, (
-                    frame_idx=frame_idx,
-                    source_file=String(source_file),
-                    timestamp=Float64(timestamp),
-                    photons_ch1=Float64(photons_ch1),
-                    command1=Float64(command1),
-                    command2=Float64(command2),
-                    lifetime_ch1=Float64(lifetime_ch1),
-                    concentration_ch1=Float64(concentration_ch1),
-                    protocol_setpoint=Float64(protocol_setpoint),
-                    histogram_ch1=copy(histogram_ch1),
-                    fit_ch1=copy(fit_ch1),
-                    photons_ch2=Float64(photons_ch2),
-                    lifetime_ch2=Float64(lifetime_ch2),
-                    concentration_ch2=Float64(concentration_ch2),
-                    histogram_ch2=copy(histogram_ch2),
-                    fit_ch2=copy(fit_ch2)
+                    frame_idx=sample.frame_index,
+                    source_file=String(sample.source_file),
+                    timestamp=Float64(sample.timestamps),
+                    photons_ch1=Float64(sample.ch1.photons),
+                    command1=Float64(sample.command1),
+                    command2=Float64(sample.command2),
+                    lifetime_ch1=Float64(sample.ch1.lifetime),
+                    concentration_ch1=Float64(sample.ch1.concentration),
+                    protocol_setpoint=Float64(sample.protocol_setpoint),
+                    histogram_ch1=copy(sample.ch1.histogram),
+                    fit_ch1=copy(sample.ch1.fit),
+                    photons_ch2=Float64(sample.ch2.photons),
+                    lifetime_ch2=Float64(sample.ch2.lifetime),
+                    concentration_ch2=Float64(sample.ch2.concentration),
+                    histogram_ch2=copy(sample.ch2.histogram),
+                    fit_ch2=copy(sample.ch2.fit)
                 ))
             end
 
-            push!(app_run.photons_ch1[], photons_ch1)
-            push!(app_run.lifetime_ch1[], lifetime_ch1)
-            append_lifetime_ch1_smooth!(app, app_run)
-            push!(app_run.protocol_setpoint[], protocol_setpoint)
-            push!(app_run.concentration_ch1[], concentration_ch1)
-            append_concentration_ch1_smooth!(app, app_run)
-            push!(app_run.photons_ch2[], photons_ch2)
-            push!(app_run.lifetime_ch2[], lifetime_ch2)
-            append_lifetime_ch2_smooth!(app, app_run)
-            push!(app_run.concentration_ch2[], concentration_ch2)
-            append_concentration_ch2_smooth!(app, app_run)
-            push!(app_run.command1[], command1)
-            push!(app_run.command2[], command2)
-            push!(app_run.timestamps[], timestamp)
-            app_run.i[] = frame_idx
+            accumulate_channel_sample!(app, app_run.ch1, sample.ch1)
+            accumulate_channel_sample!(app, app_run.ch2, sample.ch2)
+            push!(app_run.protocol_setpoint[], sample.protocol_setpoint)
+            push!(app_run.command1[], sample.command1)
+            push!(app_run.command2[], sample.command2)
+            push!(app_run.timestamps[], sample.timestamps)
+            app_run.i[] = sample.frame_index
 
             now_s = time()
 
             if publish_live_updates && now_s - last_publish_time >= publish_interval_s
-                app_run.histogram_ch1[] = histogram_ch1
-                app_run.fit_ch1[] = fit_ch1
-                app_run.counts_ch1[] = photons_ch1
-                app_run.histogram_ch2[] = histogram_ch2
-                app_run.fit_ch2[] = fit_ch2
-                app_run.counts_ch2[] = photons_ch2
+                publish_channel_frame!(app_run.ch1, sample.ch1)
+                publish_channel_frame!(app_run.ch2, sample.ch2)
 
                 notify_runtime_observables!(app_run)
 
@@ -143,15 +133,11 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
             end
         end
 
-        if last_histogram_ch1 !== nothing && last_fit_ch1 !== nothing
-            app_run.histogram_ch1[] = last_histogram_ch1
-            app_run.fit_ch1[] = last_fit_ch1
-            app_run.counts_ch1[] = last_photons_ch1
-            if last_histogram_ch2 !== nothing && last_fit_ch2 !== nothing
-                app_run.histogram_ch2[] = last_histogram_ch2
-                app_run.fit_ch2[] = last_fit_ch2
-                app_run.counts_ch2[] = last_photons_ch2
-            end
+        # Publish the final frame once the loop ends, so the plots show the
+        # last processed data even if it arrived between throttled updates.
+        if last_sample !== nothing
+            publish_channel_frame!(app_run.ch1, last_sample.ch1)
+            publish_channel_frame!(app_run.ch2, last_sample.ch2)
 
             notify_runtime_observables!(app_run)
 
@@ -179,13 +165,8 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
             save_realtime_capture!(app, app_run, realtime_frame_df)
         end
 
-        if haskey(blocks, :start_button)
-            blocks[:start_button].label[] = "START"
-        end
-
-        if haskey(blocks, :stop_button)
-            blocks[:stop_button].label[] = "CLEAR"
-        end
+        blocks.start_button.label[] = "START"
+        blocks.stop_button.label[] = "CLEAR"
     catch e
         @error "Consumer error" e
     end
@@ -209,7 +190,7 @@ function infos_loop(app_run, info_label; rate=1.0)
                 info_label.text[] = "Frequency: $di Hz\nFile: $i"
             end
         catch e
-            @warn "Infos erreur" e
+            @warn "Infos loop error" e
         end
     end
     return nothing
@@ -220,24 +201,29 @@ end
 # -----------------------------------------------------------------------------
 
 """
+    reset_channel_series!(series::ChannelSeries)
+
+Clear one channel's time-series observables and counters ahead of a fresh
+acquisition run. Does not notify — callers batch their own notifications.
+"""
+function reset_channel_series!(series::ChannelSeries)
+    empty!(series.photons[])
+    series.counts[] = 0.0
+    empty!(series.lifetime[])
+    empty!(series.lifetime_smooth[])
+    empty!(series.concentration[])
+    empty!(series.concentration_smooth[])
+    return nothing
+end
+
+"""
     reset_acquisition_observables!(app_run)
 
 Clear all time-series observables and counters ahead of a fresh acquisition run.
 """
 function reset_acquisition_observables!(app_run)
-    empty!(app_run.photons_ch1[])
-    app_run.counts_ch1[] = 0.0
-    empty!(app_run.lifetime_ch1[])
-    empty!(app_run.lifetime_ch1_smooth[])
+    foreach(reset_channel_series!, channel_series(app_run))
     empty!(app_run.protocol_setpoint[])
-    empty!(app_run.concentration_ch1[])
-    empty!(app_run.concentration_ch1_smooth[])
-    empty!(app_run.photons_ch2[])
-    app_run.counts_ch2[] = 0.0
-    empty!(app_run.lifetime_ch2[])
-    empty!(app_run.lifetime_ch2_smooth[])
-    empty!(app_run.concentration_ch2[])
-    empty!(app_run.concentration_ch2_smooth[])
     empty!(app_run.command1[])
     empty!(app_run.command2[])
     empty!(app_run.timestamps[])
@@ -346,25 +332,25 @@ function dispatch_acquisition_worker!(app_run, selected_mode, layout, controller
 end
 
 """
-start_pressed(app, app_run, blocks)
+    start_pressed(app, app_run, blocks)
 
 Handler called when the START button is clicked.  It sets up the
 communication channel, resets all time-series observables, and launches
 four background tasks:
 
 * **worker_task** - the Playback/Realtime/Save acquisition loop (acquisition.jl)
-  that reads data files and pushes tuples onto the channel. Launched with
+  that reads data files and pushes samples onto the channel. Launched with
   `Threads.@spawn` (see `dispatch_acquisition_worker!`), since it is
   CPU-bound (dominated by the MLE fit) and must not block the GUI thread;
-* **consumer_task** - pulls tuples from the channel and updates the
+* **consumer_task** - pulls samples from the channel and updates the
   `app_run` observables so that the plots react. Stays on `@async` (pinned
   to the thread it's spawned from, i.e. the GUI thread) since it touches
   `Observable`s/GLMakie, which aren't safe to mutate from multiple threads;
 * **serial_task** - periodically sends PID/PWM commands to the connected device;
 * **infos_task** - refreshes the status label at 1 Hz.
 
-The `blocks` dict is used to read the selected mode/lifetimes menus and to
-obtain the info label object for `infos_task`.
+`blocks` is used to read the selected mode/lifetimes menus and to obtain
+the info label object for `infos_task`.
 """
 function start_pressed(app, app_run, blocks)
     if app_run.running[]
@@ -373,14 +359,12 @@ function start_pressed(app, app_run, blocks)
     end
 
     # Check if IRF is loaded before starting
-    @info "Checking IRF before start: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
     if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
         @error "Cannot start acquisition: IRF not loaded. Please load an IRF file first."
-        @error "IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
         return
     end
 
-    @info "Starting acquisition function"
+    @info "Starting acquisition"
     app_run.running[] = true
     app_run.paused[] = false
     # Capacity: the worker (its own thread since Threads.@spawn, see
@@ -397,12 +381,12 @@ function start_pressed(app, app_run, blocks)
 
     reset_acquisition_observables!(app_run)
 
-    selected_mode = haskey(blocks, :mode_menu) ? blocks[:mode_menu].selection[] : "Playback"
+    selected_mode = blocks.mode_menu.selection[]
     if !(selected_mode isa AbstractString)
         selected_mode = "Playback"
     end
 
-    selected_lifetimes = haskey(blocks, :lifetimes_menu) ? blocks[:lifetimes_menu].selection[] : "2 lifetimes"
+    selected_lifetimes = blocks.lifetimes_menu.selection[]
     if !(selected_lifetimes isa AbstractString)
         selected_lifetimes = "2 lifetimes"
     end
@@ -416,7 +400,7 @@ function start_pressed(app, app_run, blocks)
 
     app_run.consumer_task = @async consumer_loop(app, app_run, blocks; rate=10, acquisition_mode=selected_mode)
     app_run.serial_task = @async serial_signal_loop(app, app_run; rate=20.0)
-    app_run.infos_task = @async infos_loop(app_run, blocks[:info_label]; rate=1)
+    app_run.infos_task = @async infos_loop(app_run, blocks.info_label; rate=1)
 
     return nothing
 end
@@ -436,14 +420,12 @@ function resume_pressed(app_run)
 end
 
 """
-stop_pressed(app_run)
+    stop_pressed(app_run)
 
 Stop any running acquisition.  This function clears the `running`
 flag, closes the channel and waits for any background tasks to
 complete.  Exceptions from worker or consumer tasks are caught and
-logged instead of propagating, which avoids the `TaskFailedException`
-that occurred previously when the channel closed while `test`
-continued running.
+logged instead of propagating.
 """
 function stop_pressed(app_run)
     if app_run.serial_conn !== nothing
@@ -461,8 +443,8 @@ function stop_pressed(app_run)
         return
     end
 
-    @info "Stopping test function"
-    
+    @info "Stopping acquisition"
+
     app_run.paused[] = false
     app_run.running[] = false
     if app_run.channel !== nothing && isopen(app_run.channel)

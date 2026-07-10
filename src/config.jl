@@ -18,9 +18,24 @@ using Colors
 # =============================================================================
 # PATHS & DIRECTORIES
 # =============================================================================
+#
+# These are functions rather than `const`s on purpose: a `const` path is
+# evaluated once at precompilation time, so anything derived from `homedir()`
+# or `ENV` would bake the *build* machine's value into the precompile cache
+# (and into a PackageCompiler app, see build/create_app.jl). Functions
+# re-resolve at call time on whatever machine the app actually runs on.
 
 """
-    STATE_FILE_PATH::String
+    user_data_dir()::String
+
+Per-user directory holding FLIMApp's runtime state (saved `AppState`, path
+caches). Lives under the user's home directory, not the repository — state
+files change on every run and must never end up committed to git.
+"""
+user_data_dir()::String = joinpath(homedir(), ".flimapp")
+
+"""
+    state_file_path()::String
 
 Path to the serialized application state file.
 
@@ -38,41 +53,43 @@ identity to resolve, so they survive regardless of how the app was loaded.
 for any file it can't read (wrong format, corrupted, etc.) rather than
 trying to detect and migrate it.
 """
-const STATE_FILE_PATH = joinpath("docs", "AppState.jls")
+state_file_path()::String = joinpath(user_data_dir(), "AppState.jls")
 
 """
-    IRF_FILEPATH_CACHE::String
+    irf_filepath_cache()::String
 
-Path to the cached IRF file path configuration.
+Path to the cache file remembering the last-selected IRF file path.
 """
-const IRF_FILEPATH_CACHE = joinpath("docs", "irf_filepath.txt")
-
-"""
-    FOLDERPATH_CACHE::String
-
-Path to the cached data folder path configuration.
-"""
-const FOLDERPATH_CACHE = joinpath("docs", "folderpath.txt")
+irf_filepath_cache()::String = joinpath(user_data_dir(), "irf_filepath.txt")
 
 """
-    DATA_ROOT_PATH::String
+    folderpath_cache()::String
 
-Root directory where test/sample data files are stored.
+Path to the cache file remembering the last-selected data folder path.
 """
-# const DATA_ROOT_PATH = get(ENV, "FLIM_DATA_PATH", "/Users/eliasouellet-oviedo/Documents/Stage2/Codes/test")
-# const DATA_ROOT_PATH = "/Users/eliasouellet-oviedo/Documents/Stage2/Partie2/Données/2026-03-12/test_control/test4"
-const DATA_ROOT_PATH = "/Users/eliasouellet-oviedo/Desktop/test2"
+folderpath_cache()::String = joinpath(user_data_dir(), "folderpath.txt")
+
+"""
+    default_data_root_path()::String
+
+Fallback root directory for `.sdt` data files when no folder has been picked
+in the GUI yet: the `FLIM_DATA_PATH` environment variable when set, otherwise
+`~/FLIMApp_data`.
+"""
+function default_data_root_path()::String
+    return get(ENV, "FLIM_DATA_PATH", joinpath(homedir(), "FLIMApp_data"))
+end
 
 """
     get_data_root_path()::String
 
 Return the active data root path from cache when available,
-otherwise fallback to `DATA_ROOT_PATH`.
+otherwise fall back to `default_data_root_path()`.
 """
 function get_data_root_path()::String
-    if isfile(FOLDERPATH_CACHE)
+    if isfile(folderpath_cache())
         cached = try
-            strip(open(f -> read(f, String), FOLDERPATH_CACHE))
+            strip(open(f -> read(f, String), folderpath_cache()))
         catch
             ""
         end
@@ -82,7 +99,7 @@ function get_data_root_path()::String
         end
     end
 
-    return DATA_ROOT_PATH
+    return default_data_root_path()
 end
 
 # =============================================================================
@@ -194,11 +211,11 @@ const LIGHT_MODE_THEME = Dict{Symbol, Any}(
 
 Returns RGB color objects for the specified theme.
 
-Args:
-- `use_dark_mode::Bool` - Use dark theme if true, light theme if false
+# Arguments
+- `use_dark_mode::Bool`: use the dark theme if `true`, the light theme if `false`
 
-Returns:
-- NamedTuple with COLOR_1 through COLOR_5 and TEXT
+# Returns
+- `NamedTuple` with `COLOR_1` through `COLOR_5` and `TEXT`
 """
 function get_theme_colors(use_dark_mode::Bool)
     theme = use_dark_mode ? DARK_MODE_THEME : LIGHT_MODE_THEME
@@ -223,6 +240,6 @@ end
 Ensures all required directories exist. Called at application startup.
 """
 function initialize_directories()
-    mkpath(dirname(STATE_FILE_PATH))
+    mkpath(user_data_dir())
     mkpath(get_data_root_path())
 end

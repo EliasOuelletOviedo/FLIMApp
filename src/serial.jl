@@ -18,7 +18,7 @@ Platform-specific behavior:
 - **macOS**: Scans /dev for USB tty devices
 - **Linux**: Checks /dev/serial/by-id and standard tty/ttyUSB devices
 
-Returns:
+# Returns
 - Vector of display names (e.g., `usbmodem1103`, `ttyUSB0`, `COM3`)
 - Empty vector if no devices found
 """

@@ -82,8 +82,14 @@ in `run_acquisition_loop!` in the same file
 
 ## Testing
 
-See [test/](test/) directory:
-- test_app.jl - Run with `julia> include("test/test_app.jl")`
+Run the test suite from the repository root:
+
+```julia
+using Pkg; Pkg.activate("."); Pkg.test()
+```
+
+Tests live in [test/runtests.jl](test/runtests.jl) and cover the GUI-free
+logic (protocol math, smoothing, state persistence, lifetime fitting).
 
 ## Key Concepts
 

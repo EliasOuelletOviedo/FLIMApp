@@ -48,6 +48,21 @@ function normalized_counts_for_histogram(counts::AbstractVector{<:Real}, fit::Ab
     return out
 end
 
+"""
+    shown_channel_series(app_run, show_ch1, show_ch2)
+
+The standard "for each shown channel" iteration used by the draw_*_plot!
+functions below: `(series, color)` pairs for whichever of the two channels
+its toggle currently shows (channel 1 in `PLOT_COLOR_CH1`, channel 2 in
+`PLOT_COLOR_CH2`).
+"""
+function shown_channel_series(app_run, show_ch1::Bool, show_ch2::Bool)
+    pairs = Tuple{ChannelSeries, typeof(PLOT_COLOR_CH1)}[]
+    show_ch1 && push!(pairs, (app_run.ch1, PLOT_COLOR_CH1))
+    show_ch2 && push!(pairs, (app_run.ch2, PLOT_COLOR_CH2))
+    return pairs
+end
+
 # IRF curve for the Histogram plot overlay, truncated/padded to `fit`'s
 # length and normalized to its own peak (max -> 1).
 function normalized_irf_from_fit(fit::AbstractVector{<:Real})
@@ -83,21 +98,14 @@ the initial-selection draw at GUI construction time (GUI.jl) via
 here once instead of as two copies that can drift out of sync.
 """
 function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
-    if show_ch1
-        counts_ch1_normalized = lift(normalized_counts_for_histogram, app_run.histogram_ch1, app_run.fit_ch1)
-        fit_ch1_normalized = lift(normalize_to_own_max, app_run.fit_ch1)
-        barplot!(axis, app_run.hist_time, counts_ch1_normalized, color=(PLOT_COLOR_CH1, 0.1), gap=0.0)
-        lines!(axis, app_run.hist_time, fit_ch1_normalized, color=PLOT_COLOR_CH1)
+    for (series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
+        counts_normalized = lift(normalized_counts_for_histogram, series.histogram, series.fit)
+        fit_normalized = lift(normalize_to_own_max, series.fit)
+        barplot!(axis, app_run.hist_time, counts_normalized, color=(color, 0.1), gap=0.0)
+        lines!(axis, app_run.hist_time, fit_normalized, color=color)
     end
 
-    if show_ch2
-        counts_ch2_normalized = lift(normalized_counts_for_histogram, app_run.histogram_ch2, app_run.fit_ch2)
-        fit_ch2_normalized = lift(normalize_to_own_max, app_run.fit_ch2)
-        barplot!(axis, app_run.hist_time, counts_ch2_normalized, color=(PLOT_COLOR_CH2, 0.1), gap=0.0)
-        lines!(axis, app_run.hist_time, fit_ch2_normalized, color=PLOT_COLOR_CH2)
-    end
-
-    irf_normalized = lift(normalized_irf_from_fit, app_run.fit_ch1)
+    irf_normalized = lift(normalized_irf_from_fit, app_run.ch1.fit)
     lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_REF)
 
     return nothing
@@ -177,18 +185,11 @@ function draw_lifetime_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     protocol_x, protocol_y = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
     lines!(axis, protocol_x, protocol_y, color=PLOT_COLOR_REF)
 
-    if show_ch1
-        lifetime_ch1_x, lifetime_ch1_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_ch1)
-        smooth_ch1_x, smooth_ch1_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_ch1_smooth)
-        lines!(axis, lifetime_ch1_x, lifetime_ch1_y, color=(PLOT_COLOR_CH1, 0.25))
-        lines!(axis, smooth_ch1_x, smooth_ch1_y, color=PLOT_COLOR_CH1)
-    end
-
-    if show_ch2
-        lifetime_ch2_x, lifetime_ch2_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_ch2)
-        smooth_ch2_x, smooth_ch2_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_ch2_smooth)
-        lines!(axis, lifetime_ch2_x, lifetime_ch2_y, color=(PLOT_COLOR_CH2, 0.25))
-        lines!(axis, smooth_ch2_x, smooth_ch2_y, color=PLOT_COLOR_CH2)
+    for (series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
+        raw_x, raw_y = aligned_xy_observables(app_run.timestamps, series.lifetime)
+        smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, series.lifetime_smooth)
+        lines!(axis, raw_x, raw_y, color=(color, 0.25))
+        lines!(axis, smooth_x, smooth_y, color=color)
     end
 
     return nothing
@@ -207,18 +208,11 @@ reason as `draw_lifetime_plot!`.
 function draw_ion_concentration_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     add_protocol_setpoint_highlight!(axis, app_run)
 
-    if show_ch1
-        concentration_ch1_x, concentration_ch1_y = aligned_xy_observables(app_run.timestamps, app_run.concentration_ch1)
-        smooth_ch1_x, smooth_ch1_y = aligned_xy_observables(app_run.timestamps, app_run.concentration_ch1_smooth)
-        lines!(axis, concentration_ch1_x, concentration_ch1_y, color=(PLOT_COLOR_CH1, 0.25))
-        lines!(axis, smooth_ch1_x, smooth_ch1_y, color=PLOT_COLOR_CH1)
-    end
-
-    if show_ch2
-        concentration_ch2_x, concentration_ch2_y = aligned_xy_observables(app_run.timestamps, app_run.concentration_ch2)
-        smooth_ch2_x, smooth_ch2_y = aligned_xy_observables(app_run.timestamps, app_run.concentration_ch2_smooth)
-        lines!(axis, concentration_ch2_x, concentration_ch2_y, color=(PLOT_COLOR_CH2, 0.25))
-        lines!(axis, smooth_ch2_x, smooth_ch2_y, color=PLOT_COLOR_CH2)
+    for (series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
+        raw_x, raw_y = aligned_xy_observables(app_run.timestamps, series.concentration)
+        smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, series.concentration_smooth)
+        lines!(axis, raw_x, raw_y, color=(color, 0.25))
+        lines!(axis, smooth_x, smooth_y, color=color)
     end
 
     return nothing
@@ -236,14 +230,9 @@ reason as `draw_lifetime_plot!`.
 function draw_photon_counts_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     add_protocol_setpoint_highlight!(axis, app_run)
 
-    if show_ch1
-        photons_ch1_x, photons_ch1_y = aligned_xy_observables(app_run.timestamps, app_run.photons_ch1)
-        lines!(axis, photons_ch1_x, photons_ch1_y, color=PLOT_COLOR_CH1)
-    end
-
-    if show_ch2
-        photons_ch2_x, photons_ch2_y = aligned_xy_observables(app_run.timestamps, app_run.photons_ch2)
-        lines!(axis, photons_ch2_x, photons_ch2_y, color=PLOT_COLOR_CH2)
+    for (series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
+        photons_x, photons_y = aligned_xy_observables(app_run.timestamps, series.photons)
+        lines!(axis, photons_x, photons_y, color=color)
     end
 
     return nothing
@@ -264,13 +253,13 @@ shared functions above.
 """
 function render_plot_selection!(app, app_run, blocks, plot_slot::Symbol)
     if plot_slot == :plot1
-        axis = blocks[:plot_1_axis]
+        axis = blocks.plot_1_axis
         selection = app.layout.plot1
         show_ch1 = app.layout.plot1_ch1
         show_ch2 = app.layout.plot1_ch2
         axis.title[] = "Plot 1\n($(selection))"
     else
-        axis = blocks[:plot_2_axis]
+        axis = blocks.plot_2_axis
         selection = app.layout.plot2
         show_ch1 = app.layout.plot2_ch1
         show_ch2 = app.layout.plot2_ch2
@@ -486,40 +475,34 @@ used for drawing), and Command always shows both controller outputs.
 """
 function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, show_ch2::Bool)
     if plot_label == "Histogram"
-        return (app_run.hist_time[], app_run.histogram_ch1[])
+        return (app_run.hist_time[], app_run.ch1.histogram[])
     end
 
     ts = app_run.timestamps[]
     xs = Float64[]
     ys = Float64[]
+    shown = shown_channel_series(app_run, show_ch1, show_ch2)
 
     if plot_label == "Photon counts"
-        show_ch1 && accumulate_windowed!(xs, ys, ts, app_run.photons_ch1[], time_range)
-        show_ch2 && accumulate_windowed!(xs, ys, ts, app_run.photons_ch2[], time_range)
+        for (series, _) in shown
+            accumulate_windowed!(xs, ys, ts, series.photons[], time_range)
+        end
         return (xs, ys)
     end
 
     if plot_label == "Lifetime"
-        if show_ch1
-            accumulate_windowed!(xs, ys, ts, app_run.lifetime_ch1[], time_range)
-            accumulate_windowed!(xs, ys, ts, app_run.lifetime_ch1_smooth[], time_range)
-        end
-        if show_ch2
-            accumulate_windowed!(xs, ys, ts, app_run.lifetime_ch2[], time_range)
-            accumulate_windowed!(xs, ys, ts, app_run.lifetime_ch2_smooth[], time_range)
+        for (series, _) in shown
+            accumulate_windowed!(xs, ys, ts, series.lifetime[], time_range)
+            accumulate_windowed!(xs, ys, ts, series.lifetime_smooth[], time_range)
         end
         accumulate_windowed!(xs, ys, ts, app_run.protocol_setpoint[], time_range)
         return (xs, ys)
     end
 
     if plot_label == "Ion concentration"
-        if show_ch1
-            accumulate_windowed!(xs, ys, ts, app_run.concentration_ch1[], time_range)
-            accumulate_windowed!(xs, ys, ts, app_run.concentration_ch1_smooth[], time_range)
-        end
-        if show_ch2
-            accumulate_windowed!(xs, ys, ts, app_run.concentration_ch2[], time_range)
-            accumulate_windowed!(xs, ys, ts, app_run.concentration_ch2_smooth[], time_range)
+        for (series, _) in shown
+            accumulate_windowed!(xs, ys, ts, series.concentration[], time_range)
+            accumulate_windowed!(xs, ys, ts, series.concentration_smooth[], time_range)
         end
         return (xs, ys)
     end
@@ -533,18 +516,31 @@ function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, sho
     return (Float64[], Float64[])
 end
 
+"""
+    notify_channel_series!(series::ChannelSeries; include_latest::Bool=false)
+
+Notify one channel's time-series observables; with `include_latest=true`
+also notify the latest histogram/fit/counts observables.
+"""
+function notify_channel_series!(series::ChannelSeries; include_latest::Bool=false)
+    notify(series.photons)
+    notify(series.lifetime)
+    notify(series.lifetime_smooth)
+    notify(series.concentration)
+    notify(series.concentration_smooth)
+
+    if include_latest
+        notify(series.histogram)
+        notify(series.fit)
+        notify(series.counts)
+    end
+
+    return nothing
+end
+
 function notify_runtime_observables!(app_run)
-    notify(app_run.photons_ch1)
-    notify(app_run.lifetime_ch1)
-    notify(app_run.lifetime_ch1_smooth)
+    foreach(notify_channel_series!, channel_series(app_run))
     notify(app_run.protocol_setpoint)
-    notify(app_run.concentration_ch1)
-    notify(app_run.concentration_ch1_smooth)
-    notify(app_run.photons_ch2)
-    notify(app_run.lifetime_ch2)
-    notify(app_run.lifetime_ch2_smooth)
-    notify(app_run.concentration_ch2)
-    notify(app_run.concentration_ch2_smooth)
     notify(app_run.command1)
     notify(app_run.command2)
     notify(app_run.timestamps)

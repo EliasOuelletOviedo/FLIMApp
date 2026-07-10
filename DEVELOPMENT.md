@@ -34,8 +34,9 @@ is, in order:
 module FLIMApp
 
 include("config.jl")              # 1. Constants and configuration
-include("data_types.jl")          # 2. Data structures
+include("data_types.jl")          # 2. Data structures (AppState, AppRun, ChannelSeries)
 include("gui_themes.jl")          # 3. UI styling (reuses config.jl's theme dicts)
+include("gui_blocks.jl")          # 3b. GuiBlocks: typed container of GUI elements
 include("path_utils.jl")          # 4. Path picker/cache helpers
 include("smoothing.jl")           # 5. Lifetime smoothing/Kalman helpers
 include("serial.jl")              # 6. Serial port discovery + PID/PWM I/O
@@ -142,14 +143,18 @@ All globals should be:
 
 ## Testing
 
-Tests belong in `test/`:
-- `test_app.jl` - Integration tests (requires display)
-- `test_*.jl` - Unit tests for specific modules
+Tests live in `test/runtests.jl` and cover the GUI-free logic: protocol
+schedule math, smoothing, state persistence round-trips, spinner stepping,
+plot windowing, and the MLE fit on a synthetic decay with a known lifetime.
+The GUI itself is exercised manually via `run_app()`.
 
-Run tests from Julia REPL:
+Run the suite:
 ```julia
-include("test/test_app.jl")
+using Pkg; Pkg.activate("."); Pkg.test()
 ```
+
+CI (`.github/workflows/CI.yml`) runs the same suite on every push/PR,
+under `xvfb-run` so GLMakie has an OpenGL context on the headless runner.
 
 ## Performance Notes
 

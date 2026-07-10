@@ -166,10 +166,10 @@ function make_plot_axes!(left_grid, app, app_run)
     end
     vspan!(save_progress_axis, 0.0, save_fill_width, color=save_fill_color)
 
-    hspan!(counts_axis, 1, app_run.counts_ch1, color = (PLOT_COLOR_CH1, 0.1))
-    hlines!(counts_axis, app_run.counts_ch1, color = PLOT_COLOR_CH1)
-    hspan!(counts_axis, 1, app_run.counts_ch2, color = (PLOT_COLOR_CH2, 0.1))
-    hlines!(counts_axis, app_run.counts_ch2, color = PLOT_COLOR_CH2)
+    for (series, color) in ((app_run.ch1, PLOT_COLOR_CH1), (app_run.ch2, PLOT_COLOR_CH2))
+        hspan!(counts_axis, 1, series.counts, color = (color, 0.1))
+        hlines!(counts_axis, series.counts, color = color)
+    end
 
     return (counts_axis=counts_axis, plot_1=plot_1, plot_2=plot_2, save_progress_axis=save_progress_axis)
 end
@@ -185,8 +185,8 @@ function make_control_widgets!(button_grid, panelbtn_grid)
     start = Button(button_grid[1, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "START"))...)
     stop  = Button(button_grid[1, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CLEAR"))...)
 
-    initial_irf_name = cached_basename(IRF_FILEPATH_CACHE)
-    initial_folder_name = cached_basename(FOLDERPATH_CACHE; fallback_path=get_data_root_path())
+    initial_irf_name = cached_basename(irf_filepath_cache())
+    initial_folder_name = cached_basename(folderpath_cache(); fallback_path=get_data_root_path())
     irf_path      = Textbox(button_grid[2, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "IRF path", :displayed_string => initial_irf_name, :stored_string => initial_irf_name))...)
     folder_path   = Textbox(button_grid[3, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Folder path", :displayed_string => initial_folder_name, :stored_string => initial_folder_name))...)
     irf_button    = Button(button_grid[2, 1:2];  PATH_BUTTON_ATTRS...)
@@ -263,16 +263,17 @@ function draw_initial_plot_selections!(app, app_run, blocks)
 end
 
 """
-make_gui(app, app_run)
+    make_gui(app, app_run) -> (Figure, GuiBlocks)
 
 Construct the Makie-based graphical user interface and return the
-`Figure` object.  The function lays out the two plotting axes, control
-buttons, text fields and panel buttons.  It does not attach event
-handlers; that task is delegated to `make_handlers` in `handlers.jl`.
+`Figure` together with the `GuiBlocks` container of its elements.
+The function lays out the two plotting axes, control buttons, text
+fields and panel buttons.  It does not attach event handlers; that
+task is delegated to `make_handlers` in `handlers.jl`.
 
-Arguments:
-- `app` : persistent configuration (`AppState`)
-- `app_run` : runtime data (`AppRun`)
+# Arguments
+- `app`: persistent configuration (`AppState`)
+- `app_run`: runtime data (`AppRun`)
 """
 function make_gui(app, app_run)
     if app.dark
@@ -289,30 +290,30 @@ function make_gui(app, app_run)
 
     apply_gui_layout_tweaks!(fig, grids)
 
-    blocks = Dict{Symbol, Any}(
-        :top_grid      => grids.top_grid,
-        :right_grid    => grids.right_grid,
-        :left_grid     => grids.left_grid,
-        :button_grid   => grids.button_grid,
-        :path_grid     => grids.path_grid,
-        :panelbtn_grid => grids.panelbtn_grid,
-        :panel_grid    => grids.panel_grid,
-        :start_button  => widgets.start_button,
-        :stop_button   => widgets.stop_button,
-        :irf_path_textbox => widgets.irf_path_textbox,
-        :irf_button    => widgets.irf_button,
-        :folder_path_textbox => widgets.folder_path_textbox,
-        :folder_button => widgets.folder_button,
-        :port_menu     => widgets.port_menu,
-        :connect_button => widgets.connect_button,
-        :mode_menu     => widgets.mode_menu,
-        :lifetimes_menu => widgets.lifetimes_menu,
-        :panel_buttons => widgets.panel_buttons,
-        :counts_axis   => axes.counts_axis,
-        :plot_1_axis   => axes.plot_1,
-        :plot_2_axis   => axes.plot_2,
-        :save_progress_axis => axes.save_progress_axis,
-        :info_label    => widgets.info_label
+    blocks = GuiBlocks(
+        top_grid            = grids.top_grid,
+        left_grid           = grids.left_grid,
+        right_grid          = grids.right_grid,
+        button_grid         = grids.button_grid,
+        path_grid           = grids.path_grid,
+        panelbtn_grid       = grids.panelbtn_grid,
+        panel_grid          = grids.panel_grid,
+        start_button        = widgets.start_button,
+        stop_button         = widgets.stop_button,
+        irf_path_textbox    = widgets.irf_path_textbox,
+        irf_button          = widgets.irf_button,
+        folder_path_textbox = widgets.folder_path_textbox,
+        folder_button       = widgets.folder_button,
+        port_menu           = widgets.port_menu,
+        connect_button      = widgets.connect_button,
+        mode_menu           = widgets.mode_menu,
+        lifetimes_menu      = widgets.lifetimes_menu,
+        panel_buttons       = widgets.panel_buttons,
+        info_label          = widgets.info_label,
+        counts_axis         = axes.counts_axis,
+        plot_1_axis         = axes.plot_1,
+        plot_2_axis         = axes.plot_2,
+        save_progress_axis  = axes.save_progress_axis
     )
 
     start_port_menu_refresher!(fig, widgets.port_menu, widgets.no_port_selected_label)

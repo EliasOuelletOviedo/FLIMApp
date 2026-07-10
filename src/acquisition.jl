@@ -85,7 +85,7 @@ end
     process_channel_frame!(state, vector, histogram_resolution, n, layout, ctx,
                             partial_fit_enabled, partial_fit_period,
                             setpoint_ns, frame_time, P, I, D, inv, on)
-        -> (histogram, fit, photons, lifetime, concentration, command)
+        -> (ChannelFrame, command)
 
 One TCSPC channel's per-frame work: sliding-window histogram binning, MLE
 lifetime fit (full or partial), and PID command computation — mutating
@@ -196,7 +196,7 @@ function process_channel_frame!(
 
     command = pid_command_from_state(state, setpoint_ns, P, I, D, inv, on)
 
-    return histogram, fit, photons, lifetime, concentration, command
+    return ChannelFrame(histogram, fit, photons, lifetime, concentration), command
 end
 
 """
@@ -281,14 +281,14 @@ function run_acquisition_loop!(
         # fallback value whenever the protocol is off.
         plot_setpoint_ns = protocol_active ? setpoint_ns : NaN
 
-        histogram1, fit1, photons1, lifetime1, concentration1, command1 = process_channel_frame!(
+        frame1, command1 = process_channel_frame!(
             state1, vector1, histogram_resolution, n, layout, ctx,
             partial_fit_enabled, partial_fit_period, setpoint_ns, frame_time,
             controller.P1, controller.I1, controller.D1, controller.ch1_inv, controller.ch1_on
         )
 
         if has_channel2
-            histogram2, fit2, photons2, lifetime2, concentration2, command2 = process_channel_frame!(
+            frame2, command2 = process_channel_frame!(
                 state2, vector2, histogram_resolution, n, layout, ctx,
                 partial_fit_enabled, partial_fit_period, setpoint_ns, frame_time,
                 controller.P2, controller.I2, controller.D2, controller.ch2_inv, controller.ch2_on
@@ -297,7 +297,7 @@ function run_acquisition_loop!(
             # No second SDT channel: controller 2's output still tracks
             # channel 1's lifetime error (its own gains applied to channel
             # 1's error dynamics), exactly matching pre-two-channel behavior.
-            histogram2, fit2, photons2, lifetime2, concentration2 = Float64[], Float64[], NaN, NaN, NaN
+            frame2 = ChannelFrame()
             command2 = pid_command_from_state(state1, setpoint_ns, controller.P2, controller.I2, controller.D2, controller.ch2_inv, controller.ch2_on)
         end
 
@@ -314,8 +314,7 @@ function run_acquisition_loop!(
         end
 
         sample = AcquisitionSample(
-            histogram1, fit1, photons1, lifetime1, concentration1,
-            histogram2, fit2, photons2, lifetime2, concentration2,
+            frame1, frame2,
             command1, command2, timestamps, plot_setpoint_ns, n, String(filepath)
         )
         if !emit!(sample, n)

@@ -116,20 +116,16 @@ function load_irf_from_sdt(filepath::AbstractString; channel::Int=1)::Matrix{Flo
 end
 
 function get_irf(; channel=1)
-    if isfile("docs/irf_filepath.txt")
-        filepath = open(f -> read(f, String), "docs/irf_filepath.txt")
-        if !ispath(filepath)
-            println("IRF filepath does not exist. Please select valid .sdt file.")
-            filepath = pick_file()
-            open("docs/irf_filepath.txt", "w") do io
-                write(io, filepath)
-            end
+    cache_path = irf_filepath_cache()
+
+    filepath = isfile(cache_path) ? open(f -> read(f, String), cache_path) : ""
+
+    if !ispath(filepath)
+        if !isempty(filepath)
+            @warn "Cached IRF filepath does not exist; please select a valid .sdt file" path=filepath
         end
-    else
         filepath = pick_file()
-        open("docs/irf_filepath.txt", "w") do io
-            write(io, filepath)
-        end
+        set_path_cache!(cache_path, filepath)
     end
 
     return load_irf_from_sdt(filepath; channel=channel)

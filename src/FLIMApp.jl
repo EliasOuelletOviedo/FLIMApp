@@ -34,6 +34,9 @@ include("data_types.jl")
 # GUI themes (colors and styling; reuses config.jl's DARK_MODE_THEME/LIGHT_MODE_THEME)
 include("gui_themes.jl")
 
+# Typed container for the GUI elements shared across handlers and tasks
+include("gui_blocks.jl")
+
 # Shared UI path and picker helpers
 include("path_utils.jl")
 
@@ -94,7 +97,7 @@ Recursively convert a struct (and any nested structs) into a plain
 and vectors (copied, to avoid aliasing the original) untouched.
 
 Used to strip `AppState` down to plain, module-independent data before
-serializing — see `STATE_FILE_PATH`'s docstring for why serializing the
+serializing — see `state_file_path`'s docstring for why serializing the
 struct directly is unsafe.
 """
 struct_to_dict(x::Union{Bool, Int, Float64, String, Symbol, Nothing}) = x
@@ -121,11 +124,11 @@ end
 
 Serialize application state to disk as a plain `Dict` (see `struct_to_dict`).
 
-Args:
-- `state::AppState` - Persistent configuration to save
-- `path::String` - File path (default: STATE_FILE_PATH from config)
+# Arguments
+- `state::AppState`: persistent configuration to save
+- `path::String`: file path (default: `state_file_path()` from config)
 """
-function save_state(state::AppState; path::String=STATE_FILE_PATH)
+function save_state(state::AppState; path::String=state_file_path())
     try
         mkpath(dirname(path))
         open(path, "w") do io
@@ -166,13 +169,13 @@ Deserialize application state from disk.
 Returns cached state if file exists and is well-formed (see
 `valid_app_state`); otherwise returns nothing.
 
-Args:
-- `path::String` - File path (default: STATE_FILE_PATH from config)
+# Arguments
+- `path::String`: file path (default: `state_file_path()` from config)
 
-Returns:
-- AppState if file exists and is valid, nothing otherwise
+# Returns
+- `AppState` if the file exists and is valid, `nothing` otherwise
 """
-function load_state(path::String=STATE_FILE_PATH)
+function load_state(path::String=state_file_path())
     if !isfile(path)
         return nothing
     end
@@ -331,6 +334,36 @@ function run_app()
     display(fig)
 
     return fig
+end
+
+"""
+    julia_main()::Cint
+
+Entry point for the compiled standalone application (see
+build/create_app.jl). PackageCompiler-generated executables call this
+function on launch.
+
+Unlike an interactive session — where `display(fig)` returns and the REPL
+keeps the process (and the GLMakie event loop) alive — a compiled binary
+would reach the end of `main` and exit immediately, closing the window
+before the user ever sees it. So after `run_app()` returns the displayed
+figure, this blocks on the figure's screen until the user closes the
+window.
+"""
+function julia_main()::Cint
+    try
+        fig = run_app()
+
+        screen = GLMakie.Makie.getscreen(fig.scene)
+        if screen !== nothing
+            wait(screen)
+        end
+    catch e
+        @error "FLIMApp terminated with an unhandled error" exception=(e, catch_backtrace())
+        return 1
+    end
+
+    return 0
 end
 
 # Export public API
