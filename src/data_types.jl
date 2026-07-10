@@ -11,7 +11,36 @@ This module defines the primary structures for application state:
 using Observables
 using Base.Threads
 
-const AcquisitionSample = Tuple{Vector{Float64},Vector{Float64},Float64,Float64,Float64,Float64,Float64,Float64,Float64,UInt32,String}
+"""
+    AcquisitionSample
+
+One frame's worth of acquisition results, emitted onto the acquisition
+channel by `run_acquisition_loop!` (acquisition.jl) and consumed by
+`consumer_loop` (runtime.jl). A struct rather than a positional tuple —
+16 fields is too many to destructure positionally without risking a
+silently-mismatched order. Channel-2 fields use the same "absent" sentinels
+as everywhere else in this file: `NaN` for scalars, `Float64[]` for vectors,
+set when the source file has only one TCSPC channel (see
+`process_channel_frame!` in acquisition.jl).
+"""
+struct AcquisitionSample
+    histogram1::Vector{Float64}
+    fit1::Vector{Float64}
+    photons1::Float64
+    lifetime1::Float64
+    concentration1::Float64
+    histogram2::Vector{Float64}
+    fit2::Vector{Float64}
+    photons2::Float64
+    lifetime2::Float64
+    concentration2::Float64
+    command1::Float64
+    command2::Float64
+    timestamps::Float64
+    protocol_setpoint::Float64
+    frame_index::UInt32
+    source_file::String
+end
 
 # =============================================================================
 # APPLICATION STATE SETTINGS GROUPS
@@ -166,15 +195,23 @@ Fields:
 - `consumer_task::Union{Task, Nothing}` - Data consumer and GUI update task
 - `autoscaler_task::Union{Task, Nothing}` - Periodic axis autoscaling task
 - `infos_task::Union{Task, Nothing}` - Periodic info/status update task
-- `histogram::Observable{Vector{Float64}}` - Current histogram data
-- `fit::Observable{Vector{Float64}}` - Fitted decay curve
-- `photons::Observable{Vector{Float64}}` - Time-series of photon counts
-- `counts::Observable{Float64}` - Current photon count
-- `lifetime::Observable{Vector{Float64}}` - Time-series of fitted lifetimes
-- `lifetime_smooth::Observable{Vector{Float64}}` - Smoothed time-series of fitted lifetimes
+- `histogram_ch1::Observable{Vector{Float64}}` - Current histogram data (channel 1)
+- `fit_ch1::Observable{Vector{Float64}}` - Fitted decay curve (channel 1)
+- `photons_ch1::Observable{Vector{Float64}}` - Time-series of photon counts (channel 1)
+- `counts_ch1::Observable{Float64}` - Current photon count (channel 1)
+- `lifetime_ch1::Observable{Vector{Float64}}` - Time-series of fitted lifetimes (channel 1)
+- `lifetime_ch1_smooth::Observable{Vector{Float64}}` - Smoothed time-series of fitted lifetimes (channel 1)
 - `protocol_setpoint::Observable{Vector{Float64}}` - Time-series of protocol setpoints used by PID
-- `concentration::Observable{Vector{Float64}}` - Time-series of ion concentrations
-- `concentration_smooth::Observable{Vector{Float64}}` - Smoothed time-series of ion concentrations
+- `concentration_ch1::Observable{Vector{Float64}}` - Time-series of ion concentrations (channel 1)
+- `concentration_ch1_smooth::Observable{Vector{Float64}}` - Smoothed time-series of ion concentrations (channel 1)
+- `histogram_ch2::Observable{Vector{Float64}}` - Current histogram data (channel 2)
+- `fit_ch2::Observable{Vector{Float64}}` - Fitted decay curve (channel 2)
+- `photons_ch2::Observable{Vector{Float64}}` - Time-series of photon counts (channel 2)
+- `counts_ch2::Observable{Float64}` - Current photon count (channel 2)
+- `lifetime_ch2::Observable{Vector{Float64}}` - Time-series of fitted lifetimes (channel 2)
+- `lifetime_ch2_smooth::Observable{Vector{Float64}}` - Smoothed time-series of fitted lifetimes (channel 2)
+- `concentration_ch2::Observable{Vector{Float64}}` - Time-series of ion concentrations (channel 2)
+- `concentration_ch2_smooth::Observable{Vector{Float64}}` - Smoothed time-series of ion concentrations (channel 2)
 - `command1::Observable{Vector{Float64}}` - Time-series of PID command values (controller 1)
 - `command2::Observable{Vector{Float64}}` - Time-series of PID command values (controller 2)
 - `timestamps::Observable{Vector{Float64}}` - Time-series timestamps
@@ -191,15 +228,23 @@ mutable struct AppRun
     infos_task::Union{Task, Nothing}
     serial_task::Union{Task, Nothing}
     serial_conn::Union{Any, Nothing}
-    histogram::Observable{Vector{Float64}}
-    fit::Observable{Vector{Float64}}
-    photons::Observable{Vector{Float64}}
-    counts::Observable{Float64}
-    lifetime::Observable{Vector{Float64}}
-    lifetime_smooth::Observable{Vector{Float64}}
+    histogram_ch1::Observable{Vector{Float64}}
+    fit_ch1::Observable{Vector{Float64}}
+    photons_ch1::Observable{Vector{Float64}}
+    counts_ch1::Observable{Float64}
+    lifetime_ch1::Observable{Vector{Float64}}
+    lifetime_ch1_smooth::Observable{Vector{Float64}}
     protocol_setpoint::Observable{Vector{Float64}}
-    concentration::Observable{Vector{Float64}}
-    concentration_smooth::Observable{Vector{Float64}}
+    concentration_ch1::Observable{Vector{Float64}}
+    concentration_ch1_smooth::Observable{Vector{Float64}}
+    histogram_ch2::Observable{Vector{Float64}}
+    fit_ch2::Observable{Vector{Float64}}
+    photons_ch2::Observable{Vector{Float64}}
+    counts_ch2::Observable{Float64}
+    lifetime_ch2::Observable{Vector{Float64}}
+    lifetime_ch2_smooth::Observable{Vector{Float64}}
+    concentration_ch2::Observable{Vector{Float64}}
+    concentration_ch2_smooth::Observable{Vector{Float64}}
     command1::Observable{Vector{Float64}}
     command2::Observable{Vector{Float64}}
     timestamps::Observable{Vector{Float64}}
@@ -234,6 +279,14 @@ function AppRun()
         Observable(Float64[]),
         Observable(0.0),
         Observable(Float64[]),
+        Observable(Float64[]),
+        Observable(Float64[]),
+        Observable(Float64[]),
+        Observable(Float64[]),
+        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
+        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
+        Observable(Float64[]),
+        Observable(0.0),
         Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),

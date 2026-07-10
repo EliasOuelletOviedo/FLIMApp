@@ -35,8 +35,19 @@ function sum_reshaped_channels(file::Vector{UInt16}, num_rows::Int)::Vector{Floa
     return sum(reshape(file, (num_rows, :)), dims=2)[:, 1]
 end
 
+# Shared by both channels in read_sdt_frame: reshape/sum a raw data block
+# down to one histogram_resolution-length counts vector.
+function extract_channel_counts(flat_data::AbstractArray, histogram_resolution::Int)::Vector{UInt16}
+    flat_counts = vec(flat_data)
+    return if length(flat_counts) == histogram_resolution
+        convert.(UInt16, flat_counts)
+    else
+        convert.(UInt16, sum_reshaped_channels(convert.(UInt16, flat_counts), histogram_resolution))
+    end
+end
+
 """
-    read_sdt_frame(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
+    read_sdt_frame(filepath::String)::Tuple{Vector{UInt16}, Union{Nothing,Vector{UInt16}}, Int, Float32}
 
 Low-level reader for Becker & Hickl .sdt files, used by both the acquisition
 loop (acquisition.jl) and IRF loading (`load_irf_from_sdt` below).
@@ -47,13 +58,19 @@ a block holds multiple repeated histograms (e.g. multiple pixels/frames
 packed into one compressed block), they are summed into a single histogram
 via `sum_reshaped_channels`, matching the previous hand-rolled reader.
 
+SDT files may hold one or two TCSPC channels (`sdt.data[1]` / `sdt.data[2]`).
+`counts2` is `nothing` when the file has only one data block — callers decide
+once (from the first file of a run) whether to treat the whole acquisition as
+one- or two-channel; this function itself just reports what a given file
+actually contains.
+
 The one field kept as a direct byte read is `frame_time`: a `Float32` at
 `meas_desc_block_offset + 215` that `SdtFile.MeasureInfo` doesn't expose
 individually (it only names the fields needed for reshape/time-axis
 computation). Reading it directly here preserves exact behavior from the
 previous implementation.
 """
-function read_sdt_frame(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
+function read_sdt_frame(filepath::String)::Tuple{Vector{UInt16}, Union{Nothing,Vector{UInt16}}, Int, Float32}
     raw_bytes = read(filepath)
     sdt = SdtFile.read_sdt(raw_bytes, basename(filepath))
 
@@ -61,22 +78,17 @@ function read_sdt_frame(filepath::String)::Tuple{Vector{UInt16}, Int, Float32}
     isempty(sdt.measure_info) && error("SDT file contains no measurement info: $filepath")
 
     histogram_resolution = Int(sdt.measure_info[1].adc_re)
-    flat_counts = vec(sdt.data[1])
-
-    counts = if length(flat_counts) == histogram_resolution
-        convert.(UInt16, flat_counts)
-    else
-        convert.(UInt16, sum_reshaped_channels(convert.(UInt16, flat_counts), histogram_resolution))
-    end
+    counts1 = extract_channel_counts(sdt.data[1], histogram_resolution)
+    counts2 = length(sdt.data) >= 2 ? extract_channel_counts(sdt.data[2], histogram_resolution) : nothing
 
     meas_desc_offset = Int(sdt.header.meas_desc_block_offset)
     frame_time = reinterpret(Float32, raw_bytes[meas_desc_offset+216 : meas_desc_offset+219])[1]
 
-    return counts, histogram_resolution, frame_time
+    return counts1, counts2, histogram_resolution, frame_time
 end
 
 function load_irf_from_sdt(filepath::AbstractString; channel::Int=1)::Matrix{Float64}
-    counts_raw, histogram_resolution, time = read_sdt_frame(String(filepath))
+    counts_raw, _, histogram_resolution, time = read_sdt_frame(String(filepath))
 
     counts = Float64.(counts_raw)
     if isempty(counts)

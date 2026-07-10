@@ -166,8 +166,10 @@ function make_plot_axes!(left_grid, app, app_run)
     end
     vspan!(save_progress_axis, 0.0, save_fill_width, color=save_fill_color)
 
-    hspan!(counts_axis, 1, app_run.counts, color = (PLOT_COLOR_CH1, 0.25))
-    hlines!(counts_axis, app_run.counts, color = PLOT_COLOR_CH1)
+    hspan!(counts_axis, 1, app_run.counts_ch1, color = (PLOT_COLOR_CH1, 0.25))
+    hlines!(counts_axis, app_run.counts_ch1, color = PLOT_COLOR_CH1)
+    hspan!(counts_axis, 1, app_run.counts_ch2, color = (PLOT_COLOR_CH2, 0.25))
+    hlines!(counts_axis, app_run.counts_ch2, color = PLOT_COLOR_CH2)
 
     return (counts_axis=counts_axis, plot_1=plot_1, plot_2=plot_2, save_progress_axis=save_progress_axis)
 end
@@ -246,54 +248,17 @@ function start_port_menu_refresher!(fig, port_menu, no_port_label)
 end
 
 """
-    draw_initial_plot_selections!(app, app_run, plot_1, plot_2)
+    draw_initial_plot_selections!(app, app_run, blocks)
 
-Draw the initially-selected series (per `app.layout.plot1`/`.plot2`) onto
-the two plot axes at GUI construction time.
+Draw the initially-selected series (per `app.layout.plot1`/`.plot2`, gated
+by that plot's own channel toggles) onto the two plot axes at GUI
+construction time, via `render_plot_selection!` (plotting.jl) — the same
+function the Menu/Toggle handlers in handlers_layout.jl use, so this never
+drifts into a second copy of the per-plot-type drawing logic.
 """
-function draw_initial_plot_selections!(app, app_run, plot_1, plot_2)
-    mapping = Dict(
-        "Histogram"       => (app_run.hist_time, app_run.histogram),
-        "Photon counts"   => (app_run.timestamps, app_run.photons),
-        "Lifetime"        => (app_run.timestamps, app_run.lifetime),
-        "Ion concentration" => (app_run.timestamps, app_run.concentration),
-        "Command"         => (app_run.timestamps, app_run.command1)
-    )
-
-    selection_1 = app.layout.plot1
-    selection_2 = app.layout.plot2
-
-    plot_data_1 = get(mapping, selection_1, nothing)
-    plot_data_2 = get(mapping, selection_2, nothing)
-
-    function draw_selection!(axis, selection, series_data)
-        if selection == "Command"
-            lines!(axis, app_run.timestamps, app_run.command1, color=PLOT_COLOR_CH1)
-            lines!(axis, app_run.timestamps, app_run.command2, color=PLOT_COLOR_CH2)
-            return
-        end
-
-        if selection == "Lifetime"
-            draw_lifetime_plot!(axis, app_run)
-            return
-        end
-
-        if selection == "Histogram"
-            draw_histogram_plot!(axis, app_run)
-            return
-        end
-
-        if selection == "Ion concentration"
-            draw_ion_concentration_plot!(axis, app_run)
-            return
-        end
-
-        lines!(axis, series_data..., color=PLOT_COLOR_CH1)
-    end
-
-    draw_selection!(plot_1, selection_1, plot_data_1)
-    draw_selection!(plot_2, selection_2, plot_data_2)
-
+function draw_initial_plot_selections!(app, app_run, blocks)
+    render_plot_selection!(app, app_run, blocks, :plot1)
+    render_plot_selection!(app, app_run, blocks, :plot2)
     return nothing
 end
 
@@ -351,7 +316,7 @@ function make_gui(app, app_run)
     )
 
     start_port_menu_refresher!(fig, widgets.port_menu, widgets.no_port_selected_label)
-    draw_initial_plot_selections!(app, app_run, axes.plot_1, axes.plot_2)
+    draw_initial_plot_selections!(app, app_run, blocks)
 
     # Axis autoscaling is handled by plotting.jl's autoscale_values!/autoscale_plot_selection!
     # (called directly from consumer_loop on the axes stored in `blocks`).

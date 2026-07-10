@@ -169,10 +169,10 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         function commit_layout_value!(key::Symbol, value)
             setfield!(app.layout, key, value)
             if key == :smoothing
-                recompute_lifetime_smooth!(app, app_run)
-                notify(app_run.lifetime_smooth)
-                recompute_concentration_smooth!(app, app_run)
-                notify(app_run.concentration_smooth)
+                recompute_lifetime_ch1_smooth!(app, app_run)
+                notify(app_run.lifetime_ch1_smooth)
+                recompute_concentration_ch1_smooth!(app, app_run)
+                notify(app_run.concentration_ch1_smooth)
             end
             save_state(app)
             return nothing
@@ -213,56 +213,18 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
 
             elseif block isa Menu
                 on(block.selection) do selection
-                    axis = nothing
-
-                    if symbol == :plot1
-                        blocks[:plot_1_axis].title[] = "Plot 1\n($(selection))"
-                        axis = blocks[:plot_1_axis]
-                    elseif symbol == :plot2
-                        blocks[:plot_2_axis].title[] = "Plot 2\n($(selection))"
-                        axis = blocks[:plot_2_axis]
-                    end
-
-                    empty!(axis)
-
-                    mapping = Dict(
-                        "Histogram"       => (app_run.hist_time, app_run.histogram),
-                        "Photon counts"   => (app_run.timestamps, app_run.photons),
-                        "Lifetime"        => (app_run.timestamps, app_run.lifetime),
-                        "Ion concentration" => (app_run.timestamps, app_run.concentration),
-                        "Command"         => (app_run.timestamps, app_run.command1)
-                    )
-
-                    xy = get(mapping, selection, nothing)
-
-                    # aligned_xy_observables is defined in plotting.jl
-
-                    if selection == "Command"
-                        lines!(axis, app_run.timestamps, app_run.command1, color=PLOT_COLOR_CH1)
-                        lines!(axis, app_run.timestamps, app_run.command2, color=PLOT_COLOR_CH2)
-                    elseif selection == "Lifetime"
-                        draw_lifetime_plot!(axis, app_run)
-                    elseif selection == "Histogram"
-                        draw_histogram_plot!(axis, app_run)
-                    elseif selection == "Ion concentration"
-                        draw_ion_concentration_plot!(axis, app_run)
-                    else
-                        lines!(axis, xy..., color=PLOT_COLOR_CH1)
-                    end
-
-                    if !app_run.running[]
-                        autolimits!(axis)
-                        lim = axis.finallimits[]
-                        xmax = lim.origin[1] + lim.widths[1]
-                        xlims!(axis, 0.0, max(Float64(xmax), 0.0))
-                    end
-
+                    # commit first: render_plot_selection! (plotting.jl) reads
+                    # app.layout.plot1/plot2 directly, so the new selection
+                    # must already be stored before it runs.
                     commit_layout_value!(symbol, selection)
+                    render_plot_selection!(app, app_run, blocks, symbol)
                 end
 
             elseif block isa Toggle
                 on(block.active) do state
                     commit_layout_value!(symbol, state)
+                    plot_slot = symbol in (:plot1_ch1, :plot1_ch2) ? :plot1 : :plot2
+                    render_plot_selection!(app, app_run, blocks, plot_slot)
                 end
             end
         end

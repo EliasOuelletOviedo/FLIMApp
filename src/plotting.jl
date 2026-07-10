@@ -70,23 +70,34 @@ function normalized_irf_from_fit(fit::AbstractVector{<:Real})
 end
 
 """
-    draw_histogram_plot!(axis, app_run)
+    draw_histogram_plot!(axis, app_run, show_ch1, show_ch2)
 
-Draw the Histogram plot's three series onto `axis`: counts as semi
--transparent bars, fit and IRF as lines on top, all normalized (see the
-functions above) so shapes are comparable regardless of photon counts or
-IRF units. Shared by the Menu-selection handler (handlers_layout.jl) and
-the initial-selection draw at GUI construction time (GUI.jl) — both need
-the exact same rendering, so it lives here once instead of as two copies
-that can drift out of sync.
+Draw the Histogram plot's series onto `axis`: each shown channel's counts
+as semi-transparent bars plus its fit as a line on top (channel 1 in
+`PLOT_COLOR_CH1`, channel 2 in `PLOT_COLOR_CH2`), all normalized (see the
+functions above) so shapes are comparable regardless of photon counts. IRF
+is drawn once regardless of the toggles — one instrument response, not
+per-channel. Shared by the Menu-selection handler (handlers_layout.jl) and
+the initial-selection draw at GUI construction time (GUI.jl) via
+`render_plot_selection!` — both need the exact same rendering, so it lives
+here once instead of as two copies that can drift out of sync.
 """
-function draw_histogram_plot!(axis, app_run)
-    counts_normalized = lift(normalized_counts_for_histogram, app_run.histogram, app_run.fit)
-    fit_normalized = lift(normalize_to_own_max, app_run.fit)
-    irf_normalized = lift(normalized_irf_from_fit, app_run.fit)
+function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
+    if show_ch1
+        counts_ch1_normalized = lift(normalized_counts_for_histogram, app_run.histogram_ch1, app_run.fit_ch1)
+        fit_ch1_normalized = lift(normalize_to_own_max, app_run.fit_ch1)
+        barplot!(axis, app_run.hist_time, counts_ch1_normalized, color=(PLOT_COLOR_CH1, 0.25), gap=0.0)
+        lines!(axis, app_run.hist_time, fit_ch1_normalized, color=PLOT_COLOR_CH1)
+    end
 
-    barplot!(axis, app_run.hist_time, counts_normalized, color=(PLOT_COLOR_CH1, 0.25), gap=0.0)
-    lines!(axis, app_run.hist_time, fit_normalized, color=PLOT_COLOR_CH1)
+    if show_ch2
+        counts_ch2_normalized = lift(normalized_counts_for_histogram, app_run.histogram_ch2, app_run.fit_ch2)
+        fit_ch2_normalized = lift(normalize_to_own_max, app_run.fit_ch2)
+        barplot!(axis, app_run.hist_time, counts_ch2_normalized, color=(PLOT_COLOR_CH2, 0.25), gap=0.0)
+        lines!(axis, app_run.hist_time, fit_ch2_normalized, color=PLOT_COLOR_CH2)
+    end
+
+    irf_normalized = lift(normalized_irf_from_fit, app_run.fit_ch1)
     lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_REF)
 
     return nothing
@@ -150,43 +161,145 @@ function add_protocol_setpoint_highlight!(ax, app_run)
 end
 
 """
-    draw_lifetime_plot!(axis, app_run)
+    draw_lifetime_plot!(axis, app_run, show_ch1, show_ch2)
 
 Draw the Lifetime plot's series onto `axis`: the protocol-setpoint
-highlight, raw lifetime, smoothed lifetime, and the protocol setpoint
-trace. Shared by the Menu-selection handler (handlers_layout.jl) and the
-initial-selection draw at GUI construction time (GUI.jl) — see
-`draw_histogram_plot!` above for why this needs to be one function, not two
-copies.
+highlight and trace (channel-agnostic — it's the PID target, not measured
+data, so it's drawn regardless of the toggles), plus each shown channel's
+raw/smoothed lifetime (channel 1 in `PLOT_COLOR_CH1`, channel 2 in
+`PLOT_COLOR_CH2`). Shared by the Menu-selection handler
+(handlers_layout.jl) and the initial-selection draw at GUI construction
+time (GUI.jl) via `render_plot_selection!` — see `draw_histogram_plot!`
+above for why this needs to be one function, not two copies.
 """
-function draw_lifetime_plot!(axis, app_run)
+function draw_lifetime_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     add_protocol_setpoint_highlight!(axis, app_run)
-
-    lifetime_x, lifetime_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime)
-    smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_smooth)
     protocol_x, protocol_y = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
-
-    lines!(axis, lifetime_x, lifetime_y, color=(PLOT_COLOR_CH1, 0.25))
-    lines!(axis, smooth_x, smooth_y, color=PLOT_COLOR_CH1)
     lines!(axis, protocol_x, protocol_y, color=PLOT_COLOR_REF)
+
+    if show_ch1
+        lifetime_ch1_x, lifetime_ch1_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_ch1)
+        smooth_ch1_x, smooth_ch1_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_ch1_smooth)
+        lines!(axis, lifetime_ch1_x, lifetime_ch1_y, color=(PLOT_COLOR_CH1, 0.25))
+        lines!(axis, smooth_ch1_x, smooth_ch1_y, color=PLOT_COLOR_CH1)
+    end
+
+    if show_ch2
+        lifetime_ch2_x, lifetime_ch2_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_ch2)
+        smooth_ch2_x, smooth_ch2_y = aligned_xy_observables(app_run.timestamps, app_run.lifetime_ch2_smooth)
+        lines!(axis, lifetime_ch2_x, lifetime_ch2_y, color=(PLOT_COLOR_CH2, 0.25))
+        lines!(axis, smooth_ch2_x, smooth_ch2_y, color=PLOT_COLOR_CH2)
+    end
 
     return nothing
 end
 
 """
-    draw_ion_concentration_plot!(axis, app_run)
+    draw_ion_concentration_plot!(axis, app_run, show_ch1, show_ch2)
 
-Draw the Ion concentration plot's series onto `axis`: raw concentration and
-its smoothed trace, using the exact same smoothing (compute_lifetime_smooth_at,
-see smoothing.jl) as the Lifetime plot. Shared by the Menu-selection handler
-and the initial-selection draw for the same reason as `draw_lifetime_plot!`.
+Draw the Ion concentration plot's series onto `axis`: each shown channel's
+raw concentration and its smoothed trace (channel 1 in `PLOT_COLOR_CH1`,
+channel 2 in `PLOT_COLOR_CH2`), using the exact same smoothing
+(compute_lifetime_smooth_at, see smoothing.jl) as the Lifetime plot. Shared
+by the Menu-selection handler and the initial-selection draw for the same
+reason as `draw_lifetime_plot!`.
 """
-function draw_ion_concentration_plot!(axis, app_run)
-    concentration_x, concentration_y = aligned_xy_observables(app_run.timestamps, app_run.concentration)
-    smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, app_run.concentration_smooth)
+function draw_ion_concentration_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
+    add_protocol_setpoint_highlight!(axis, app_run)
 
-    lines!(axis, concentration_x, concentration_y, color=(PLOT_COLOR_CH1, 0.25))
-    lines!(axis, smooth_x, smooth_y, color=PLOT_COLOR_CH1)
+    if show_ch1
+        concentration_ch1_x, concentration_ch1_y = aligned_xy_observables(app_run.timestamps, app_run.concentration_ch1)
+        smooth_ch1_x, smooth_ch1_y = aligned_xy_observables(app_run.timestamps, app_run.concentration_ch1_smooth)
+        lines!(axis, concentration_ch1_x, concentration_ch1_y, color=(PLOT_COLOR_CH1, 0.25))
+        lines!(axis, smooth_ch1_x, smooth_ch1_y, color=PLOT_COLOR_CH1)
+    end
+
+    if show_ch2
+        concentration_ch2_x, concentration_ch2_y = aligned_xy_observables(app_run.timestamps, app_run.concentration_ch2)
+        smooth_ch2_x, smooth_ch2_y = aligned_xy_observables(app_run.timestamps, app_run.concentration_ch2_smooth)
+        lines!(axis, concentration_ch2_x, concentration_ch2_y, color=(PLOT_COLOR_CH2, 0.25))
+        lines!(axis, smooth_ch2_x, smooth_ch2_y, color=PLOT_COLOR_CH2)
+    end
+
+    return nothing
+end
+
+"""
+    draw_photon_counts_plot!(axis, app_run, show_ch1, show_ch2)
+
+Draw the Photon counts plot's series onto `axis`: each shown channel's raw
+photon-count trace (channel 1 in `PLOT_COLOR_CH1`, channel 2 in
+`PLOT_COLOR_CH2`) — no smoothed variant exists for this series. Shared by
+the Menu-selection handler and the initial-selection draw for the same
+reason as `draw_lifetime_plot!`.
+"""
+function draw_photon_counts_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
+    add_protocol_setpoint_highlight!(axis, app_run)
+
+    if show_ch1
+        photons_ch1_x, photons_ch1_y = aligned_xy_observables(app_run.timestamps, app_run.photons_ch1)
+        lines!(axis, photons_ch1_x, photons_ch1_y, color=PLOT_COLOR_CH1)
+    end
+
+    if show_ch2
+        photons_ch2_x, photons_ch2_y = aligned_xy_observables(app_run.timestamps, app_run.photons_ch2)
+        lines!(axis, photons_ch2_x, photons_ch2_y, color=PLOT_COLOR_CH2)
+    end
+
+    return nothing
+end
+
+"""
+    render_plot_selection!(app, app_run, blocks, plot_slot::Symbol)
+
+Render whichever series `app.layout.plot1`/`.plot2` currently selects onto
+`plot_slot`'s axis (`:plot1` or `:plot2`), gated by that slot's own
+`plot1_ch1`/`plot1_ch2`/`plot2_ch1`/`plot2_ch2` toggles. This is the single
+place that knows how to render a plot slot — the Menu `on(selection)`
+handler and the channel-toggle `on(active)` handler (both in
+handlers_layout.jl) and the initial render at GUI construction time
+(GUI.jl's `draw_initial_plot_selections!`) all call this instead of each
+keeping its own copy, for the same reason `draw_histogram_plot!` etc. are
+shared functions above.
+"""
+function render_plot_selection!(app, app_run, blocks, plot_slot::Symbol)
+    if plot_slot == :plot1
+        axis = blocks[:plot_1_axis]
+        selection = app.layout.plot1
+        show_ch1 = app.layout.plot1_ch1
+        show_ch2 = app.layout.plot1_ch2
+        axis.title[] = "Plot 1\n($(selection))"
+    else
+        axis = blocks[:plot_2_axis]
+        selection = app.layout.plot2
+        show_ch1 = app.layout.plot2_ch1
+        show_ch2 = app.layout.plot2_ch2
+        axis.title[] = "Plot 2\n($(selection))"
+    end
+
+    empty!(axis)
+
+    if selection == "Command"
+        add_protocol_setpoint_highlight!(axis, app_run)
+        
+        lines!(axis, app_run.timestamps, app_run.command1, color=PLOT_COLOR_CH1)
+        lines!(axis, app_run.timestamps, app_run.command2, color=PLOT_COLOR_CH2)
+    elseif selection == "Lifetime"
+        draw_lifetime_plot!(axis, app_run, show_ch1, show_ch2)
+    elseif selection == "Histogram"
+        draw_histogram_plot!(axis, app_run, show_ch1, show_ch2)
+    elseif selection == "Ion concentration"
+        draw_ion_concentration_plot!(axis, app_run, show_ch1, show_ch2)
+    elseif selection == "Photon counts"
+        draw_photon_counts_plot!(axis, app_run, show_ch1, show_ch2)
+    end
+
+    if !app_run.running[]
+        autolimits!(axis)
+        lim = axis.finallimits[]
+        xmax = lim.origin[1] + lim.widths[1]
+        xlims!(axis, 0.0, max(Float64(xmax), 0.0))
+    end
 
     return nothing
 end
@@ -346,50 +459,91 @@ function windowed_slice(xs::AbstractVector{Float64}, ys::AbstractVector{Float64}
 end
 
 """
-    lookup_plot_series(app_run, plot_label, time_range)
+    accumulate_windowed!(xs_acc, ys_acc, timestamps, values, time_range)
+
+Append `windowed_slice(timestamps, values, time_range)` onto `xs_acc`/
+`ys_acc` in place. Small helper for `lookup_plot_series` below, so
+gating a series on `show_ch1`/`show_ch2` is a one-line `show_chN && ...`
+instead of a branch per plot label.
+"""
+function accumulate_windowed!(xs_acc::Vector{Float64}, ys_acc::Vector{Float64}, timestamps::AbstractVector{Float64}, values::AbstractVector{Float64}, time_range)
+    ts_w, val_w = windowed_slice(timestamps, values, time_range)
+    append!(xs_acc, ts_w)
+    append!(ys_acc, val_w)
+    return nothing
+end
+
+"""
+    lookup_plot_series(app_run, plot_label, time_range, show_ch1, show_ch2)
 
 Return x/y vectors for one plot label, restricted to the last `time_range`
-seconds (see `windowed_slice`).
+seconds (see `windowed_slice`) and to whichever channel(s) are shown.
 Labels supported: `Histogram`, `Photon counts`, `Lifetime`, `Ion concentration`, `Command`.
+`Histogram` and `Command` ignore `show_ch1`/`show_ch2` — Histogram returns
+the raw (un-windowed) channel-1 series regardless (autoscaling only, not
+used for drawing), and Command always shows both controller outputs.
 """
-function lookup_plot_series(app_run, plot_label, time_range)
+function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, show_ch2::Bool)
     if plot_label == "Histogram"
-        return (app_run.hist_time[], app_run.histogram[])
+        return (app_run.hist_time[], app_run.histogram_ch1[])
     end
 
+    ts = app_run.timestamps[]
+    xs = Float64[]
+    ys = Float64[]
+
     if plot_label == "Photon counts"
-        return windowed_slice(app_run.timestamps[], app_run.photons[], time_range)
+        show_ch1 && accumulate_windowed!(xs, ys, ts, app_run.photons_ch1[], time_range)
+        show_ch2 && accumulate_windowed!(xs, ys, ts, app_run.photons_ch2[], time_range)
+        return (xs, ys)
     end
 
     if plot_label == "Lifetime"
-        ts_w, lifetime_w = windowed_slice(app_run.timestamps[], app_run.lifetime[], time_range)
-        _, smooth_w = windowed_slice(app_run.timestamps[], app_run.lifetime_smooth[], time_range)
-        _, setpoint_w = windowed_slice(app_run.timestamps[], app_run.protocol_setpoint[], time_range)
-        return (vcat(ts_w, ts_w, ts_w), vcat(lifetime_w, smooth_w, setpoint_w))
+        if show_ch1
+            accumulate_windowed!(xs, ys, ts, app_run.lifetime_ch1[], time_range)
+            accumulate_windowed!(xs, ys, ts, app_run.lifetime_ch1_smooth[], time_range)
+        end
+        if show_ch2
+            accumulate_windowed!(xs, ys, ts, app_run.lifetime_ch2[], time_range)
+            accumulate_windowed!(xs, ys, ts, app_run.lifetime_ch2_smooth[], time_range)
+        end
+        accumulate_windowed!(xs, ys, ts, app_run.protocol_setpoint[], time_range)
+        return (xs, ys)
     end
 
     if plot_label == "Ion concentration"
-        ts_w, conc_w = windowed_slice(app_run.timestamps[], app_run.concentration[], time_range)
-        _, smooth_w = windowed_slice(app_run.timestamps[], app_run.concentration_smooth[], time_range)
-        return (vcat(ts_w, ts_w), vcat(conc_w, smooth_w))
+        if show_ch1
+            accumulate_windowed!(xs, ys, ts, app_run.concentration_ch1[], time_range)
+            accumulate_windowed!(xs, ys, ts, app_run.concentration_ch1_smooth[], time_range)
+        end
+        if show_ch2
+            accumulate_windowed!(xs, ys, ts, app_run.concentration_ch2[], time_range)
+            accumulate_windowed!(xs, ys, ts, app_run.concentration_ch2_smooth[], time_range)
+        end
+        return (xs, ys)
     end
 
     if plot_label == "Command"
-        ts_w, cmd1_w = windowed_slice(app_run.timestamps[], app_run.command1[], time_range)
-        _, cmd2_w = windowed_slice(app_run.timestamps[], app_run.command2[], time_range)
-        return (vcat(ts_w, ts_w), vcat(cmd1_w, cmd2_w))
+        accumulate_windowed!(xs, ys, ts, app_run.command1[], time_range)
+        accumulate_windowed!(xs, ys, ts, app_run.command2[], time_range)
+        return (xs, ys)
     end
 
     return (Float64[], Float64[])
 end
 
 function notify_runtime_observables!(app_run)
-    notify(app_run.photons)
-    notify(app_run.lifetime)
-    notify(app_run.lifetime_smooth)
+    notify(app_run.photons_ch1)
+    notify(app_run.lifetime_ch1)
+    notify(app_run.lifetime_ch1_smooth)
     notify(app_run.protocol_setpoint)
-    notify(app_run.concentration)
-    notify(app_run.concentration_smooth)
+    notify(app_run.concentration_ch1)
+    notify(app_run.concentration_ch1_smooth)
+    notify(app_run.photons_ch2)
+    notify(app_run.lifetime_ch2)
+    notify(app_run.lifetime_ch2_smooth)
+    notify(app_run.concentration_ch2)
+    notify(app_run.concentration_ch2_smooth)
     notify(app_run.command1)
     notify(app_run.command2)
     notify(app_run.timestamps)
@@ -397,13 +551,13 @@ function notify_runtime_observables!(app_run)
     return nothing
 end
 
-function autoscale_plot_selection!(app, app_run, axis, plot_label)
+function autoscale_plot_selection!(app, app_run, axis, plot_label, show_ch1::Bool, show_ch2::Bool)
     if plot_label == "Histogram"
         autoscale_values!(axis)
         return nothing
     end
 
-    xs, ys = lookup_plot_series(app_run, plot_label, app.layout.time_range)
+    xs, ys = lookup_plot_series(app_run, plot_label, app.layout.time_range, show_ch1, show_ch2)
 
     if plot_label == "Command"
         autoscale_values!(app, axis, xs)

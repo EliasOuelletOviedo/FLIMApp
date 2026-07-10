@@ -74,25 +74,35 @@ function write_realtime_capture_csv!(csv_path::AbstractString, app_run, per_file
     # Also write runtime vectors as a companion CSV
     try
         ts = app_run.timestamps[]
-        photons = app_run.photons[]
-        lifetime = app_run.lifetime[]
-        lifetime_smooth = app_run.lifetime_smooth[]
+        photons_ch1 = app_run.photons_ch1[]
+        lifetime_ch1 = app_run.lifetime_ch1[]
+        lifetime_ch1_smooth = app_run.lifetime_ch1_smooth[]
         protocol_setpoint = app_run.protocol_setpoint[]
-        concentration = app_run.concentration[]
-        concentration_smooth = app_run.concentration_smooth[]
+        concentration_ch1 = app_run.concentration_ch1[]
+        concentration_ch1_smooth = app_run.concentration_ch1_smooth[]
+        photons_ch2 = app_run.photons_ch2[]
+        lifetime_ch2 = app_run.lifetime_ch2[]
+        lifetime_ch2_smooth = app_run.lifetime_ch2_smooth[]
+        concentration_ch2 = app_run.concentration_ch2[]
+        concentration_ch2_smooth = app_run.concentration_ch2_smooth[]
         command1 = app_run.command1[]
         command2 = app_run.command2[]
 
-        maxlen = maximum(map(length, (ts, photons, lifetime, lifetime_smooth, protocol_setpoint, concentration, concentration_smooth, command1, command2)))
+        maxlen = maximum(map(length, (ts, photons_ch1, lifetime_ch1, lifetime_ch1_smooth, protocol_setpoint, concentration_ch1, concentration_ch1_smooth, photons_ch2, lifetime_ch2, lifetime_ch2_smooth, concentration_ch2, concentration_ch2_smooth, command1, command2)))
 
         df_runtime = DataFrame(
             timestamp = pad_to_length(Float64.(ts), maxlen),
-            photons = pad_to_length(Float64.(photons), maxlen),
-            lifetime = pad_to_length(Float64.(lifetime), maxlen),
-            lifetime_smooth = pad_to_length(Float64.(lifetime_smooth), maxlen),
+            photons_ch1 = pad_to_length(Float64.(photons_ch1), maxlen),
+            lifetime_ch1 = pad_to_length(Float64.(lifetime_ch1), maxlen),
+            lifetime_ch1_smooth = pad_to_length(Float64.(lifetime_ch1_smooth), maxlen),
             protocol_setpoint = pad_to_length(Float64.(protocol_setpoint), maxlen),
-            concentration = pad_to_length(Float64.(concentration), maxlen),
-            concentration_smooth = pad_to_length(Float64.(concentration_smooth), maxlen),
+            concentration_ch1 = pad_to_length(Float64.(concentration_ch1), maxlen),
+            concentration_ch1_smooth = pad_to_length(Float64.(concentration_ch1_smooth), maxlen),
+            photons_ch2 = pad_to_length(Float64.(photons_ch2), maxlen),
+            lifetime_ch2 = pad_to_length(Float64.(lifetime_ch2), maxlen),
+            lifetime_ch2_smooth = pad_to_length(Float64.(lifetime_ch2_smooth), maxlen),
+            concentration_ch2 = pad_to_length(Float64.(concentration_ch2), maxlen),
+            concentration_ch2_smooth = pad_to_length(Float64.(concentration_ch2_smooth), maxlen),
             command1 = pad_to_length(Float64.(command1), maxlen),
             command2 = pad_to_length(Float64.(command2), maxlen)
         )
@@ -121,17 +131,25 @@ function save_realtime_capture!(app, app_run, per_file_df::DataFrame)
         :app_state => snapshot_app_state(app),
         :runtime_vectors => Dict{Symbol, Any}(
             :timestamps => copy(app_run.timestamps[]),
-            :photons => copy(app_run.photons[]),
-            :lifetime => copy(app_run.lifetime[]),
-            :lifetime_smooth => copy(app_run.lifetime_smooth[]),
+            :photons_ch1 => copy(app_run.photons_ch1[]),
+            :lifetime_ch1 => copy(app_run.lifetime_ch1[]),
+            :lifetime_ch1_smooth => copy(app_run.lifetime_ch1_smooth[]),
             :protocol_setpoint => copy(app_run.protocol_setpoint[]),
-            :concentration => copy(app_run.concentration[]),
-            :concentration_smooth => copy(app_run.concentration_smooth[]),
+            :concentration_ch1 => copy(app_run.concentration_ch1[]),
+            :concentration_ch1_smooth => copy(app_run.concentration_ch1_smooth[]),
+            :photons_ch2 => copy(app_run.photons_ch2[]),
+            :lifetime_ch2 => copy(app_run.lifetime_ch2[]),
+            :lifetime_ch2_smooth => copy(app_run.lifetime_ch2_smooth[]),
+            :concentration_ch2 => copy(app_run.concentration_ch2[]),
+            :concentration_ch2_smooth => copy(app_run.concentration_ch2_smooth[]),
             :command1 => copy(app_run.command1[]),
             :command2 => copy(app_run.command2[]),
-            :histogram_latest => copy(app_run.histogram[]),
-            :fit_latest => copy(app_run.fit[]),
-            :counts_latest => app_run.counts[],
+            :histogram_ch1_latest => copy(app_run.histogram_ch1[]),
+            :fit_ch1_latest => copy(app_run.fit_ch1[]),
+            :counts_ch1_latest => app_run.counts_ch1[],
+            :histogram_ch2_latest => copy(app_run.histogram_ch2[]),
+            :fit_ch2_latest => copy(app_run.fit_ch2[]),
+            :counts_ch2_latest => app_run.counts_ch2[],
             :frame_index_latest => app_run.i[]
         ),
         :per_file_dataframe => deepcopy(per_file_df),

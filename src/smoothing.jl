@@ -142,11 +142,12 @@ end
 # -----------------------------------------------------------------------------
 #
 # Generic over which raw/smoothed observable pair they operate on, so
-# lifetime and ion concentration go through the exact same smoothing
-# function with the exact same parameters (compute_lifetime_smooth_at) —
-# not two copies that could drift apart. recompute_lifetime_smooth! /
-# append_lifetime_smooth! / recompute_concentration_smooth! /
-# append_concentration_smooth! below are the named entry points used at
+# lifetime and ion concentration (each channel) go through the exact same
+# smoothing function with the exact same parameters
+# (compute_lifetime_smooth_at) — not separate copies that could drift
+# apart. recompute_lifetime_ch1_smooth! / append_lifetime_ch1_smooth! /
+# recompute_concentration_ch1_smooth! / append_concentration_ch1_smooth!
+# (and their _ch2 counterparts) below are the named entry points used at
 # call sites; the shared logic lives here once.
 
 """
@@ -226,8 +227,14 @@ function append_smooth_value!(app, source::Observable{Vector{Float64}}, target::
     return nothing
 end
 
-recompute_lifetime_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.lifetime, app_run.lifetime_smooth, app_run.timestamps)
-append_lifetime_smooth!(app, app_run) = append_smooth_value!(app, app_run.lifetime, app_run.lifetime_smooth)
+recompute_lifetime_ch1_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.lifetime_ch1, app_run.lifetime_ch1_smooth, app_run.timestamps)
+append_lifetime_ch1_smooth!(app, app_run) = append_smooth_value!(app, app_run.lifetime_ch1, app_run.lifetime_ch1_smooth)
 
-recompute_concentration_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.concentration, app_run.concentration_smooth, app_run.timestamps)
-append_concentration_smooth!(app, app_run) = append_smooth_value!(app, app_run.concentration, app_run.concentration_smooth)
+recompute_concentration_ch1_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.concentration_ch1, app_run.concentration_ch1_smooth, app_run.timestamps)
+append_concentration_ch1_smooth!(app, app_run) = append_smooth_value!(app, app_run.concentration_ch1, app_run.concentration_ch1_smooth)
+
+recompute_lifetime_ch2_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.lifetime_ch2, app_run.lifetime_ch2_smooth, app_run.timestamps)
+append_lifetime_ch2_smooth!(app, app_run) = append_smooth_value!(app, app_run.lifetime_ch2, app_run.lifetime_ch2_smooth)
+
+recompute_concentration_ch2_smooth!(app, app_run) = recompute_smooth_series!(app, app_run.concentration_ch2, app_run.concentration_ch2_smooth, app_run.timestamps)
+append_concentration_ch2_smooth!(app, app_run) = append_smooth_value!(app, app_run.concentration_ch2, app_run.concentration_ch2_smooth)

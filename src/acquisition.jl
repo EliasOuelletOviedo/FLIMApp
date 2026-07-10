@@ -22,6 +22,184 @@ using Base.Threads
 # =============================================================================
 
 """
+    ChannelFitState
+
+One TCSPC channel's per-frame accumulator state for `run_acquisition_loop!`:
+sliding-window binning buffer, current MLE fit parameters, and PID error
+accumulators. Not persisted/Observable like `AppState`/`AppRun` — this is
+purely acquisition-loop-internal state, one instance per channel.
+"""
+mutable struct ChannelFitState
+    vectors::Matrix{Float64}
+    n_vectors::Int
+    sum_vector::Vector{Float64}
+    last_bin::Int
+    current_count::Int
+    params::Vector{Float64}
+    full_fit_params::Vector{Float64}
+    first_fit_pending::Bool
+    I_error::Float64
+    old_error::Float64
+    D_error::Float64
+    pid_prev_smooth_lifetime::Float64
+    pid_prev_raw_lifetime::Float64
+    pid_scale_est::Float64
+end
+
+function ChannelFitState(initial_guess::Vector{Float64})
+    return ChannelFitState(
+        zeros(100, DEFAULT_HISTOGRAM_RESOLUTION), 100,
+        zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION), 1, 0,
+        copy(initial_guess), copy(initial_guess), true,
+        0.0, 0.0, 0.0, NaN, NaN, 1.0e-6
+    )
+end
+
+"""
+    pid_command_from_state(state, setpoint_ns, P, I, D, inv, on)::Float64
+
+Apply one controller's gains to `state`'s current error terms (`state.
+old_error` holds the latest P_error, `state.I_error`/`state.D_error` the
+integral/derivative terms — all just set by `process_channel_frame!`). Split
+out from `process_channel_frame!` so a single-channel acquisition (no second
+SDT channel in the file) can still drive controller 2's output from channel
+1's error dynamics with controller 2's own gains — this is exactly the
+original single-channel behavior (`command1`/`command2` were always two
+gain-weighted views of one shared error before channel 2 existed), preserved
+for files that only ever have one channel.
+"""
+function pid_command_from_state(state::ChannelFitState, setpoint_ns::Float64, P::Float64, I::Float64, D::Float64, inv::Bool, on::Bool)::Float64
+    if isnan(setpoint_ns)
+        return NaN
+    end
+
+    command = P*state.old_error + I*state.I_error + D*state.D_error
+    if inv
+        command = -command
+    end
+
+    return on ? clamp(command, 0.0, 100.0) : NaN
+end
+
+"""
+    process_channel_frame!(state, vector, histogram_resolution, n, layout, ctx,
+                            partial_fit_enabled, partial_fit_period,
+                            setpoint_ns, frame_time, P, I, D, inv, on)
+        -> (histogram, fit, photons, lifetime, concentration, command)
+
+One TCSPC channel's per-frame work: sliding-window histogram binning, MLE
+lifetime fit (full or partial), and PID command computation — mutating
+`state` in place. `run_acquisition_loop!` calls this once per channel per
+frame with that channel's own `ChannelFitState` and controller sub-config
+(P1/I1/D1/ch1_inv/ch1_on vs P2/I2/D2/ch2_inv/ch2_on), so each channel is fit
+and controlled completely independently when both are present.
+"""
+function process_channel_frame!(
+        state::ChannelFitState,
+        vector::Vector{UInt16},
+        histogram_resolution::Int,
+        n::UInt32,
+        layout::LayoutSettings,
+        ctx,
+        partial_fit_enabled::Bool,
+        partial_fit_period::Int,
+        setpoint_ns::Float64,
+        frame_time::Float32,
+        P::Float64, I::Float64, D::Float64,
+        inv::Bool, on::Bool
+    )
+    # Store in circular buffer
+    pos = mod1(Int(n)+1, state.n_vectors)
+    state.vectors[pos, 1:histogram_resolution] .= vector
+
+    # Apply binning from layout with sliding window optimization
+    bin = layout.binning
+
+    if bin != state.last_bin
+        # Recalculate when binning changes
+        effective_bin = min(bin, state.current_count + 1)
+        idxs = mod1.(pos .- (0:effective_bin-1), state.n_vectors)
+        fill!(state.sum_vector, 0.0)
+        @inbounds for idx in idxs
+            @views state.sum_vector[1:histogram_resolution] .+= state.vectors[idx, 1:histogram_resolution]
+        end
+        state.last_bin = bin
+        state.current_count = effective_bin
+    else
+        if state.current_count < bin
+            # Still filling window
+            state.sum_vector .+= vector
+            state.current_count += 1
+        else
+            # Slide window: remove oldest, add new
+            old_pos = mod1(pos - bin, state.n_vectors)
+            state.sum_vector .-= state.vectors[old_pos, 1:histogram_resolution]
+            state.sum_vector .+= vector
+        end
+    end
+
+    final_vector = state.sum_vector ./ bin
+
+    # Fit every processed frame/file.
+    fit_index = Int(n) + 1
+    use_full_fit = !partial_fit_enabled || fit_index == 1 || mod1(fit_index, partial_fit_period) == 1
+
+    if use_full_fit
+        params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=state.full_fit_params, histogram_resolution=histogram_resolution, first_fit=state.first_fit_pending)
+        state.first_fit_pending = false
+
+        if !isnan(params_raw[1])
+            state.params = params_raw
+            state.full_fit_params = params_raw
+        end
+    else
+        # Fix only the offset/background (last parameter) to the last full
+        # fit's value; leave every other parameter (lifetime(s),
+        # amplitude(s), IRF shift) free. Generic over guess length so this
+        # covers both the 1- and 2-lifetime models (see partial_fit_enabled above).
+        fixed_parameters = fill(NaN, length(state.full_fit_params))
+        fixed_parameters[end] = state.full_fit_params[end]
+        params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=state.params, histogram_resolution=histogram_resolution, fixed_parameters=fixed_parameters, first_fit=false)
+
+        if !isnan(params_raw[1])
+            state.params = params_raw
+        end
+    end
+
+    histogram = data[2]
+    photons = sum(histogram)
+    fit = conv_irf_data(data[1], Tuple(state.params), ctx.irf; histogram_resolution=histogram_resolution) * photons
+    lifetime = state.params[1]
+    concentration = (9.5 / lifetime - 1) / 0.025
+
+    smooth_level = layout_smoothing_level(layout)
+    lifetime_for_pid, state.pid_prev_smooth_lifetime, state.pid_prev_raw_lifetime, state.pid_scale_est =
+        update_pid_lifetime_kalman(
+            lifetime,
+            state.pid_prev_smooth_lifetime,
+            state.pid_prev_raw_lifetime,
+            state.pid_scale_est,
+            smooth_level
+        )
+
+    if !isnan(setpoint_ns)
+        dt_sample = max(Float64(frame_time), eps(Float64))
+        P_error = setpoint_ns - lifetime_for_pid
+        state.I_error += P_error * dt_sample
+        state.D_error = (P_error - state.old_error) / dt_sample
+        state.old_error = P_error
+    else
+        state.I_error = 0.0
+        state.old_error = 0.0
+        state.D_error = 0.0
+    end
+
+    command = pid_command_from_state(state, setpoint_ns, P, I, D, inv, on)
+
+    return histogram, fit, photons, lifetime, concentration, command
+end
+
+"""
     run_acquisition_loop!(ch, running, layout, controller, next_file!, emit!;
                            initial_guess, protocol, use_partial_fit)
 
@@ -29,11 +207,12 @@ Shared body for all three acquisition modes. Repeatedly calls `next_file!(n)`
 (with `n` the current, pre-increment frame counter) to obtain the next
 `.sdt` filepath to process — or `nothing` to stop the loop, which each mode
 uses to encode its own pacing/waiting/termination policy. For each file it
-does sliding-window histogram binning, lifetime fitting (full or partial, see
-`use_partial_fit`), and PID command computation, then calls
-`emit!(sample, n)` — which each mode uses to `put!` onto `ch` plus its own
-post-emit policy (extra pacing, progress reporting) — returning `false` to
-stop the loop.
+runs `process_channel_frame!` for channel 1 and, if the file has a second
+TCSPC channel, independently for channel 2 too — decided once from the
+first file of the run (`has_channel2`) and held fixed for the rest of the
+acquisition, not re-checked per file. Then calls `emit!(sample, n)` — which
+each mode uses to `put!` onto `ch` plus its own post-emit policy (extra
+pacing, progress reporting) — returning `false` to stop the loop.
 
 Must be called from within the caller's own `try/catch/finally` so that
 IRF/path validation failures and cleanup (closing `ch`, clearing `running[]`)
@@ -52,47 +231,16 @@ function run_acquisition_loop!(
         use_partial_fit::Bool
     )
     timestamps = 0.0
-    vectors = zeros(100, DEFAULT_HISTOGRAM_RESOLUTION)
-    n_vectors = 100
-
-    # Sliding sum optimization for binning
-    sum_vector = zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)
-    last_bin = 1
-    current_count = 0
-
-    # Initial parameter guess for lifetime fitting
-    params = copy(initial_guess)
-    full_fit_params = copy(initial_guess)
     n = UInt32(0)
-    first_fit_pending = true
     partial_fit_period = 10
-    # Partial fit re-fits every parameter except the last (offset/background)
-    # on 9 of every `partial_fit_period` frames, reusing the offset from the
-    # last full fit — offset is the slowest-varying term (background level),
-    # so refitting it every frame buys little accuracy for real cost (measured
-    # ~1.9x more expensive per fit) since it adds free parameters to Optim's
-    # finite-difference gradient. Supported for the 1- and 2-lifetime models
-    # (guess length 3 or 5); the '2 lifetimes' menu option is the GUI default,
-    # so leaving it full-fit-only here left the common case unoptimized.
-    # 3-lifetime (length 7) is excluded: it has a separate, pre-existing bug —
-    # initial_guess_for_lifetime_count("3 lifetimes") returns a 7-element
-    # guess, but the 3-lifetime model's bounds are 8 elements (τ1,a1,τ2,a2,
-    # τ3,a3,d0,offset), so Optim's IPNewton crashes with a BoundsError even
-    # on full fits. Unrelated to this optimization; not fixed here.
     partial_fit_enabled = use_partial_fit && length(initial_guess) in (3, 5)
 
     if use_partial_fit && !partial_fit_enabled
         @warn "Partial fit mode is only supported for 1- and 2-lifetime fits (3 or 5 parameters); falling back to full fits."
     end
 
-    # PID state for lifetime control
+    # PID setpoint fallback used when no protocol is active.
     fallback_setpoint_ns = 4.0
-    I_error = 0.0
-    old_error = 0.0
-    D_error = 0.0
-    pid_prev_smooth_lifetime = NaN
-    pid_prev_raw_lifetime = NaN
-    pid_scale_est = 1.0e-6
 
     # Captured once, not per-iteration: RuntimeContext is mutable and RUNTIME[]
     # always returns the same object, so this stays live if init_irf_runtime!()
@@ -100,79 +248,27 @@ function run_acquisition_loop!(
     # body on ctx's concrete field types instead of re-reading an untyped global.
     ctx = RUNTIME[]
 
+    state1 = ChannelFitState(initial_guess)
+    state2 = ChannelFitState(initial_guess)
+    has_channel2 = false
+    channel_count_known = false
+
     while running[]
         filepath = next_file!(n)
         if filepath === nothing
             break
         end
 
-        vector, histogram_resolution, frame_time = read_sdt_frame(filepath)
+        vector1, vector2, histogram_resolution, frame_time = read_sdt_frame(filepath)
 
-        # Store in circular buffer
-        pos = mod1(n+1, n_vectors)
-        vectors[pos, 1:histogram_resolution] .= vector
-
-        # Apply binning from layout with sliding window optimization
-        bin = layout.binning
-
-        if bin != last_bin
-            # Recalculate when binning changes
-            effective_bin = min(bin, current_count + 1)
-            idxs = mod1.(pos .- (0:effective_bin-1), n_vectors)
-            fill!(sum_vector, 0.0)
-            @inbounds for idx in idxs
-                @views sum_vector[1:histogram_resolution] .+= vectors[idx, 1:histogram_resolution]
-            end
-            last_bin = bin
-            current_count = effective_bin
-        else
-            if current_count < bin
-                # Still filling window
-                sum_vector .+= vector
-                current_count += 1
-            else
-                # Slide window: remove oldest, add new
-                old_pos = mod1(pos - bin, n_vectors)
-                sum_vector .-= vectors[old_pos, 1:histogram_resolution]
-                sum_vector .+= vector
-            end
+        # Decided once, from the first file of this run; every later file is
+        # assumed to have the same channel count (per acquisition invariant).
+        if !channel_count_known
+            has_channel2 = vector2 !== nothing
+            channel_count_known = true
         end
 
-        final_vector = sum_vector ./ bin
-
-        # Fit every processed frame/file.
-        fit_index = Int(n) + 1
-        use_full_fit = !partial_fit_enabled || fit_index == 1 || mod1(fit_index, partial_fit_period) == 1
-
-        if use_full_fit
-            params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=full_fit_params, histogram_resolution=histogram_resolution, first_fit=first_fit_pending)
-            first_fit_pending = false
-
-            if !isnan(params_raw[1])
-                params = params_raw
-                full_fit_params = params_raw
-            end
-        else
-            # Fix only the offset/background (last parameter) to the last full
-            # fit's value; leave every other parameter (lifetime(s),
-            # amplitude(s), IRF shift) free. Generic over guess length so this
-            # covers both the 1- and 2-lifetime models (see partial_fit_enabled above).
-            fixed_parameters = fill(NaN, length(full_fit_params))
-            fixed_parameters[end] = full_fit_params[end]
-            params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution, fixed_parameters=fixed_parameters, first_fit=false)
-
-            if !isnan(params_raw[1])
-                params = params_raw
-            end
-        end
-
-        histogram = data[2]
-        photons = sum(histogram)
-        fit = conv_irf_data(data[1], Tuple(params), ctx.irf; histogram_resolution=histogram_resolution) * photons
-        lifetime = params[1]
-        concentration = (9.5 / lifetime - 1) / 0.025
         timestamps += frame_time
-        n += 1
 
         current_protocol = resolve_protocol_config(protocol)
         protocol_active = current_protocol !== nothing && current_protocol.active
@@ -185,61 +281,43 @@ function run_acquisition_loop!(
         # fallback value whenever the protocol is off.
         plot_setpoint_ns = protocol_active ? setpoint_ns : NaN
 
-        smooth_level = layout_smoothing_level(layout)
-        lifetime_for_pid, pid_prev_smooth_lifetime, pid_prev_raw_lifetime, pid_scale_est =
-            update_pid_lifetime_kalman(
-                lifetime,
-                pid_prev_smooth_lifetime,
-                pid_prev_raw_lifetime,
-                pid_scale_est,
-                smooth_level
+        histogram1, fit1, photons1, lifetime1, concentration1, command1 = process_channel_frame!(
+            state1, vector1, histogram_resolution, n, layout, ctx,
+            partial_fit_enabled, partial_fit_period, setpoint_ns, frame_time,
+            controller.P1, controller.I1, controller.D1, controller.ch1_inv, controller.ch1_on
+        )
+
+        if has_channel2
+            histogram2, fit2, photons2, lifetime2, concentration2, command2 = process_channel_frame!(
+                state2, vector2, histogram_resolution, n, layout, ctx,
+                partial_fit_enabled, partial_fit_period, setpoint_ns, frame_time,
+                controller.P2, controller.I2, controller.D2, controller.ch2_inv, controller.ch2_on
             )
-
-        command1 = NaN
-        command2 = NaN
-
-        if !isnan(setpoint_ns)
-            # PID terms are shared from one lifetime error for both controllers.
-            dt_sample = max(Float64(frame_time), eps(Float64))
-            P_error = setpoint_ns - lifetime_for_pid
-            I_error += P_error * dt_sample
-            D_error = (P_error - old_error) / dt_sample
-            old_error = P_error
-
-            command1 = controller.P1*P_error + controller.I1*I_error + controller.D1*D_error
-            command2 = controller.P2*P_error + controller.I2*I_error + controller.D2*D_error
-
-            # Inversion is applied only to the command sent to each controller.
-            if controller.ch1_inv
-                command1 = -command1
-            end
-
-            if controller.ch2_inv
-                command2 = -command2
-            end
-
-            if controller.ch1_on
-                command1 = clamp(command1, 0.0, 100.0)
-            else
-                command1 = NaN
-            end
-
-            if controller.ch2_on
-                command2 = clamp(command2, 0.0, 100.0)
-            else
-                command2 = NaN
-            end
         else
-            I_error = 0.0
-            old_error = 0.0
-            D_error = 0.0
+            # No second SDT channel: controller 2's output still tracks
+            # channel 1's lifetime error (its own gains applied to channel
+            # 1's error dynamics), exactly matching pre-two-channel behavior.
+            histogram2, fit2, photons2, lifetime2, concentration2 = Float64[], Float64[], NaN, NaN, NaN
+            command2 = pid_command_from_state(state1, setpoint_ns, controller.P2, controller.I2, controller.D2, controller.ch2_inv, controller.ch2_on)
         end
+
+        # UInt32(1), not the literal 1 (Int64): n += 1 would silently
+        # promote n to Int64 after the first frame (mixed UInt32/Int64
+        # addition promotes to Int64), which broke dispatch to
+        # process_channel_frame!'s strictly-typed n::UInt32 parameter —
+        # caught by an actual `start_playback` run, not the syntax/type
+        # checks above.
+        n += UInt32(1)
 
         if !(isopen(ch) && running[])
             break
         end
 
-        sample = (histogram, fit, photons, command1, command2, lifetime, concentration, timestamps, plot_setpoint_ns, n, String(filepath))
+        sample = AcquisitionSample(
+            histogram1, fit1, photons1, lifetime1, concentration1,
+            histogram2, fit2, photons2, lifetime2, concentration2,
+            command1, command2, timestamps, plot_setpoint_ns, n, String(filepath)
+        )
         if !emit!(sample, n)
             break
         end

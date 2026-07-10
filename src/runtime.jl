@@ -27,22 +27,30 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
     plot_1_axis = blocks[:plot_1_axis]
     plot_2_axis = blocks[:plot_2_axis]
     publish_live_updates = acquisition_mode != "Save"
-    last_histogram = nothing
-    last_fit = nothing
-    last_photons = NaN
+    last_histogram_ch1 = nothing
+    last_fit_ch1 = nothing
+    last_photons_ch1 = NaN
+    last_histogram_ch2 = nothing
+    last_fit_ch2 = nothing
+    last_photons_ch2 = NaN
     is_realtime_mode = acquisition_mode == "Realtime"
     realtime_frame_df = DataFrame(
         frame_idx=UInt32[],
         source_file=String[],
         timestamp=Float64[],
-        photons=Float64[],
+        photons_ch1=Float64[],
         command1=Float64[],
         command2=Float64[],
-        lifetime=Float64[],
-        concentration=Float64[],
+        lifetime_ch1=Float64[],
+        concentration_ch1=Float64[],
         protocol_setpoint=Float64[],
-        histogram=Vector{Float64}[],
-        fit=Vector{Float64}[]
+        histogram_ch1=Vector{Float64}[],
+        fit_ch1=Vector{Float64}[],
+        photons_ch2=Float64[],
+        lifetime_ch2=Float64[],
+        concentration_ch2=Float64[],
+        histogram_ch2=Vector{Float64}[],
+        fit_ch2=Vector{Float64}[]
     )
 
     try
@@ -55,33 +63,62 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                 break
             end
 
-            histogram, fit, photons, command1, command2, lifetime, concentration, timestamp, protocol_setpoint, frame_idx, source_file = sample
-            last_histogram = histogram
-            last_fit = fit
-            last_photons = photons
+            histogram_ch1 = sample.histogram1
+            fit_ch1 = sample.fit1
+            photons_ch1 = sample.photons1
+            lifetime_ch1 = sample.lifetime1
+            concentration_ch1 = sample.concentration1
+            histogram_ch2 = sample.histogram2
+            fit_ch2 = sample.fit2
+            photons_ch2 = sample.photons2
+            lifetime_ch2 = sample.lifetime2
+            concentration_ch2 = sample.concentration2
+            command1 = sample.command1
+            command2 = sample.command2
+            timestamp = sample.timestamps
+            protocol_setpoint = sample.protocol_setpoint
+            frame_idx = sample.frame_index
+            source_file = sample.source_file
+
+            last_histogram_ch1 = histogram_ch1
+            last_fit_ch1 = fit_ch1
+            last_photons_ch1 = photons_ch1
+            last_histogram_ch2 = histogram_ch2
+            last_fit_ch2 = fit_ch2
+            last_photons_ch2 = photons_ch2
 
             if is_realtime_mode
                 push!(realtime_frame_df, (
                     frame_idx=frame_idx,
                     source_file=String(source_file),
                     timestamp=Float64(timestamp),
-                    photons=Float64(photons),
+                    photons_ch1=Float64(photons_ch1),
                     command1=Float64(command1),
                     command2=Float64(command2),
-                    lifetime=Float64(lifetime),
-                    concentration=Float64(concentration),
+                    lifetime_ch1=Float64(lifetime_ch1),
+                    concentration_ch1=Float64(concentration_ch1),
                     protocol_setpoint=Float64(protocol_setpoint),
-                    histogram=copy(histogram),
-                    fit=copy(fit)
+                    histogram_ch1=copy(histogram_ch1),
+                    fit_ch1=copy(fit_ch1),
+                    photons_ch2=Float64(photons_ch2),
+                    lifetime_ch2=Float64(lifetime_ch2),
+                    concentration_ch2=Float64(concentration_ch2),
+                    histogram_ch2=copy(histogram_ch2),
+                    fit_ch2=copy(fit_ch2)
                 ))
             end
 
-            push!(app_run.photons[], photons)
-            push!(app_run.lifetime[], lifetime)
-            append_lifetime_smooth!(app, app_run)
+            push!(app_run.photons_ch1[], photons_ch1)
+            push!(app_run.lifetime_ch1[], lifetime_ch1)
+            append_lifetime_ch1_smooth!(app, app_run)
             push!(app_run.protocol_setpoint[], protocol_setpoint)
-            push!(app_run.concentration[], concentration)
-            append_concentration_smooth!(app, app_run)
+            push!(app_run.concentration_ch1[], concentration_ch1)
+            append_concentration_ch1_smooth!(app, app_run)
+            push!(app_run.photons_ch2[], photons_ch2)
+            push!(app_run.lifetime_ch2[], lifetime_ch2)
+            append_lifetime_ch2_smooth!(app, app_run)
+            push!(app_run.concentration_ch2[], concentration_ch2)
+            append_concentration_ch2_smooth!(app, app_run)
             push!(app_run.command1[], command1)
             push!(app_run.command2[], command2)
             push!(app_run.timestamps[], timestamp)
@@ -90,23 +127,31 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
             now_s = time()
 
             if publish_live_updates && now_s - last_publish_time >= publish_interval_s
-                app_run.histogram[] = histogram
-                app_run.fit[] = fit
-                app_run.counts[] = photons
+                app_run.histogram_ch1[] = histogram_ch1
+                app_run.fit_ch1[] = fit_ch1
+                app_run.counts_ch1[] = photons_ch1
+                app_run.histogram_ch2[] = histogram_ch2
+                app_run.fit_ch2[] = fit_ch2
+                app_run.counts_ch2[] = photons_ch2
 
                 notify_runtime_observables!(app_run)
 
                 last_publish_time = now_s
 
-                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout.plot1)
-                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout.plot2)
+                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout.plot1, app.layout.plot1_ch1, app.layout.plot1_ch2)
+                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout.plot2, app.layout.plot2_ch1, app.layout.plot2_ch2)
             end
         end
 
-        if last_histogram !== nothing && last_fit !== nothing
-            app_run.histogram[] = last_histogram
-            app_run.fit[] = last_fit
-            app_run.counts[] = last_photons
+        if last_histogram_ch1 !== nothing && last_fit_ch1 !== nothing
+            app_run.histogram_ch1[] = last_histogram_ch1
+            app_run.fit_ch1[] = last_fit_ch1
+            app_run.counts_ch1[] = last_photons_ch1
+            if last_histogram_ch2 !== nothing && last_fit_ch2 !== nothing
+                app_run.histogram_ch2[] = last_histogram_ch2
+                app_run.fit_ch2[] = last_fit_ch2
+                app_run.counts_ch2[] = last_photons_ch2
+            end
 
             notify_runtime_observables!(app_run)
 
@@ -121,8 +166,8 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                 xlims!(plot_1_axis, 0.0, max(Float64(xmax1), 0.0))
                 xlims!(plot_2_axis, 0.0, max(Float64(xmax2), 0.0))
             else
-                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout.plot1)
-                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout.plot2)
+                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout.plot1, app.layout.plot1_ch1, app.layout.plot1_ch2)
+                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout.plot2, app.layout.plot2_ch1, app.layout.plot2_ch2)
             end
         end
 
@@ -180,13 +225,19 @@ end
 Clear all time-series observables and counters ahead of a fresh acquisition run.
 """
 function reset_acquisition_observables!(app_run)
-    empty!(app_run.photons[])
-    app_run.counts[] = 0.0
-    empty!(app_run.lifetime[])
-    empty!(app_run.lifetime_smooth[])
+    empty!(app_run.photons_ch1[])
+    app_run.counts_ch1[] = 0.0
+    empty!(app_run.lifetime_ch1[])
+    empty!(app_run.lifetime_ch1_smooth[])
     empty!(app_run.protocol_setpoint[])
-    empty!(app_run.concentration[])
-    empty!(app_run.concentration_smooth[])
+    empty!(app_run.concentration_ch1[])
+    empty!(app_run.concentration_ch1_smooth[])
+    empty!(app_run.photons_ch2[])
+    app_run.counts_ch2[] = 0.0
+    empty!(app_run.lifetime_ch2[])
+    empty!(app_run.lifetime_ch2_smooth[])
+    empty!(app_run.concentration_ch2[])
+    empty!(app_run.concentration_ch2_smooth[])
     empty!(app_run.command1[])
     empty!(app_run.command2[])
     empty!(app_run.timestamps[])
