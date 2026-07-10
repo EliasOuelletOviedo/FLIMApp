@@ -85,7 +85,7 @@ function draw_histogram_plot!(axis, app_run)
     fit_normalized = lift(normalize_to_own_max, app_run.fit)
     irf_normalized = lift(normalized_irf_from_fit, app_run.fit)
 
-    barplot!(axis, app_run.hist_time, counts_normalized, color=(PLOT_COLOR_CH1, 0.25))
+    barplot!(axis, app_run.hist_time, counts_normalized, color=(PLOT_COLOR_CH1, 0.25), gap=0.0)
     lines!(axis, app_run.hist_time, fit_normalized, color=PLOT_COLOR_CH1)
     lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_REF)
 
