@@ -149,6 +149,17 @@ end
 # append_concentration_smooth! below are the named entry points used at
 # call sites; the shared logic lives here once.
 
+"""
+    RECOMPUTE_LOOKBACK_MARGIN::Int
+
+Extra samples replayed before the visible window in `recompute_smooth_series!`,
+comfortably larger than the smoothing filter's own memory
+(`window = 4 + 5*level`, max 54 at level 10) so the recomputed portion is
+numerically indistinguishable from a full-history recompute by the time it
+reaches the visible window.
+"""
+const RECOMPUTE_LOOKBACK_MARGIN = 500
+
 function recompute_smooth_series!(app, source::Observable{Vector{Float64}}, target::Observable{Vector{Float64}}, timestamps::Observable{Vector{Float64}})
     # Snapshot mutable vectors to avoid transient length races with the consumer task.
     source_values = copy(source[])
@@ -158,12 +169,39 @@ function recompute_smooth_series!(app, source::Observable{Vector{Float64}}, targ
     n_timestamps = length(timestamps_values)
     n_common = min(n_source, n_timestamps)
 
-    smoothed = fill(NaN, n_timestamps)
-
     level = lifetime_smooth_level(app.layout)
-    prev = NaN
 
-    for idx in 1:n_common
+    # Recomputing from index 1 on every smoothing-level change (a UI-callback
+    # side effect of moving the slider, running synchronously on the GUI
+    # thread) is O(N) in total session samples — unbounded over a long
+    # real-time run (measured elsewhere: comparable full-history scans cost
+    # ~13 ms at 500k samples). Unlike the autoscale window in plotting.jl
+    # this filter is path-dependent (each output depends on the previous
+    # one), so it can't simply be sliced — instead replay starts
+    # `RECOMPUTE_LOOKBACK_MARGIN` samples before the visible window so the
+    # filter has settled by the time it reaches on-screen data, while
+    # everything before that keeps its previously-computed value (from the
+    # old smoothing level) rather than being blanked to NaN — a stale but
+    # still-plotted value if the user later widens time_range, not a gap.
+    target_current = target[]
+    smoothed = length(target_current) == n_timestamps ? copy(target_current) : fill(NaN, n_timestamps)
+
+    if n_common == 0
+        target[] = smoothed
+        return nothing
+    end
+
+    time_range = Float64(app.layout.time_range)
+    cutoff = timestamps_values[n_common] - time_range
+    visible_start = searchsortedfirst(view(timestamps_values, 1:n_common), cutoff)
+    start_idx = max(1, visible_start - RECOMPUTE_LOOKBACK_MARGIN)
+
+    prev = start_idx > 1 ? smoothed[start_idx - 1] : NaN
+    if !isfinite(prev)
+        prev = NaN
+    end
+
+    for idx in start_idx:n_common
         y = compute_lifetime_smooth_at(source_values, idx, level, prev)
         smoothed[idx] = y
         prev = y

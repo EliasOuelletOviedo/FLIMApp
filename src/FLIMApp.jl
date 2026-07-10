@@ -279,6 +279,21 @@ function run_app()
     @info "FLIM Application Starting"
     @info "="^60
 
+    if Threads.nthreads() == 1
+        @warn """
+        Julia is running with only 1 thread (Threads.nthreads() == 1).
+        The acquisition worker (lifetime fitting) is spawned on its own
+        thread via Threads.@spawn to keep the GUI responsive during a fit,
+        but that only works when a second thread is actually available —
+        with one thread it falls back to sharing the GUI thread, and the
+        window may stutter/freeze while fitting.
+        Fix: start Julia with more threads, e.g.
+            julia -t auto --project=.
+        (or set the environment variable JULIA_NUM_THREADS=auto before
+        starting Julia). This flag is identical on macOS and Windows.
+        """
+    end
+
     # Ensure required directories exist
     initialize_directories()
 
@@ -290,6 +305,15 @@ function run_app()
 
     # Load IRF for lifetime analysis
     init_irf_runtime!()
+
+    # One-time JIT warmup of the fitting code path, done here (before the
+    # GUI appears) rather than left to the user's first Start click — see
+    # warmup_lifetime_fitting!'s docstring for why this matters and why a
+    # background thread doesn't sidestep it.
+    @info "Warming up lifetime-fitting code paths (one-time JIT compilation)..."
+    t_warmup = time()
+    warmup_lifetime_fitting!()
+    @info "Warmup complete" seconds = round(time() - t_warmup, digits=1)
 
     # Create GUI
     @info "Creating GUI..."

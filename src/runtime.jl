@@ -12,6 +12,7 @@ Tasks are launched by start_pressed() and terminated by stop_pressed().
 using GLMakie
 using Observables
 using DataFrames
+using Base.Threads
 
 """
 consumer_loop(app_run)
@@ -216,10 +217,29 @@ end
 Launch the background worker task for the selected acquisition mode
 (Playback/Realtime/Save, defaulting to Playback for an unrecognized mode)
 and store it on `app_run.worker_task`.
+
+Launched with `Threads.@spawn`, not `@async`: the worker loop is CPU-bound
+(the MLE fit dominates its frame time, measured ~88% of a loop iteration),
+and `@async` tasks are sticky to the thread they were spawned from — with
+GLMakie's event loop and `consumer_task`/`serial_task`/`infos_task` all
+pinned to the main thread via `@async` (see `start_pressed` below), a
+CPU-bound `@async` worker would block GUI redraw/input for the duration of
+every fit. `Threads.@spawn` lets the scheduler run the worker on a
+different OS thread when one is available, so the GUI stays responsive
+even while a fit is in flight. This is pure Julia (`Base.Threads`) with no
+OS-specific code, so it behaves identically on macOS and Windows; it only
+*helps* when Julia is started with more than one thread (`julia -t auto`),
+which `start_pressed` checks for and warns about below. With a single
+thread it degrades gracefully to the same cooperative scheduling as
+`@async` — never worse, just not better.
+
+`consumer_task` (and `serial_task`/`infos_task`) must stay on `@async`:
+they touch `Observable`s and the GLMakie figure directly, which are not
+safe to mutate concurrently from multiple threads.
 """
 function dispatch_acquisition_worker!(app_run, selected_mode, layout, controller, initial_guess, protocol_config)
     if selected_mode == "Playback"
-        app_run.worker_task = @async start_playback(
+        app_run.worker_task = Threads.@spawn start_playback(
             app_run.channel,
             app_run.running,
             layout,
@@ -230,7 +250,7 @@ function dispatch_acquisition_worker!(app_run, selected_mode, layout, controller
             target_frequency=1000.0
         )
     elseif selected_mode == "Realtime"
-        app_run.worker_task = @async start_realtime(
+        app_run.worker_task = Threads.@spawn start_realtime(
             app_run.channel,
             app_run.running,
             layout,
@@ -247,7 +267,7 @@ function dispatch_acquisition_worker!(app_run, selected_mode, layout, controller
             return nothing
         end
 
-        app_run.worker_task = @async start_save(
+        app_run.worker_task = Threads.@spawn start_save(
             app_run.channel,
             app_run.running,
             layout,
@@ -259,7 +279,7 @@ function dispatch_acquisition_worker!(app_run, selected_mode, layout, controller
         )
     else
         @warn "Unknown acquisition mode selected; falling back to Playback" selected_mode=selected_mode
-        app_run.worker_task = @async start_playback(
+        app_run.worker_task = Threads.@spawn start_playback(
             app_run.channel,
             app_run.running,
             layout,
@@ -282,9 +302,13 @@ communication channel, resets all time-series observables, and launches
 four background tasks:
 
 * **worker_task** - the Playback/Realtime/Save acquisition loop (acquisition.jl)
-  that reads data files and pushes tuples onto the channel;
+  that reads data files and pushes tuples onto the channel. Launched with
+  `Threads.@spawn` (see `dispatch_acquisition_worker!`), since it is
+  CPU-bound (dominated by the MLE fit) and must not block the GUI thread;
 * **consumer_task** - pulls tuples from the channel and updates the
-  `app_run` observables so that the plots react;
+  `app_run` observables so that the plots react. Stays on `@async` (pinned
+  to the thread it's spawned from, i.e. the GUI thread) since it touches
+  `Observable`s/GLMakie, which aren't safe to mutate from multiple threads;
 * **serial_task** - periodically sends PID/PWM commands to the connected device;
 * **infos_task** - refreshes the status label at 1 Hz.
 
@@ -308,7 +332,17 @@ function start_pressed(app, app_run, blocks)
     @info "Starting acquisition function"
     app_run.running[] = true
     app_run.paused[] = false
-    app_run.channel = Channel{AcquisitionSample}(32)
+    # Capacity: the worker (its own thread since Threads.@spawn, see
+    # dispatch_acquisition_worker!) blocks on put! once this fills, so a
+    # transient GUI-thread slowdown (a GC pause, a Makie redraw, a
+    # smoothing-slider recompute) directly stalls the fit loop too, not
+    # just the display. 32 gave the worker under 100ms of headroom at
+    # realistic frame rates; 512 costs a few hundred KB more (each sample
+    # holds two Vector{Float64} histograms) and absorbs multi-second GC/JIT
+    # pauses without back-pressuring the worker, while still bounding
+    # worst-case backlog if the consumer falls behind persistently rather
+    # than just transiently.
+    app_run.channel = Channel{AcquisitionSample}(512)
 
     reset_acquisition_observables!(app_run)
 

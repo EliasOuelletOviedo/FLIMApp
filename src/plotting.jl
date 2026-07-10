@@ -316,39 +316,68 @@ function aligned_xy_observables(x_obs::Observable{Vector{Float64}}, y_obs::Obser
 end
 
 """
-    lookup_plot_series(app_run, plot_label)
+    windowed_slice(xs::AbstractVector{Float64}, ys::AbstractVector{Float64}, time_range::Real)
 
-Return x/y vectors for one plot label.
+Return the common-length suffix of `xs`/`ys` covering the last `time_range`
+seconds of `xs`.
+
+`xs` here is always `app_run.timestamps[]`: a running total incremented by
+each frame's duration (`run_acquisition_loop!` in acquisition.jl), so it is
+non-decreasing for the lifetime of one acquisition run — that lets
+`searchsortedfirst` locate the window boundary in O(log N) via binary
+search instead of an O(N) scan. This matters because `lookup_plot_series`/
+`autoscale_plot_selection!` run on every published update (up to 10 Hz) for
+as long as an acquisition runs: without windowing first, they scanned and
+`vcat`-copied the *entire* session history every call, which measured
+~13 ms/call once a long real-time run had accumulated ~500k samples —
+degrading the whole GUI over the course of a session even though only the
+last `time_range` seconds are ever shown.
+"""
+function windowed_slice(xs::AbstractVector{Float64}, ys::AbstractVector{Float64}, time_range::Real)
+    n = min(length(xs), length(ys))
+    n == 0 && return (Float64[], Float64[])
+
+    xs_n = view(xs, 1:n)
+    ys_n = view(ys, 1:n)
+    cutoff = xs_n[n] - Float64(time_range)
+    start_idx = searchsortedfirst(xs_n, cutoff)
+
+    return (xs_n[start_idx:n], ys_n[start_idx:n])
+end
+
+"""
+    lookup_plot_series(app_run, plot_label, time_range)
+
+Return x/y vectors for one plot label, restricted to the last `time_range`
+seconds (see `windowed_slice`).
 Labels supported: `Histogram`, `Photon counts`, `Lifetime`, `Ion concentration`, `Command`.
 """
-function lookup_plot_series(app_run, plot_label)
+function lookup_plot_series(app_run, plot_label, time_range)
     if plot_label == "Histogram"
         return (app_run.hist_time[], app_run.histogram[])
     end
 
     if plot_label == "Photon counts"
-        return (app_run.timestamps[], app_run.photons[])
+        return windowed_slice(app_run.timestamps[], app_run.photons[], time_range)
     end
 
     if plot_label == "Lifetime"
-        return (
-            vcat(app_run.timestamps[], app_run.timestamps[], app_run.timestamps[]),
-            vcat(app_run.lifetime[], app_run.lifetime_smooth[], app_run.protocol_setpoint[])
-        )
+        ts_w, lifetime_w = windowed_slice(app_run.timestamps[], app_run.lifetime[], time_range)
+        _, smooth_w = windowed_slice(app_run.timestamps[], app_run.lifetime_smooth[], time_range)
+        _, setpoint_w = windowed_slice(app_run.timestamps[], app_run.protocol_setpoint[], time_range)
+        return (vcat(ts_w, ts_w, ts_w), vcat(lifetime_w, smooth_w, setpoint_w))
     end
 
     if plot_label == "Ion concentration"
-        return (
-            vcat(app_run.timestamps[], app_run.timestamps[]),
-            vcat(app_run.concentration[], app_run.concentration_smooth[])
-        )
+        ts_w, conc_w = windowed_slice(app_run.timestamps[], app_run.concentration[], time_range)
+        _, smooth_w = windowed_slice(app_run.timestamps[], app_run.concentration_smooth[], time_range)
+        return (vcat(ts_w, ts_w), vcat(conc_w, smooth_w))
     end
 
     if plot_label == "Command"
-        return (
-            vcat(app_run.timestamps[], app_run.timestamps[]),
-            vcat(app_run.command1[], app_run.command2[])
-        )
+        ts_w, cmd1_w = windowed_slice(app_run.timestamps[], app_run.command1[], time_range)
+        _, cmd2_w = windowed_slice(app_run.timestamps[], app_run.command2[], time_range)
+        return (vcat(ts_w, ts_w), vcat(cmd1_w, cmd2_w))
     end
 
     return (Float64[], Float64[])
@@ -374,7 +403,7 @@ function autoscale_plot_selection!(app, app_run, axis, plot_label)
         return nothing
     end
 
-    xs, ys = lookup_plot_series(app_run, plot_label)
+    xs, ys = lookup_plot_series(app_run, plot_label, app.layout.time_range)
 
     if plot_label == "Command"
         autoscale_values!(app, axis, xs)

@@ -76,15 +76,29 @@ FLIMApp/
 
 ### Launch the Application
 
-Start Julia from the repository root with the project activated, then:
+Start Julia from the repository root with the project activated **and more
+than one thread**, then:
+
+```
+julia -t auto --project=.
+```
 
 ```julia
 julia> using FLIMApp
 julia> run_app()
 ```
 
-(`julia --project=.` from the repo root activates it automatically; otherwise
-run `using Pkg; Pkg.activate(".")` first.) The GUI will open in a Makie window.
+(`--project=.` activates the project automatically; otherwise run
+`using Pkg; Pkg.activate(".")` first.) The GUI will open in a Makie window.
+
+The `-t auto` flag (or `julia -t 4`, or setting the `JULIA_NUM_THREADS`
+environment variable before starting Julia) is identical on macOS and
+Windows. It matters here: the acquisition worker (file read + lifetime fit)
+runs on its own thread via `Threads.@spawn` so the GUI stays responsive
+while fitting, but that only has a second thread to run on if Julia was
+started with one. With the default single thread, `run_app()` logs a
+warning and acquisition falls back to sharing the GUI thread, which can
+stutter during a fit.
 
 For a hot-reloading dev workflow, `using Revise` before `using FLIMApp` —
 edits to any `src/*.jl` file take effect without restarting Julia.

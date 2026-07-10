@@ -66,10 +66,23 @@ function run_acquisition_loop!(
     n = UInt32(0)
     first_fit_pending = true
     partial_fit_period = 10
-    partial_fit_enabled = use_partial_fit && length(initial_guess) == 3
+    # Partial fit re-fits every parameter except the last (offset/background)
+    # on 9 of every `partial_fit_period` frames, reusing the offset from the
+    # last full fit — offset is the slowest-varying term (background level),
+    # so refitting it every frame buys little accuracy for real cost (measured
+    # ~1.9x more expensive per fit) since it adds free parameters to Optim's
+    # finite-difference gradient. Supported for the 1- and 2-lifetime models
+    # (guess length 3 or 5); the '2 lifetimes' menu option is the GUI default,
+    # so leaving it full-fit-only here left the common case unoptimized.
+    # 3-lifetime (length 7) is excluded: it has a separate, pre-existing bug —
+    # initial_guess_for_lifetime_count("3 lifetimes") returns a 7-element
+    # guess, but the 3-lifetime model's bounds are 8 elements (τ1,a1,τ2,a2,
+    # τ3,a3,d0,offset), so Optim's IPNewton crashes with a BoundsError even
+    # on full fits. Unrelated to this optimization; not fixed here.
+    partial_fit_enabled = use_partial_fit && length(initial_guess) in (3, 5)
 
     if use_partial_fit && !partial_fit_enabled
-        @warn "Partial fit mode is only supported for 3-parameter fits; falling back to full fits."
+        @warn "Partial fit mode is only supported for 1- and 2-lifetime fits (3 or 5 parameters); falling back to full fits."
     end
 
     # PID state for lifetime control
@@ -140,7 +153,12 @@ function run_acquisition_loop!(
                 full_fit_params = params_raw
             end
         else
-            fixed_parameters = Float64[NaN, NaN, full_fit_params[3]]
+            # Fix only the offset/background (last parameter) to the last full
+            # fit's value; leave every other parameter (lifetime(s),
+            # amplitude(s), IRF shift) free. Generic over guess length so this
+            # covers both the 1- and 2-lifetime models (see partial_fit_enabled above).
+            fixed_parameters = fill(NaN, length(full_fit_params))
+            fixed_parameters[end] = full_fit_params[end]
             params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=params, histogram_resolution=histogram_resolution, fixed_parameters=fixed_parameters, first_fit=false)
 
             if !isnan(params_raw[1])
