@@ -166,9 +166,9 @@ function make_plot_axes!(left_grid, app, app_run)
     end
     vspan!(save_progress_axis, 0.0, save_fill_width, color=save_fill_color)
 
-    hspan!(counts_axis, 1, app_run.counts_ch1, color = (PLOT_COLOR_CH1, 0.25))
+    hspan!(counts_axis, 1, app_run.counts_ch1, color = (PLOT_COLOR_CH1, 0.1))
     hlines!(counts_axis, app_run.counts_ch1, color = PLOT_COLOR_CH1)
-    hspan!(counts_axis, 1, app_run.counts_ch2, color = (PLOT_COLOR_CH2, 0.25))
+    hspan!(counts_axis, 1, app_run.counts_ch2, color = (PLOT_COLOR_CH2, 0.1))
     hlines!(counts_axis, app_run.counts_ch2, color = PLOT_COLOR_CH2)
 
     return (counts_axis=counts_axis, plot_1=plot_1, plot_2=plot_2, save_progress_axis=save_progress_axis)

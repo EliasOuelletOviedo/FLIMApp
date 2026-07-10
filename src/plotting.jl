@@ -86,14 +86,14 @@ function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     if show_ch1
         counts_ch1_normalized = lift(normalized_counts_for_histogram, app_run.histogram_ch1, app_run.fit_ch1)
         fit_ch1_normalized = lift(normalize_to_own_max, app_run.fit_ch1)
-        barplot!(axis, app_run.hist_time, counts_ch1_normalized, color=(PLOT_COLOR_CH1, 0.25), gap=0.0)
+        barplot!(axis, app_run.hist_time, counts_ch1_normalized, color=(PLOT_COLOR_CH1, 0.1), gap=0.0)
         lines!(axis, app_run.hist_time, fit_ch1_normalized, color=PLOT_COLOR_CH1)
     end
 
     if show_ch2
         counts_ch2_normalized = lift(normalized_counts_for_histogram, app_run.histogram_ch2, app_run.fit_ch2)
         fit_ch2_normalized = lift(normalize_to_own_max, app_run.fit_ch2)
-        barplot!(axis, app_run.hist_time, counts_ch2_normalized, color=(PLOT_COLOR_CH2, 0.25), gap=0.0)
+        barplot!(axis, app_run.hist_time, counts_ch2_normalized, color=(PLOT_COLOR_CH2, 0.1), gap=0.0)
         lines!(axis, app_run.hist_time, fit_ch2_normalized, color=PLOT_COLOR_CH2)
     end
 
@@ -281,7 +281,7 @@ function render_plot_selection!(app, app_run, blocks, plot_slot::Symbol)
 
     if selection == "Command"
         add_protocol_setpoint_highlight!(axis, app_run)
-        
+
         lines!(axis, app_run.timestamps, app_run.command1, color=PLOT_COLOR_CH1)
         lines!(axis, app_run.timestamps, app_run.command2, color=PLOT_COLOR_CH2)
     elseif selection == "Lifetime"
@@ -318,6 +318,7 @@ Reset an axis to Makie's automatic limits (used for the Histogram plot).
 """
 function autoscale_values!(ax)
     autolimits!(ax)
+    ylims!(ax, -0.05, 1.25)
 end
 
 function autoscale_values!(app, ax, xs::AbstractVector; pad_ratio=0.05)

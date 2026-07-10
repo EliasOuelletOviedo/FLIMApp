@@ -155,10 +155,10 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                             (0, 10, Int)),
             :plot1      =>  Menu(panel_grid[5, 1:4];  merge(MENU_ATTRS, Dict(:default => app.layout.plot1, :options => options))...),
             :plot2      =>  Menu(panel_grid[7, 1:4];  merge(MENU_ATTRS, Dict(:default => app.layout.plot2, :options => options))...),
-            :plot1_ch1  =>  Toggle(panel_grid[5, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32))...),
-            :plot1_ch2  =>  Toggle(panel_grid[5, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32))...),
-            :plot2_ch1  =>  Toggle(panel_grid[7, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32))...),
-            :plot2_ch2  =>  Toggle(panel_grid[7, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32))...),
+            :plot1_ch1  =>  Toggle(panel_grid[5, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH1))...),
+            :plot1_ch2  =>  Toggle(panel_grid[5, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH2))...),
+            :plot2_ch1  =>  Toggle(panel_grid[7, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH1))...),
+            :plot2_ch2  =>  Toggle(panel_grid[7, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH2))...),
         )
 
         Label(panel_grid[5, 5]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "1"))...)
