@@ -378,6 +378,17 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # ROI lifetime fits are actually computed from.
     pixel_volume = Ref{Union{Nothing, Array{Float64,3}}}(nothing)
 
+    # drawn_rois and app_run.rois are kept in lockstep, index-for-index:
+    # drawn_rois holds this popup's GUI plot objects (never leaves this
+    # function), app_run.rois holds the plain boundary data other
+    # panels/functions can read.
+    function add_and_track_roi!(volume::Array{Float64,3}, x_offset::Real, y_offset::Real, xs::Vector{Float64}, ys::Vector{Float64}, label::AbstractString)
+        push!(drawn_rois, add_roi_from_boundary!(image_axis, volume, x_offset, y_offset, xs, ys, label))
+        push!(app_run.rois[], RoiCoordinates(String(label), xs, ys))
+        notify(app_run.rois)
+        return nothing
+    end
+
     # Manual ROI drawing (hold A, click to place vertices, release A to
     # finish): points collected so far, in display (offset-shifted) canvas
     # coordinates, and the live dashed-line/marker preview plots redrawn on
@@ -421,7 +432,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
                         push!(ys, ys[1])
 
                         manual_roi_count[] += 1
-                        push!(drawn_rois, add_roi_from_boundary!(image_axis, volume, x_offset, y_offset, xs, ys, "manual-$(manual_roi_count[])"))
+                        add_and_track_roi!(volume, x_offset, y_offset, xs, ys, "manual-$(manual_roi_count[])")
                     end
                 end
 
@@ -443,9 +454,10 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             push!(drawing_points, Point2f(pos[1], pos[2]))
 
             clear_drawing_preview!()
-            push!(drawing_preview_plots, scatter!(image_axis, drawing_points, color=PLOT_COLOR_REF))
-            if length(drawing_points) >= 2
-                push!(drawing_preview_plots, lines!(image_axis, drawing_points, color=PLOT_COLOR_REF, linestyle=:dash))
+            if length(drawing_points) == 1
+                push!(drawing_preview_plots, scatter!(image_axis, drawing_points, color=PLOT_COLOR_REF))
+            else
+                push!(drawing_preview_plots, lines!(image_axis, drawing_points, color=PLOT_COLOR_REF))
             end
 
             return Consume(true)
@@ -459,6 +471,8 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
                     delete!(image_axis, p)
                 end
                 deleteat!(drawn_rois, hit)
+                deleteat!(app_run.rois[], hit)
+                notify(app_run.rois)
             end
 
             return Consume(true)
@@ -530,7 +544,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
 
         for roi in rois
             xs, ys = roi_boundary_points(roi)
-            push!(drawn_rois, add_roi_from_boundary!(image_axis, volume, x_offset, y_offset, xs, ys, roi.name))
+            add_and_track_roi!(volume, x_offset, y_offset, xs, ys, roi.name)
         end
 
         @info "ROIs imported" path=filepath count=length(rois)
@@ -543,6 +557,8 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             end
         end
         empty!(drawn_rois)
+        empty!(app_run.rois[])
+        notify(app_run.rois)
     end
 
     on(popup_close_button.clicks) do _

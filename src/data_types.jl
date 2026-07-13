@@ -258,6 +258,21 @@ iterate "for each channel" over an `AppRun`.
 channel_series(app_run) = (app_run.ch1, app_run.ch2)
 
 """
+    RoiCoordinates
+
+One ROI's boundary — imported from an ImageJ .roi/.zip file or manually
+drawn in the ROI popup (roi_popup.jl) — in the underlying image's own
+0-based pixel coordinates (not any particular popup canvas/display offset).
+`xs`/`ys` are parallel, closed-loop vectors (last point equals first),
+matching `roi_boundary_points`'s convention in roi_popup.jl.
+"""
+struct RoiCoordinates
+    name::String
+    xs::Vector{Float64}
+    ys::Vector{Float64}
+end
+
+"""
     AppRun
 
 Runtime state for the application. This structure holds references to
@@ -282,6 +297,10 @@ during execution. It is NOT serialized.
 - `save_progress::Observable{Float64}`: Save-mode progress (percent, `NaN` when idle)
 - `hist_time::Observable{Vector{Int64}}`: histogram time-axis values
 - `protocol::Observable{ProtocolSettings}`: normalized protocol config for the worker
+- `rois::Observable{Vector{RoiCoordinates}}`: currently-drawn ROI boundaries
+  (imported or manually drawn in the ROI popup, roi_popup.jl), shared here
+  so other panels/functions can read the current ROI set without reaching
+  into the popup itself
 """
 mutable struct AppRun
     channel::Union{Channel{AcquisitionSample}, Nothing}
@@ -303,6 +322,7 @@ mutable struct AppRun
     save_progress::Observable{Float64}
     hist_time::Observable{Vector{Int64}}
     protocol::Observable{ProtocolSettings}
+    rois::Observable{Vector{RoiCoordinates}}
 end
 
 """
@@ -334,6 +354,7 @@ function AppRun()
         Observable{UInt32}(0),
         Observable(NaN),
         Observable(collect(1:DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(ProtocolSettings())
+        Observable(ProtocolSettings()),
+        Observable(RoiCoordinates[])
     )
 end
