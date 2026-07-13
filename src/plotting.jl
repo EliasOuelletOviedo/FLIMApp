@@ -222,17 +222,20 @@ end
     draw_photon_counts_plot!(axis, app_run, show_ch1, show_ch2)
 
 Draw the Photon counts plot's series onto `axis`: each shown channel's raw
-photon-count trace (channel 1 in `PLOT_COLOR_CH1`, channel 2 in
-`PLOT_COLOR_CH2`) — no smoothed variant exists for this series. Shared by
-the Menu-selection handler and the initial-selection draw for the same
+photon-count trace and its smoothed trace (channel 1 in `PLOT_COLOR_CH1`,
+channel 2 in `PLOT_COLOR_CH2`), using the exact same smoothing
+(compute_lifetime_smooth_at, see smoothing.jl) as the Lifetime plot. Shared
+by the Menu-selection handler and the initial-selection draw for the same
 reason as `draw_lifetime_plot!`.
 """
 function draw_photon_counts_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     add_protocol_setpoint_highlight!(axis, app_run)
 
     for (series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
-        photons_x, photons_y = aligned_xy_observables(app_run.timestamps, series.photons)
-        lines!(axis, photons_x, photons_y, color=color)
+        raw_x, raw_y = aligned_xy_observables(app_run.timestamps, series.photons)
+        smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, series.photons_smooth)
+        lines!(axis, raw_x, raw_y, color=(color, 0.25))
+        lines!(axis, smooth_x, smooth_y, color=color)
     end
 
     return nothing
@@ -288,6 +291,20 @@ function render_plot_selection!(app, app_run, blocks, plot_slot::Symbol)
         lim = axis.finallimits[]
         xmax = lim.origin[1] + lim.widths[1]
         xlims!(axis, 0.0, max(Float64(xmax), 0.0))
+    else
+        # Running (including paused): re-pin the axis to the correct rolling
+        # window immediately, via the same function consumer_loop calls on
+        # every publish tick. Without this, a plot-type switch away from
+        # "Histogram" leaves the x-axis limits in the "automatic" state that
+        # autoscale_values!(axis) (the Histogram-only 1-arg method) sets —
+        # Makie then recomputes x reactively from the newly drawn plot's
+        # *unwindowed* full-history data (see draw_lifetime_plot! etc., which
+        # plot the whole `app_run.timestamps` series, not a time_range-clipped
+        # slice) rather than the intended last-`time_range`-seconds window.
+        # While actively running this self-heals within one publish tick
+        # (~100ms); while paused, consumer_loop is blocked and nothing else
+        # would ever re-pin it.
+        autoscale_plot_selection!(app, app_run, axis, selection, show_ch1, show_ch2)
     end
 
     return nothing
@@ -486,6 +503,7 @@ function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, sho
     if plot_label == "Photon counts"
         for (series, _) in shown
             accumulate_windowed!(xs, ys, ts, series.photons[], time_range)
+            accumulate_windowed!(xs, ys, ts, series.photons_smooth[], time_range)
         end
         return (xs, ys)
     end
@@ -524,6 +542,7 @@ also notify the latest histogram/fit/counts observables.
 """
 function notify_channel_series!(series::ChannelSeries; include_latest::Bool=false)
     notify(series.photons)
+    notify(series.photons_smooth)
     notify(series.lifetime)
     notify(series.lifetime_smooth)
     notify(series.concentration)

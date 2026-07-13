@@ -22,6 +22,7 @@ their smoothed values) onto one channel's time-series observables.
 """
 function accumulate_channel_sample!(app, series::ChannelSeries, frame::ChannelFrame)
     push!(series.photons[], frame.photons)
+    append_smooth_value!(app, series.photons, series.photons_smooth)
     push!(series.lifetime[], frame.lifetime)
     append_smooth_value!(app, series.lifetime, series.lifetime_smooth)
     push!(series.concentration[], frame.concentration)
@@ -208,6 +209,7 @@ acquisition run. Does not notify — callers batch their own notifications.
 """
 function reset_channel_series!(series::ChannelSeries)
     empty!(series.photons[])
+    empty!(series.photons_smooth[])
     series.counts[] = 0.0
     empty!(series.lifetime[])
     empty!(series.lifetime_smooth[])

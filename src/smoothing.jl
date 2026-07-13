@@ -229,11 +229,13 @@ end
 """
     recompute_channel_smooth!(app, app_run, series::ChannelSeries)
 
-Recompute one channel's smoothed lifetime and concentration series (see
-`recompute_smooth_series!`) and notify their observables. Used when the
-smoothing level changes (handlers_layout.jl).
+Recompute one channel's smoothed photon-count, lifetime, and concentration
+series (see `recompute_smooth_series!`) and notify their observables. Used
+when the smoothing level changes (handlers_layout.jl).
 """
 function recompute_channel_smooth!(app, app_run, series::ChannelSeries)
+    recompute_smooth_series!(app, series.photons, series.photons_smooth, app_run.timestamps)
+    notify(series.photons_smooth)
     recompute_smooth_series!(app, series.lifetime, series.lifetime_smooth, app_run.timestamps)
     notify(series.lifetime_smooth)
     recompute_smooth_series!(app, series.concentration, series.concentration_smooth, app_run.timestamps)

@@ -75,12 +75,14 @@ function write_realtime_capture_csv!(csv_path::AbstractString, app_run, per_file
     try
         ts = app_run.timestamps[]
         photons_ch1 = app_run.ch1.photons[]
+        photons_ch1_smooth = app_run.ch1.photons_smooth[]
         lifetime_ch1 = app_run.ch1.lifetime[]
         lifetime_ch1_smooth = app_run.ch1.lifetime_smooth[]
         protocol_setpoint = app_run.protocol_setpoint[]
         concentration_ch1 = app_run.ch1.concentration[]
         concentration_ch1_smooth = app_run.ch1.concentration_smooth[]
         photons_ch2 = app_run.ch2.photons[]
+        photons_ch2_smooth = app_run.ch2.photons_smooth[]
         lifetime_ch2 = app_run.ch2.lifetime[]
         lifetime_ch2_smooth = app_run.ch2.lifetime_smooth[]
         concentration_ch2 = app_run.ch2.concentration[]
@@ -88,17 +90,19 @@ function write_realtime_capture_csv!(csv_path::AbstractString, app_run, per_file
         command1 = app_run.command1[]
         command2 = app_run.command2[]
 
-        maxlen = maximum(map(length, (ts, photons_ch1, lifetime_ch1, lifetime_ch1_smooth, protocol_setpoint, concentration_ch1, concentration_ch1_smooth, photons_ch2, lifetime_ch2, lifetime_ch2_smooth, concentration_ch2, concentration_ch2_smooth, command1, command2)))
+        maxlen = maximum(map(length, (ts, photons_ch1, photons_ch1_smooth, lifetime_ch1, lifetime_ch1_smooth, protocol_setpoint, concentration_ch1, concentration_ch1_smooth, photons_ch2, photons_ch2_smooth, lifetime_ch2, lifetime_ch2_smooth, concentration_ch2, concentration_ch2_smooth, command1, command2)))
 
         df_runtime = DataFrame(
             timestamp = pad_to_length(Float64.(ts), maxlen),
             photons_ch1 = pad_to_length(Float64.(photons_ch1), maxlen),
+            photons_ch1_smooth = pad_to_length(Float64.(photons_ch1_smooth), maxlen),
             lifetime_ch1 = pad_to_length(Float64.(lifetime_ch1), maxlen),
             lifetime_ch1_smooth = pad_to_length(Float64.(lifetime_ch1_smooth), maxlen),
             protocol_setpoint = pad_to_length(Float64.(protocol_setpoint), maxlen),
             concentration_ch1 = pad_to_length(Float64.(concentration_ch1), maxlen),
             concentration_ch1_smooth = pad_to_length(Float64.(concentration_ch1_smooth), maxlen),
             photons_ch2 = pad_to_length(Float64.(photons_ch2), maxlen),
+            photons_ch2_smooth = pad_to_length(Float64.(photons_ch2_smooth), maxlen),
             lifetime_ch2 = pad_to_length(Float64.(lifetime_ch2), maxlen),
             lifetime_ch2_smooth = pad_to_length(Float64.(lifetime_ch2_smooth), maxlen),
             concentration_ch2 = pad_to_length(Float64.(concentration_ch2), maxlen),
@@ -132,12 +136,14 @@ function save_realtime_capture!(app, app_run, per_file_df::DataFrame)
         :runtime_vectors => Dict{Symbol, Any}(
             :timestamps => copy(app_run.timestamps[]),
             :photons_ch1 => copy(app_run.ch1.photons[]),
+            :photons_ch1_smooth => copy(app_run.ch1.photons_smooth[]),
             :lifetime_ch1 => copy(app_run.ch1.lifetime[]),
             :lifetime_ch1_smooth => copy(app_run.ch1.lifetime_smooth[]),
             :protocol_setpoint => copy(app_run.protocol_setpoint[]),
             :concentration_ch1 => copy(app_run.ch1.concentration[]),
             :concentration_ch1_smooth => copy(app_run.ch1.concentration_smooth[]),
             :photons_ch2 => copy(app_run.ch2.photons[]),
+            :photons_ch2_smooth => copy(app_run.ch2.photons_smooth[]),
             :lifetime_ch2 => copy(app_run.ch2.lifetime[]),
             :lifetime_ch2_smooth => copy(app_run.ch2.lifetime_smooth[]),
             :concentration_ch2 => copy(app_run.ch2.concentration[]),

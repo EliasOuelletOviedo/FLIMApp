@@ -216,6 +216,7 @@ channel (`ch1`/`ch2`), so every "do X for each channel" site loops over
 - `histogram::Observable{Vector{Float64}}`: current histogram data
 - `fit::Observable{Vector{Float64}}`: fitted decay curve
 - `photons::Observable{Vector{Float64}}`: time-series of photon counts
+- `photons_smooth::Observable{Vector{Float64}}`: smoothed photon-count time-series
 - `counts::Observable{Float64}`: current photon count
 - `lifetime::Observable{Vector{Float64}}`: time-series of fitted lifetimes
 - `lifetime_smooth::Observable{Vector{Float64}}`: smoothed lifetime time-series
@@ -226,6 +227,7 @@ struct ChannelSeries
     histogram::Observable{Vector{Float64}}
     fit::Observable{Vector{Float64}}
     photons::Observable{Vector{Float64}}
+    photons_smooth::Observable{Vector{Float64}}
     counts::Observable{Float64}
     lifetime::Observable{Vector{Float64}}
     lifetime_smooth::Observable{Vector{Float64}}
@@ -237,6 +239,7 @@ function ChannelSeries()
     return ChannelSeries(
         Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
         Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
+        Observable(Float64[]),
         Observable(Float64[]),
         Observable(0.0),
         Observable(Float64[]),
