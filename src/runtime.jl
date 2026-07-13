@@ -286,7 +286,7 @@ function dispatch_acquisition_worker!(app_run, selected_mode, layout, controller
             initial_guess=initial_guess,
             protocol=protocol_config,
             paused=app_run.paused,
-            target_frequency=60.0
+            target_frequency=1000.0
         )
     elseif selected_mode == "Realtime"
         app_run.worker_task = Threads.@spawn start_realtime(
