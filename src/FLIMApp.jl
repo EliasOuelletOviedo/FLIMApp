@@ -55,6 +55,9 @@ include("plotting.jl")
 # Becker & Hickl .sdt file parser (used by lifetime_analysis.jl's read_sdt_frame)
 include("io/SdtFile.jl")
 
+# ImageJ .roi/.zip ROI parser (used by roi_popup.jl)
+include("io/ImageJROI.jl")
+
 # Analysis algorithms (lifetime fitting)
 include("lifetime_analysis.jl")
 

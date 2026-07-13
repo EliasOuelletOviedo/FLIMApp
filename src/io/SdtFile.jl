@@ -1,8 +1,4 @@
 """
-Included by FLIMApp.jl. `read_sdt_frame` in lifetime_analysis.jl delegates its
-histogram/header parsing to this module's `read_sdt`; see that function for
-the one field (frame_time) still read directly for legacy behavioral parity.
-
     SdtFile.jl
 
 Parseur pur Julia pour les fichiers SDT de Becker & Hickl (TCSPC / FLIM).
@@ -571,6 +567,25 @@ function compute_shape(mi::MeasureInfo, contents_code::Int, dsize::Int)::Tuple
     end
 end
 
+"""
+Les données brutes d'un bloc SDT sont stockées "row-major" (l'axe adc_re, le
+plus à droite dans `shape`, varie le plus vite) — la même convention que le
+`.reshape()` par défaut de NumPy. `reshape` de Julia est column-major (l'axe
+le plus à GAUCHE varie le plus vite) : un simple `reshape(data_vec, shape)`
+réarrange donc silencieusement les éléments dès que plus d'une dimension de
+`shape` dépasse 1 (un bloc DECAY à un seul pixel, `shape=(1,N)`, ne peut pas
+révéler l'erreur puisqu'aucun réarrangement n'est alors possible — c'est
+uniquement sur les blocs IMG/FCS multi-pixels, comme les scans FOV complets,
+que la différence apparaît). On reshape donc dans l'ordre inversé (ce qui
+correspond au layout row-major) puis on permute les axes pour retrouver
+`shape` avec la sémantique attendue par pixel/canal.
+"""
+function reshape_row_major(data_vec::AbstractVector, shape::Tuple)
+    length(shape) <= 1 && return reshape(data_vec, shape)
+    n = length(shape)
+    return permutedims(reshape(data_vec, reverse(shape)), reverse(ntuple(identity, n)))
+end
+
 # ─── Matérialisation typée des blocs de données ───────────────────────────────
 
 """
@@ -700,7 +715,7 @@ function read_sdt(b::Vector{UInt8}, filename::String="")::SdtData
         end
 
         reshaped = prod(shape) == length(data_vec) ?
-            reshape(data_vec, shape) : reshape(data_vec, (length(data_vec),))
+            reshape_row_major(data_vec, shape) : reshape(data_vec, (length(data_vec),))
 
         blk_no = Int(bh.lblock_no) != 0 ? Int(bh.lblock_no) : Int(bh.block_no)
 

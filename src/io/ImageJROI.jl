@@ -1,8 +1,7 @@
 
 """
-WIP — not yet included by main.jl. Intended to back the ROI popup
-(roi_popup.jl), which is currently an empty shell with no ROI reading wired
-in yet.
+Included by FLIMApp.jl. Backs the ROI popup (roi_popup.jl)'s "Import ROI"
+button, which reads .roi/.zip files via `read_roi`/`read_roi_zip` below.
 
     ImageJROI.jl
 

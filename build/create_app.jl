@@ -23,7 +23,15 @@ from a terminal (`.../bin/FLIMApp`).
 
 The launcher on both platforms sets `JULIA_NUM_THREADS=auto`: the
 acquisition worker runs on its own thread (see runtime.jl) and needs a
-second thread to keep the GUI responsive during fits.
+second thread to keep the GUI responsive during fits. It also passes
+`--gcthreads=<cores>,1` (no environment-variable equivalent exists for this
+one, unlike JULIA_NUM_THREADS, so it has to be a CLI arg to the launched
+binary) -- maxing out GC mark-phase parallelism plus concurrent sweeping
+measurably reduced the tail of GC-pause-driven frame-time spikes in
+Playback-mode profiling (acquisition.jl's hot loop), though this was
+validated by running the package from source, not against the compiled
+binary specifically -- confirm it still helps (or at least doesn't regress)
+after building if you change this.
 
 Expect the build to take a long time (tens of minutes) and the output to
 be large (GLMakie bundles OpenGL, fonts, FFTW, etc.).
@@ -102,10 +110,14 @@ if Sys.isapple()
         """
         #!/bin/bash
         # FLIMApp launcher: locate the bundled app and run it with threads
-        # enabled (the acquisition worker needs its own thread, runtime.jl).
+        # enabled (the acquisition worker needs its own thread, runtime.jl)
+        # and GC mark/sweep parallelism maxed out (see create_app.jl's
+        # docstring for why -- reduces GC-pause tail latency in the
+        # acquisition loop).
         DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
         export JULIA_NUM_THREADS=auto
-        exec "\$DIR/../Resources/app/bin/FLIMApp"
+        NCORES="\$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+        exec "\$DIR/../Resources/app/bin/FLIMApp" --gcthreads="\$NCORES",1
         """)
     chmod(launcher, 0o755)
 
@@ -121,7 +133,7 @@ elseif Sys.iswindows()
         """
         @echo off
         set JULIA_NUM_THREADS=auto
-        start "" "%~dp0bin\\FLIMApp.exe"
+        start "" "%~dp0bin\\FLIMApp.exe" --gcthreads=%NUMBER_OF_PROCESSORS%,1
         """)
 
     println()

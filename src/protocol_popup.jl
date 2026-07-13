@@ -196,7 +196,7 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
     import_button = Button(controls_layout[1, 3]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import", :width => 96))...)
     export_button = Button(controls_layout[2, 3]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Export", :width => 96))...)
     clear_button = Button(controls_layout[1, 4]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Clear", :width => 96))...)
-    close_button = Button(controls_layout[2, 4]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Fermer", :width => 96))...)
+    close_button = Button(controls_layout[2, 4]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Close", :width => 96))...)
 
     step_count = default_step_count
     step_duration_values = copy(saved_times)
@@ -256,7 +256,7 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
             lines!(protocol_axis, [elapsed_time, elapsed_time + duration], [setpoint, setpoint], color = PLOT_COLOR_REF)
 
             if !isnan(setpoint)
-                vspan!(protocol_axis, elapsed_time, elapsed_time + duration, color = PLOT_COLOR_CH1, alpha = 0.1)
+                vspan!(protocol_axis, elapsed_time, elapsed_time + duration, color = PLOT_COLOR_REF, alpha = 0.1)
             end
 
             elapsed_time += duration
