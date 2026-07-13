@@ -21,11 +21,11 @@ using NativeFileDialog
 using Optim
 using LineSearches
 using ZipFile
+using LinearAlgebra: mul!
 
 const X_DATA_CACHE = Dict{Tuple{Int, Float64}, Vector{Float64}}()
 const GATING_CACHE = Dict{Tuple{Int, Int, Int}, Vector{UInt8}}()
 const IRF_CHANNEL_CACHE = Dict{Int, Matrix{Float64}}()
-const CHANNEL_RANGE_CACHE = Dict{Int, Vector{Int}}()
 
 # -----------------------------------------------------------------------------
 # Helpers IRF
@@ -192,6 +192,11 @@ Fields:
 - `fft_plan_size` - Histogram resolution the current plans were built for
 - `irf_cache_source_id` - `objectid(irf)` at last cache build, to detect a
   newly-loaded IRF and invalidate `IRF_CHANNEL_CACHE`
+- `conv_scratch_in` / `conv_scratch_a` / `conv_scratch_b` - reusable
+  `ComplexF64` buffers for `convolve`'s in-place FFTs (`mul!`, see below),
+  sized `fft_plan_size`. `convolve` runs on every `Optim` objective
+  evaluation (50-200+ times per fit) so avoiding a fresh heap allocation per
+  buffer per call materially cuts GC pressure in the acquisition hot loop.
 """
 mutable struct RuntimeContext
     irf::Union{Nothing, Matrix{Float64}}
@@ -201,6 +206,9 @@ mutable struct RuntimeContext
     ifft_plan::IFFTPlanType
     fft_plan_size::Int
     irf_cache_source_id::UInt
+    conv_scratch_in::Vector{ComplexF64}
+    conv_scratch_a::Vector{ComplexF64}
+    conv_scratch_b::Vector{ComplexF64}
 end
 
 """
@@ -227,7 +235,8 @@ function __init__()
     RUNTIME[] = RuntimeContext(
         nothing, nothing, nothing,
         plan_fft(zeros(Float64, 256)), plan_ifft(zeros(Float64, 256)), 256,
-        UInt(0)
+        UInt(0),
+        Vector{ComplexF64}(undef, 256), Vector{ComplexF64}(undef, 256), Vector{ComplexF64}(undef, 256)
     )
     return nothing
 end
@@ -238,28 +247,11 @@ function ensure_fft_plans(size::Int)
         ctx.fft_plan = plan_fft(zeros(Float64, size))
         ctx.ifft_plan = plan_ifft(zeros(Float64, size))
         ctx.fft_plan_size = size
+        ctx.conv_scratch_in = Vector{ComplexF64}(undef, size)
+        ctx.conv_scratch_a = Vector{ComplexF64}(undef, size)
+        ctx.conv_scratch_b = Vector{ComplexF64}(undef, size)
     end
     return nothing
-end
-
-"""
-    get_channel_range(n::Int)::Vector{Int}
-
-Cached `collect(1:n)`, used by `irf_shift`. `irf_shift` runs once per
-`conv_irf_data` call, which is itself the Optim objective function —
-evaluated 50-200+ times per fit — so re-`collect`ing this same range every
-call is a per-fit allocation cost for a value that only ever depends on `n`
-(the histogram resolution, fixed for the duration of a fit).
-"""
-function get_channel_range(n::Int)::Vector{Int}
-    cached = get(CHANNEL_RANGE_CACHE, n, nothing)
-    if cached !== nothing
-        return cached
-    end
-
-    channel = collect(1:n)
-    CHANNEL_RANGE_CACHE[n] = channel
-    return channel
 end
 
 function get_x_data(total_channels::Int, bin_size::Float64)::Vector{Float64}
@@ -378,6 +370,22 @@ end
 # Convolution et modeles
 # -----------------------------------------------------------------------------
 
+"""
+    convolve(irf_vec, decay; ...)
+
+Runs on every `Optim` objective evaluation (50-200+ times per fit, x2
+channels), so the FFTs are done in-place via `mul!` into `RUNTIME[]`'s
+`conv_scratch_*` buffers (resized alongside the plans in `ensure_fft_plans`)
+instead of the allocating `plan * x` form -- cuts this function from 5-6
+heap allocations down to 1 (the freshly-owned `y` this function returns;
+everything upstream of that stays in the reused scratch buffers). Verified
+bit-identical output to the previous allocating form across a range of
+inputs before landing this (see lifetime_analysis tests).
+
+Not thread-safe, same as the rest of `RuntimeContext` (see its docstring):
+scratch buffers are reused sequentially within one call and across calls
+from the single acquisition worker thread, never concurrently.
+"""
 function convolve(irf_vec::Vector{Float64}, decay::Vector{Float64}; histogram_resolution::Int64=256, tcspc_low_cut_index::Int64=13, tcspc_high_cut_index::Int64=12)
     if length(irf_vec) != length(decay)
         error("IRF and decay vectors must have same length: $(length(irf_vec)) vs $(length(decay))")
@@ -385,31 +393,74 @@ function convolve(irf_vec::Vector{Float64}, decay::Vector{Float64}; histogram_re
 
     ensure_fft_plans(length(irf_vec))
     ctx = RUNTIME[]
-    y = real.(ctx.ifft_plan * ((ctx.fft_plan * irf_vec) .* (ctx.fft_plan * decay)))
+
+    ctx.conv_scratch_in .= irf_vec
+    mul!(ctx.conv_scratch_a, ctx.fft_plan, ctx.conv_scratch_in)
+
+    ctx.conv_scratch_in .= decay
+    mul!(ctx.conv_scratch_b, ctx.fft_plan, ctx.conv_scratch_in)
+
+    ctx.conv_scratch_a .*= ctx.conv_scratch_b
+    mul!(ctx.conv_scratch_b, ctx.ifft_plan, ctx.conv_scratch_a)
+
+    y = real.(ctx.conv_scratch_b)
 
     lo = clamp(tcspc_low_cut_index, 1, histogram_resolution)
     hi = clamp(histogram_resolution - tcspc_high_cut_index, lo, histogram_resolution)
-    denom = sum(y[lo:hi])
+    denom = sum(view(y, lo:hi))
     if denom <= 0 || !isfinite(denom)
         return y
     end
 
-    return (y / denom)::Vector{Float64}
+    y ./= denom
+    return y::Vector{Float64}
 end
 
+"""
+    irf_shift(data_irf, shift)
+
+Linear-interpolated circular shift of the IRF by `shift` bins. `shift` is
+itself an optimized parameter, so (unlike `get_x_data`/`get_channel_range`
+etc.) the result can't be cached across `Optim` evaluations -- but the
+previous broadcast form still allocated ~8-9 temporary arrays per call
+(the `channel .- ... .% n ...` chains, plus the fancy-indexing gathers)
+purely to materialize `index_1`/`index_2` before combining them. Rewritten
+as a single `@inbounds` loop computing both indices per-element (`channel`
+was always just `1:n`, i.e. the loop variable itself, so `get_channel_range`
+is no longer needed either) into one freshly-allocated output -- down to 1
+allocation per call. This is a literal transliteration of the original
+per-element arithmetic (including its two *different*, individually
+redundant `rem`/`mod1` reduction chains for index_1 vs index_2) rather than
+a hand-simplified formula, specifically to keep this verifiably
+bit-identical to the previous implementation -- verified across a range of
+n/shift values before landing this.
+"""
 function irf_shift(data_irf::Matrix{Float64}, shift)
     if isnan(shift)
         shift = 0
     end
 
     n = size(data_irf, 1)
-    channel = get_channel_range(n)
-    irf_counts = data_irf[:, 2]
+    irf_counts = @view data_irf[:, 2]
 
-    index_1 = mod1.(vec(((channel .- (floor(Int, shift) - 1)) .% n .% n) .% n) .+ 1, n)
-    index_2 = mod1.(vec(((channel .- (ceil(Int, shift) - 1)) .% n .+ n) .% n) .+ 1, n)
+    floor_off = floor(Int, shift) - 1
+    ceil_off = ceil(Int, shift) - 1
+    # Computed with the exact same operation order as the original
+    # `(1 - shift) + floor(shift)` / `(shift - floor(shift))` -- not
+    # algebraically simplified to `1 - w2` -- since floating-point +/- is
+    # not associative and that reordering measurably produced a ~1e-15
+    # (1-ULP) difference from the original in verification.
+    w1 = 1 - shift + floor(shift)
+    w2 = shift - floor(shift)
 
-    return vec((1 - shift + floor(shift)) .* irf_counts[index_1] + (shift - floor(shift)) .* irf_counts[index_2])::Vector{Float64}
+    out = Vector{Float64}(undef, n)
+    @inbounds for i in 1:n
+        idx1 = mod1(rem(rem(rem(i - floor_off, n), n), n) + 1, n)
+        idx2 = mod1(rem(rem(i - ceil_off, n) + n, n) + 1, n)
+        out[i] = w1 * irf_counts[idx1] + w2 * irf_counts[idx2]
+    end
+
+    return out::Vector{Float64}
 end
 
 function conv_irf_data(x_data::Vector{Float64}, params::Tuple{Float64, Float64, Float64}, data_irf::Matrix{Float64}; histogram_resolution::Int64=256, number_of_previous_pulses::Int64=5, laser_pulse_period::Float64=12.5, tcspc_low_cut_index::Int64=13, tcspc_high_cut_index::Int64=12)
@@ -513,7 +564,10 @@ function mle_objective(free_params::Vector{Float64}, fixed_params::Vector{Float6
         exp_val_c = ((1 - params[8]) .* conv_irf_data(x_data, (params[1], params[2], params[3], params[4], params[5], params[6], params[7], params[8]), data_irf, histogram_resolution=histogram_resolution, number_of_previous_pulses=number_of_previous_pulses, laser_pulse_period=laser_pulse_period, tcspc_low_cut_index=tcspc_low_cut_index, tcspc_high_cut_index=tcspc_high_cut_index) .+ params[8] / n_active_bins) .* n_counts
     end
 
-    replace!(x -> smaller_or_eq_zero(x) ? 1e-256 : x, y_data)
+    # y_data itself is already sanitized once in mle_reconvolution_fit before
+    # Optim.optimize is called, not re-sanitized here on every one of its
+    # 50-200+ objective evaluations -- exp_val_c is the only value that's
+    # freshly recomputed each evaluation and actually needs it.
     replace!(x -> smaller_or_eq_zero(x) ? 1e-256 : x, exp_val_c)
 
     dev = 2.0 / (sqrt(n_counts) * (histogram_resolution - length(params))) * sum(gating_function .* (y_data .* log.(y_data ./ exp_val_c) .- y_data .+ exp_val_c))
