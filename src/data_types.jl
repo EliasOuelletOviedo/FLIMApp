@@ -53,6 +53,18 @@ channel by `run_acquisition_loop!` (acquisition.jl) and consumed by
 `consumer_loop` (runtime.jl). A struct rather than a positional tuple —
 too many fields to destructure positionally without risking a
 silently-mismatched order.
+
+`frame_index` is this app's own count of files it has read so far this run
+— it advances by exactly 1 per file regardless of what the source acquisition
+actually produced, so a file the upstream hardware/software never wrote
+(e.g. a lag spike at the source) is invisible to it and it silently drifts
+out of sync with the real physical sequence from that point on.
+`file_sequence_number` (parsed from `source_file`'s name, see
+`extract_file_sequence_number` in acquisition.jl) is this file's own
+embedded position in that sequence instead, so a missing file just leaves a
+gap rather than shifting everything after it — used by `consumer_loop`
+(runtime.jl) for round-robin ROI assignment specifically because of this.
+`nothing` when the filename has no parseable trailing number.
 """
 struct AcquisitionSample
     ch1::ChannelFrame
@@ -63,6 +75,7 @@ struct AcquisitionSample
     protocol_setpoint::Float64
     frame_index::UInt32
     source_file::String
+    file_sequence_number::Union{Int, Nothing}
 end
 
 # =============================================================================
@@ -121,6 +134,11 @@ end
 
 Experimental protocol schedule: `times`/`setpoints` are parallel vectors of
 `PROTOCOL_STEP_COUNT` per-step durations and setpoints.
+
+`points_per_roi`/`spiral_turns`/`scan_time`/`shift_time` are the
+ROI trigger-box scan-buffer parameters (roi.jl), editable from the Protocol
+panel (handlers_protocol.jl) — see `roi_trigger_buffer`/
+`build_and_send_roi_trigger_buffer!` in roi.jl for how they're used.
 """
 Base.@kwdef mutable struct ProtocolSettings
     active::Bool = false
@@ -128,6 +146,11 @@ Base.@kwdef mutable struct ProtocolSettings
     delay::Int = 0
     times::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
     setpoints::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
+    PWM_frequency::Int = 1000
+    points_per_roi::Int = 100
+    spiral_turns::Int = 10
+    scan_time::Int = 950
+    shift_time::Int = 50
 end
 
 """

@@ -36,6 +36,13 @@ const PLOT_COLOR_CH1 = Makie.wong_colors()[1]
 const PLOT_COLOR_CH2 = Makie.wong_colors()[2]
 const PLOT_COLOR_REF = Makie.wong_colors()[3]
 
+# Line width for every plotted trace (data lines, ROI outlines, protocol
+# preview lines) — single source of truth so line thickness changes
+# app-wide from one edit instead of touching every lines!/hlines!/vlines!
+# call. Matches Makie's own default (1.5), so introducing this constant is
+# a pure refactor with no visual change until it's edited.
+const PLOT_LINEWIDTH = 1
+
 AXIS_PLOTS_ATTRS = Dict{Symbol, Any}(
     # :alignmode          => Outside(10),
     :alignmode          => Inside(),

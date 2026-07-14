@@ -120,11 +120,11 @@ function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
         counts_normalized = lift(normalized_counts_for_histogram, series.histogram, series.fit)
         fit_normalized = lift(normalize_to_own_max, series.fit)
         barplot!(axis, app_run.hist_time, counts_normalized, color=(color, 0.1), gap=0.0)
-        lines!(axis, app_run.hist_time, fit_normalized, color=color)
+        lines!(axis, app_run.hist_time, fit_normalized, color=color, linewidth=PLOT_LINEWIDTH)
     end
 
     irf_normalized = lift(normalized_irf_from_fit, app_run.ch1.fit)
-    lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_REF)
+    lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
 
     return nothing
 end
@@ -204,14 +204,14 @@ needs to be one function, not two copies.
 function draw_lifetime_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     add_protocol_setpoint_highlight!(axis, app_run)
     protocol_x, protocol_y = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
-    lines!(axis, protocol_x, protocol_y, color=PLOT_COLOR_REF)
+    lines!(axis, protocol_x, protocol_y, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
 
     for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
         for series in roi_series
             raw_x, raw_y = aligned_xy_observables(series.timestamps, series.lifetime)
             smooth_x, smooth_y = aligned_xy_observables(series.timestamps, series.lifetime_smooth)
-            lines!(axis, raw_x, raw_y, color=(color, 0.25))
-            lines!(axis, smooth_x, smooth_y, color=color)
+            lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
+            lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
         end
     end
 
@@ -236,8 +236,8 @@ function draw_ion_concentration_plot!(axis, app_run, show_ch1::Bool, show_ch2::B
         for series in roi_series
             raw_x, raw_y = aligned_xy_observables(series.timestamps, series.concentration)
             smooth_x, smooth_y = aligned_xy_observables(series.timestamps, series.concentration_smooth)
-            lines!(axis, raw_x, raw_y, color=(color, 0.25))
-            lines!(axis, smooth_x, smooth_y, color=color)
+            lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
+            lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
         end
     end
 
@@ -262,8 +262,8 @@ function draw_photon_counts_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
         for series in roi_series
             raw_x, raw_y = aligned_xy_observables(series.timestamps, series.photons)
             smooth_x, smooth_y = aligned_xy_observables(series.timestamps, series.photons_smooth)
-            lines!(axis, raw_x, raw_y, color=(color, 0.25))
-            lines!(axis, smooth_x, smooth_y, color=color)
+            lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
+            lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
         end
     end
 
@@ -303,8 +303,8 @@ function render_plot_selection!(app, app_run, blocks, plot_slot::Symbol)
     if selection == "Command"
         add_protocol_setpoint_highlight!(axis, app_run)
 
-        lines!(axis, app_run.timestamps, app_run.command1, color=PLOT_COLOR_CH1)
-        lines!(axis, app_run.timestamps, app_run.command2, color=PLOT_COLOR_CH2)
+        lines!(axis, app_run.timestamps, app_run.command1, color=PLOT_COLOR_CH1, linewidth=PLOT_LINEWIDTH)
+        lines!(axis, app_run.timestamps, app_run.command2, color=PLOT_COLOR_CH2, linewidth=PLOT_LINEWIDTH)
     elseif selection == "Lifetime"
         draw_lifetime_plot!(axis, app_run, show_ch1, show_ch2)
     elseif selection == "Histogram"

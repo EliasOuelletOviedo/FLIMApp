@@ -241,7 +241,7 @@ function add_roi_from_boundary!(image_axis, volume::Array{Float64,3}, x_offset::
     if length(xs) >= 3
         push!(plots, poly!(image_axis, Point2f.(shifted_xs, shifted_ys), color=(PLOT_COLOR_REF, 0.1), strokewidth=0))
     end
-    push!(plots, lines!(image_axis, shifted_xs, shifted_ys, color=PLOT_COLOR_REF))
+    push!(plots, lines!(image_axis, shifted_xs, shifted_ys, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH))
 
     pixels = roi_pixel_mask(xs, ys, n_cols, n_rows)
     if isempty(pixels)
@@ -457,7 +457,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             if length(drawing_points) == 1
                 push!(drawing_preview_plots, scatter!(image_axis, drawing_points, color=PLOT_COLOR_REF))
             else
-                push!(drawing_preview_plots, lines!(image_axis, drawing_points, color=PLOT_COLOR_REF))
+                push!(drawing_preview_plots, lines!(image_axis, drawing_points, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH))
             end
 
             return Consume(true)

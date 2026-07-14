@@ -244,8 +244,8 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
         repeat_count = max(protocol_parse_int_or(repeats_input.stored_string[], 1), 0)
 
         elapsed_time = float(delay_seconds)
-        vlines!(protocol_axis, 0.0, color = :transparent)
-        vlines!(protocol_axis, elapsed_time, color = PLOT_COLOR_CH2)
+        vlines!(protocol_axis, 0.0, color = :transparent, linewidth = PLOT_LINEWIDTH)
+        vlines!(protocol_axis, elapsed_time, color = PLOT_COLOR_CH2, linewidth = PLOT_LINEWIDTH)
 
         for step_idx in 1:step_count
             duration = step_duration_values[step_idx]
@@ -253,7 +253,7 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
 
             duration = isnan(duration) ? 0.0 : max(duration, 0.0)
 
-            lines!(protocol_axis, [elapsed_time, elapsed_time + duration], [setpoint, setpoint], color = PLOT_COLOR_REF)
+            lines!(protocol_axis, [elapsed_time, elapsed_time + duration], [setpoint, setpoint], color = PLOT_COLOR_REF, linewidth = PLOT_LINEWIDTH)
 
             if !isnan(setpoint)
                 vspan!(protocol_axis, elapsed_time, elapsed_time + duration, color = PLOT_COLOR_REF, alpha = 0.1)
@@ -262,7 +262,7 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
             elapsed_time += duration
         end
 
-        vlines!(protocol_axis, elapsed_time, color = PLOT_COLOR_CH2)
+        vlines!(protocol_axis, elapsed_time, color = PLOT_COLOR_CH2, linewidth = PLOT_LINEWIDTH)
 
         preview_repeats = repeat_count == 0 ? 1 : repeat_count
         signal_length = round(Int, max((elapsed_time - delay_seconds) * preview_repeats + delay_seconds + 1, 1))

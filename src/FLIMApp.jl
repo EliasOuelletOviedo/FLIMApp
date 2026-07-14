@@ -67,7 +67,11 @@ include("acquisition.jl")
 # Realtime-capture session saving (depends on data_types.jl, path_utils.jl)
 include("session_save.jl")
 
-# Background task lifecycle (depends on acquisition/protocol/serial/session_save/plotting/smoothing)
+# ROI trigger-box scan-buffer generation (depends on data_types.jl for
+# RoiCoordinates; used by runtime.jl's start_pressed)
+include("roi.jl")
+
+# Background task lifecycle (depends on acquisition/protocol/serial/session_save/plotting/smoothing/roi)
 include("runtime.jl")
 
 # Protocol popup UI module
@@ -116,10 +120,37 @@ it's `Base.@kwdef`, as long as no inner constructor suppresses it — true for
 `AppState` and all of its settings structs). A value that is itself a
 `Dict` is recursively reconstructed via the corresponding field's declared
 type.
+
+A field present in `T` but missing from `d` (a save file from before that
+field existed — e.g. `ProtocolSettings` gaining `points_per_roi` etc.) falls
+back to that field's value in a fresh `T()`, via `default_field_value`,
+instead of throwing: without this, adding a single field to any settings
+struct would `KeyError` on every old save file, and `load_state`'s
+catch-and-reset-to-defaults would discard the *entire* `AppState` — every
+other setting too — just because one nested struct grew one new field.
 """
 function dict_to_struct(::Type{T}, d::Dict) where T
-    values = (d[name] isa Dict ? dict_to_struct(fieldtype(T, name), d[name]) : d[name] for name in fieldnames(T))
+    values = (
+        haskey(d, name) ?
+            (d[name] isa Dict ? dict_to_struct(fieldtype(T, name), d[name]) : d[name]) :
+            default_field_value(T, name)
+        for name in fieldnames(T)
+    )
     return T(values...)
+end
+
+"""
+    default_field_value(::Type{T}, name::Symbol) where T
+
+`name`'s value in a fresh, all-defaults `T()` — used by `dict_to_struct` to
+backfill a field missing from an older-schema saved dict. Requires `T` to
+support a zero-argument constructor, true for every `Base.@kwdef` settings
+struct `dict_to_struct` recurses into (it's never called for `AppState`
+itself, which takes no defaults: `AppState`'s own top-level field set is
+stable — only its nested settings structs grow fields over time).
+"""
+function default_field_value(::Type{T}, name::Symbol) where T
+    return getfield(T(), name)
 end
 
 """

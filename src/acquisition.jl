@@ -22,6 +22,23 @@ using Base.Threads
 # =============================================================================
 
 """
+    extract_file_sequence_number(filepath)::Union{Int, Nothing}
+
+Parse the trailing run of digits in `filepath`'s filename (before the
+extension) as this file's sequence number in the acquisition — e.g.
+`"sample_00042.sdt"` -> `42`. Returns `nothing` if the filename has no
+trailing digits to parse. See `AcquisitionSample`'s docstring
+(data_types.jl) for why this — not the app's own read-count — is what
+round-robin ROI assignment (`consumer_loop`, runtime.jl) is keyed on.
+"""
+function extract_file_sequence_number(filepath::AbstractString)::Union{Int, Nothing}
+    name = splitext(basename(filepath))[1]
+    m = match(r"(\d+)$", name)
+    m === nothing && return nothing
+    return tryparse(Int, m.captures[1])
+end
+
+"""
     ChannelFitState
 
 One TCSPC channel's per-frame accumulator state for `run_acquisition_loop!`:
@@ -315,7 +332,8 @@ function run_acquisition_loop!(
 
         sample = AcquisitionSample(
             frame1, frame2,
-            command1, command2, timestamps, plot_setpoint_ns, n, String(filepath)
+            command1, command2, timestamps, plot_setpoint_ns, n, String(filepath),
+            extract_file_sequence_number(filepath)
         )
         if !emit!(sample, n)
             break

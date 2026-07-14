@@ -63,6 +63,7 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
     publish_live_updates = acquisition_mode != "Save"
     last_sample = nothing
     is_realtime_mode = acquisition_mode == "Realtime"
+    warned_missing_file_sequence_number = Ref(false)
     realtime_frame_df = DataFrame(
         frame_idx=UInt32[],
         source_file=String[],
@@ -120,8 +121,27 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
             # whole run by rebuild_roi_channel_series! (start_pressed) and
             # is always >= 1 (a run with zero ROIs drawn keeps today's
             # single-series behavior via that one-element vector).
+            #
+            # Keyed on the file's OWN embedded sequence number
+            # (file_sequence_number, parsed from its filename), not this
+            # app's read-count (frame_index) — see AcquisitionSample's
+            # docstring (data_types.jl): a file the source acquisition never
+            # wrote (e.g. a lag spike upstream) is invisible to frame_index,
+            # which would then silently misassign every later file to the
+            # wrong ROI for the rest of the run. Keying on the filename's own
+            # number instead just leaves that one ROI's turn empty for that
+            # cycle. Falls back to frame_index (with a one-time warning) only
+            # if the filename has no parseable trailing number at all.
             n_rois = length(app_run.ch1_rois)
-            roi_idx = mod1(Int(sample.frame_index), n_rois)
+            sequence_number = sample.file_sequence_number
+            if sequence_number === nothing
+                if !warned_missing_file_sequence_number[]
+                    @warn "File name has no parseable sequence number; falling back to read-count for ROI assignment (this can drift out of sync after a skipped file)" source_file=sample.source_file
+                    warned_missing_file_sequence_number[] = true
+                end
+                sequence_number = Int(sample.frame_index)
+            end
+            roi_idx = mod1(sequence_number, n_rois)
             accumulate_roi_channel_sample!(app, app_run.ch1_rois[roi_idx], sample.ch1, sample.timestamps)
             accumulate_roi_channel_sample!(app, app_run.ch2_rois[roi_idx], sample.ch2, sample.timestamps)
             push!(app_run.protocol_setpoint[], sample.protocol_setpoint)
@@ -418,6 +438,13 @@ function start_pressed(app, app_run, blocks)
     end
 
     @info "Starting acquisition"
+
+    # Position the trigger box (if active/connected) before any file-reading
+    # begins, so the first acquired frame already matches the first ROI in
+    # the scan cycle. No-op (see its own docstring) unless ROI mode is on,
+    # a serial device is connected, and at least one ROI is drawn.
+    build_and_send_roi_trigger_buffer!(app, app_run)
+
     app_run.running[] = true
     app_run.paused[] = false
     # Capacity: the worker (its own thread since Threads.@spawn, see

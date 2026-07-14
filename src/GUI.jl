@@ -168,7 +168,7 @@ function make_plot_axes!(left_grid, app, app_run)
 
     for (series, color) in ((app_run.ch1, PLOT_COLOR_CH1), (app_run.ch2, PLOT_COLOR_CH2))
         hspan!(counts_axis, 1, series.counts, color = (color, 0.1))
-        hlines!(counts_axis, series.counts, color = color)
+        hlines!(counts_axis, series.counts, color = color, linewidth = PLOT_LINEWIDTH)
     end
 
     return (counts_axis=counts_axis, plot_1=plot_1, plot_2=plot_2, save_progress_axis=save_progress_axis)
