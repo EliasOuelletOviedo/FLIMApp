@@ -63,6 +63,58 @@ function pad_to_length(vec::AbstractVector{T}, n::Int) where T
     return out
 end
 
+"""
+    roi_channel_series_dataframe(app_run)::DataFrame
+
+Long-format export of every (channel, ROI) time series: one row per sample,
+tagged with which channel/ROI it belongs to. Long format (rather than the
+padded-wide format `write_realtime_capture_csv!` uses for the global
+series below) because each ROI has its own independent length AND its own
+independent timestamps (see `RoiChannelSeries` in data_types.jl) — there's
+no single shared row index or time base to pad against once there's more
+than one ROI.
+"""
+function roi_channel_series_dataframe(app_run)::DataFrame
+    df = DataFrame(
+        channel = Int[], roi_index = Int[], roi_name = String[],
+        timestamp = Float64[], photons = Float64[], photons_smooth = Float64[],
+        lifetime = Float64[], lifetime_smooth = Float64[],
+        concentration = Float64[], concentration_smooth = Float64[]
+    )
+
+    roi_names = [r.name for r in app_run.rois[]]
+
+    for (channel_idx, rois_vec) in ((1, app_run.ch1_rois), (2, app_run.ch2_rois))
+        for (roi_idx, series) in enumerate(rois_vec)
+            name = roi_idx <= length(roi_names) ? roi_names[roi_idx] : "roi$roi_idx"
+            ts = series.timestamps[]
+            photons = series.photons[]
+            photons_smooth = series.photons_smooth[]
+            lifetime = series.lifetime[]
+            lifetime_smooth = series.lifetime_smooth[]
+            concentration = series.concentration[]
+            concentration_smooth = series.concentration_smooth[]
+
+            for k in eachindex(ts)
+                push!(df, (
+                    channel = channel_idx,
+                    roi_index = roi_idx,
+                    roi_name = name,
+                    timestamp = Float64(ts[k]),
+                    photons = k <= length(photons) ? Float64(photons[k]) : NaN,
+                    photons_smooth = k <= length(photons_smooth) ? Float64(photons_smooth[k]) : NaN,
+                    lifetime = k <= length(lifetime) ? Float64(lifetime[k]) : NaN,
+                    lifetime_smooth = k <= length(lifetime_smooth) ? Float64(lifetime_smooth[k]) : NaN,
+                    concentration = k <= length(concentration) ? Float64(concentration[k]) : NaN,
+                    concentration_smooth = k <= length(concentration_smooth) ? Float64(concentration_smooth[k]) : NaN
+                ))
+            end
+        end
+    end
+
+    return df
+end
+
 function write_realtime_capture_csv!(csv_path::AbstractString, app_run, per_file_df::DataFrame)
     # Write per-file DataFrame to CSV
     try
@@ -71,42 +123,21 @@ function write_realtime_capture_csv!(csv_path::AbstractString, app_run, per_file
         @warn "Failed to write per-file CSV" path=csv_path error=string(e)
     end
 
-    # Also write runtime vectors as a companion CSV
+    # Global (not ROI-split) series: timestamps, protocol setpoint, and the
+    # PID command outputs — command1/command2 stay a single shared series
+    # regardless of ROI count (see RoiChannelSeries's docstring, data_types.jl,
+    # for why: they drive real hardware output, not just a plot).
     try
         ts = app_run.timestamps[]
-        photons_ch1 = app_run.ch1.photons[]
-        photons_ch1_smooth = app_run.ch1.photons_smooth[]
-        lifetime_ch1 = app_run.ch1.lifetime[]
-        lifetime_ch1_smooth = app_run.ch1.lifetime_smooth[]
         protocol_setpoint = app_run.protocol_setpoint[]
-        concentration_ch1 = app_run.ch1.concentration[]
-        concentration_ch1_smooth = app_run.ch1.concentration_smooth[]
-        photons_ch2 = app_run.ch2.photons[]
-        photons_ch2_smooth = app_run.ch2.photons_smooth[]
-        lifetime_ch2 = app_run.ch2.lifetime[]
-        lifetime_ch2_smooth = app_run.ch2.lifetime_smooth[]
-        concentration_ch2 = app_run.ch2.concentration[]
-        concentration_ch2_smooth = app_run.ch2.concentration_smooth[]
         command1 = app_run.command1[]
         command2 = app_run.command2[]
 
-        maxlen = maximum(map(length, (ts, photons_ch1, photons_ch1_smooth, lifetime_ch1, lifetime_ch1_smooth, protocol_setpoint, concentration_ch1, concentration_ch1_smooth, photons_ch2, photons_ch2_smooth, lifetime_ch2, lifetime_ch2_smooth, concentration_ch2, concentration_ch2_smooth, command1, command2)))
+        maxlen = maximum(map(length, (ts, protocol_setpoint, command1, command2)))
 
         df_runtime = DataFrame(
             timestamp = pad_to_length(Float64.(ts), maxlen),
-            photons_ch1 = pad_to_length(Float64.(photons_ch1), maxlen),
-            photons_ch1_smooth = pad_to_length(Float64.(photons_ch1_smooth), maxlen),
-            lifetime_ch1 = pad_to_length(Float64.(lifetime_ch1), maxlen),
-            lifetime_ch1_smooth = pad_to_length(Float64.(lifetime_ch1_smooth), maxlen),
             protocol_setpoint = pad_to_length(Float64.(protocol_setpoint), maxlen),
-            concentration_ch1 = pad_to_length(Float64.(concentration_ch1), maxlen),
-            concentration_ch1_smooth = pad_to_length(Float64.(concentration_ch1_smooth), maxlen),
-            photons_ch2 = pad_to_length(Float64.(photons_ch2), maxlen),
-            photons_ch2_smooth = pad_to_length(Float64.(photons_ch2_smooth), maxlen),
-            lifetime_ch2 = pad_to_length(Float64.(lifetime_ch2), maxlen),
-            lifetime_ch2_smooth = pad_to_length(Float64.(lifetime_ch2_smooth), maxlen),
-            concentration_ch2 = pad_to_length(Float64.(concentration_ch2), maxlen),
-            concentration_ch2_smooth = pad_to_length(Float64.(concentration_ch2_smooth), maxlen),
             command1 = pad_to_length(Float64.(command1), maxlen),
             command2 = pad_to_length(Float64.(command2), maxlen)
         )
@@ -115,6 +146,14 @@ function write_realtime_capture_csv!(csv_path::AbstractString, app_run, per_file
         CSV.write(runtime_csv_path, df_runtime)
     catch e
         @warn "Failed to write runtime vectors CSV" error=string(e)
+    end
+
+    # Per-(channel, ROI) time series, long format.
+    try
+        roi_csv_path = replace(String(csv_path), r"(?i)\.csv$" => "_roi_channel_series.csv")
+        CSV.write(roi_csv_path, roi_channel_series_dataframe(app_run))
+    catch e
+        @warn "Failed to write ROI channel series CSV" error=string(e)
     end
 
     return nothing
@@ -135,21 +174,10 @@ function save_realtime_capture!(app, app_run, per_file_df::DataFrame)
         :app_state => snapshot_app_state(app),
         :runtime_vectors => Dict{Symbol, Any}(
             :timestamps => copy(app_run.timestamps[]),
-            :photons_ch1 => copy(app_run.ch1.photons[]),
-            :photons_ch1_smooth => copy(app_run.ch1.photons_smooth[]),
-            :lifetime_ch1 => copy(app_run.ch1.lifetime[]),
-            :lifetime_ch1_smooth => copy(app_run.ch1.lifetime_smooth[]),
             :protocol_setpoint => copy(app_run.protocol_setpoint[]),
-            :concentration_ch1 => copy(app_run.ch1.concentration[]),
-            :concentration_ch1_smooth => copy(app_run.ch1.concentration_smooth[]),
-            :photons_ch2 => copy(app_run.ch2.photons[]),
-            :photons_ch2_smooth => copy(app_run.ch2.photons_smooth[]),
-            :lifetime_ch2 => copy(app_run.ch2.lifetime[]),
-            :lifetime_ch2_smooth => copy(app_run.ch2.lifetime_smooth[]),
-            :concentration_ch2 => copy(app_run.ch2.concentration[]),
-            :concentration_ch2_smooth => copy(app_run.ch2.concentration_smooth[]),
             :command1 => copy(app_run.command1[]),
             :command2 => copy(app_run.command2[]),
+            :roi_channel_series => roi_channel_series_dataframe(app_run),
             :histogram_ch1_latest => copy(app_run.ch1.histogram[]),
             :fit_ch1_latest => copy(app_run.ch1.fit[]),
             :counts_ch1_latest => app_run.ch1.counts[],

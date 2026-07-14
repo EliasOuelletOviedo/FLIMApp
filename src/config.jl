@@ -148,6 +148,17 @@ Number of steps in an experimental protocol (times/setpoints vectors).
 """
 const PROTOCOL_STEP_COUNT = 10
 
+"""
+    DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ::Float64
+
+Default target frame rate for Playback-mode acquisition (`start_playback`,
+acquisition.jl) before the user edits the target-frequency textbox
+(GUI.jl/handlers.jl). Only Playback paces itself against a fixed target —
+Realtime waits for new files, Save runs its fixed file list as fast as
+possible — so this has no effect on those two modes.
+"""
+const DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ = 1000.0
+
 # =============================================================================
 # UI THEME DEFINITIONS
 # =============================================================================

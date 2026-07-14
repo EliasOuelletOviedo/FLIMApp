@@ -51,12 +51,30 @@ end
 """
     shown_channel_series(app_run, show_ch1, show_ch2)
 
-The standard "for each shown channel" iteration used by the draw_*_plot!
-functions below: `(series, color)` pairs for whichever of the two channels
-its toggle currently shows (channel 1 in `PLOT_COLOR_CH1`, channel 2 in
-`PLOT_COLOR_CH2`).
+The standard "for each shown channel" iteration used by the ROI-split
+draw_*_plot! functions below (Photon counts/Lifetime/Ion concentration):
+`(roi_series_vector, color)` pairs for whichever of the two channels its
+toggle currently shows (channel 1 in `PLOT_COLOR_CH1`, channel 2 in
+`PLOT_COLOR_CH2`) — `roi_series_vector` is that channel's
+`Vector{RoiChannelSeries}` (`app_run.ch1_rois`/`ch2_rois`), one entry per
+drawn ROI (or a single entry when none are drawn).
 """
 function shown_channel_series(app_run, show_ch1::Bool, show_ch2::Bool)
+    pairs = Tuple{Vector{RoiChannelSeries}, typeof(PLOT_COLOR_CH1)}[]
+    show_ch1 && push!(pairs, (app_run.ch1_rois, PLOT_COLOR_CH1))
+    show_ch2 && push!(pairs, (app_run.ch2_rois, PLOT_COLOR_CH2))
+    return pairs
+end
+
+"""
+    shown_snapshot_series(app_run, show_ch1, show_ch2)
+
+Like `shown_channel_series`, but for the Histogram plot's "latest frame"
+snapshot (`ChannelSeries`, not ROI-split — see its docstring in
+data_types.jl for why): `(series, color)` pairs for whichever of the two
+channels its toggle currently shows.
+"""
+function shown_snapshot_series(app_run, show_ch1::Bool, show_ch2::Bool)
     pairs = Tuple{ChannelSeries, typeof(PLOT_COLOR_CH1)}[]
     show_ch1 && push!(pairs, (app_run.ch1, PLOT_COLOR_CH1))
     show_ch2 && push!(pairs, (app_run.ch2, PLOT_COLOR_CH2))
@@ -98,7 +116,7 @@ the initial-selection draw at GUI construction time (GUI.jl) via
 here once instead of as two copies that can drift out of sync.
 """
 function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
-    for (series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
+    for (series, color) in shown_snapshot_series(app_run, show_ch1, show_ch2)
         counts_normalized = lift(normalized_counts_for_histogram, series.histogram, series.fit)
         fit_normalized = lift(normalize_to_own_max, series.fit)
         barplot!(axis, app_run.hist_time, counts_normalized, color=(color, 0.1), gap=0.0)
@@ -174,22 +192,27 @@ end
 Draw the Lifetime plot's series onto `axis`: the protocol-setpoint
 highlight and trace (channel-agnostic — it's the PID target, not measured
 data, so it's drawn regardless of the toggles), plus each shown channel's
-raw/smoothed lifetime (channel 1 in `PLOT_COLOR_CH1`, channel 2 in
-`PLOT_COLOR_CH2`). Shared by the Menu-selection handler
-(handlers_layout.jl) and the initial-selection draw at GUI construction
-time (GUI.jl) via `render_plot_selection!` — see `draw_histogram_plot!`
-above for why this needs to be one function, not two copies.
+raw/smoothed lifetime, one line pair per ROI (`app_run.rois`) — all of one
+channel's ROI lines share that channel's color (channel 1
+`PLOT_COLOR_CH1`, channel 2 `PLOT_COLOR_CH2`), superimposed with no legend,
+so a single-ROI (or no-ROI) run looks exactly as it did before this
+existed. Shared by the Menu-selection handler (handlers_layout.jl) and the
+initial-selection draw at GUI construction time (GUI.jl) via
+`render_plot_selection!` — see `draw_histogram_plot!` above for why this
+needs to be one function, not two copies.
 """
 function draw_lifetime_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     add_protocol_setpoint_highlight!(axis, app_run)
     protocol_x, protocol_y = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
     lines!(axis, protocol_x, protocol_y, color=PLOT_COLOR_REF)
 
-    for (series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
-        raw_x, raw_y = aligned_xy_observables(app_run.timestamps, series.lifetime)
-        smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, series.lifetime_smooth)
-        lines!(axis, raw_x, raw_y, color=(color, 0.25))
-        lines!(axis, smooth_x, smooth_y, color=color)
+    for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
+        for series in roi_series
+            raw_x, raw_y = aligned_xy_observables(series.timestamps, series.lifetime)
+            smooth_x, smooth_y = aligned_xy_observables(series.timestamps, series.lifetime_smooth)
+            lines!(axis, raw_x, raw_y, color=(color, 0.25))
+            lines!(axis, smooth_x, smooth_y, color=color)
+        end
     end
 
     return nothing
@@ -199,20 +222,23 @@ end
     draw_ion_concentration_plot!(axis, app_run, show_ch1, show_ch2)
 
 Draw the Ion concentration plot's series onto `axis`: each shown channel's
-raw concentration and its smoothed trace (channel 1 in `PLOT_COLOR_CH1`,
-channel 2 in `PLOT_COLOR_CH2`), using the exact same smoothing
-(compute_lifetime_smooth_at, see smoothing.jl) as the Lifetime plot. Shared
-by the Menu-selection handler and the initial-selection draw for the same
-reason as `draw_lifetime_plot!`.
+raw concentration and its smoothed trace, one line pair per ROI — same
+per-ROI superimposed-same-color-no-legend treatment as
+`draw_lifetime_plot!` (see its docstring), using the exact same smoothing
+(compute_lifetime_smooth_at, see smoothing.jl). Shared by the Menu-selection
+handler and the initial-selection draw for the same reason as
+`draw_lifetime_plot!`.
 """
 function draw_ion_concentration_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     add_protocol_setpoint_highlight!(axis, app_run)
 
-    for (series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
-        raw_x, raw_y = aligned_xy_observables(app_run.timestamps, series.concentration)
-        smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, series.concentration_smooth)
-        lines!(axis, raw_x, raw_y, color=(color, 0.25))
-        lines!(axis, smooth_x, smooth_y, color=color)
+    for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
+        for series in roi_series
+            raw_x, raw_y = aligned_xy_observables(series.timestamps, series.concentration)
+            smooth_x, smooth_y = aligned_xy_observables(series.timestamps, series.concentration_smooth)
+            lines!(axis, raw_x, raw_y, color=(color, 0.25))
+            lines!(axis, smooth_x, smooth_y, color=color)
+        end
     end
 
     return nothing
@@ -222,20 +248,23 @@ end
     draw_photon_counts_plot!(axis, app_run, show_ch1, show_ch2)
 
 Draw the Photon counts plot's series onto `axis`: each shown channel's raw
-photon-count trace and its smoothed trace (channel 1 in `PLOT_COLOR_CH1`,
-channel 2 in `PLOT_COLOR_CH2`), using the exact same smoothing
-(compute_lifetime_smooth_at, see smoothing.jl) as the Lifetime plot. Shared
-by the Menu-selection handler and the initial-selection draw for the same
-reason as `draw_lifetime_plot!`.
+photon-count trace and its smoothed trace, one line pair per ROI — same
+per-ROI superimposed-same-color-no-legend treatment as
+`draw_lifetime_plot!` (see its docstring), using the exact same smoothing
+(compute_lifetime_smooth_at, see smoothing.jl). Shared by the Menu-selection
+handler and the initial-selection draw for the same reason as
+`draw_lifetime_plot!`.
 """
 function draw_photon_counts_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     add_protocol_setpoint_highlight!(axis, app_run)
 
-    for (series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
-        raw_x, raw_y = aligned_xy_observables(app_run.timestamps, series.photons)
-        smooth_x, smooth_y = aligned_xy_observables(app_run.timestamps, series.photons_smooth)
-        lines!(axis, raw_x, raw_y, color=(color, 0.25))
-        lines!(axis, smooth_x, smooth_y, color=color)
+    for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
+        for series in roi_series
+            raw_x, raw_y = aligned_xy_observables(series.timestamps, series.photons)
+            smooth_x, smooth_y = aligned_xy_observables(series.timestamps, series.photons_smooth)
+            lines!(axis, raw_x, raw_y, color=(color, 0.25))
+            lines!(axis, smooth_x, smooth_y, color=color)
+        end
     end
 
     return nothing
@@ -484,24 +513,29 @@ end
     lookup_plot_series(app_run, plot_label, time_range, show_ch1, show_ch2)
 
 Return x/y vectors for one plot label, restricted to the last `time_range`
-seconds (see `windowed_slice`) and to whichever channel(s) are shown.
+seconds (see `windowed_slice`) and to whichever channel(s)/ROIs are shown
+(each ROI's own `timestamps`, per `RoiChannelSeries`, is used to window its
+own series — they aren't aligned to a single shared x-axis any more).
 Labels supported: `Histogram`, `Photon counts`, `Lifetime`, `Ion concentration`, `Command`.
 `Histogram` and `Command` ignore `show_ch1`/`show_ch2` — Histogram returns
 the raw (un-windowed) channel-1 series regardless (autoscaling only, not
-used for drawing), and Command always shows both controller outputs.
+used for drawing), and Command always shows both controller outputs (see
+`RoiChannelSeries`'s docstring in data_types.jl for why Command isn't
+ROI-split like the other three: it drives real hardware output, not just
+this plot).
 """
 function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, show_ch2::Bool)
     if plot_label == "Histogram"
         return (app_run.hist_time[], app_run.ch1.histogram[])
     end
 
-    ts = app_run.timestamps[]
     xs = Float64[]
     ys = Float64[]
     shown = shown_channel_series(app_run, show_ch1, show_ch2)
 
     if plot_label == "Photon counts"
-        for (series, _) in shown
+        for (roi_series, _) in shown, series in roi_series
+            ts = series.timestamps[]
             accumulate_windowed!(xs, ys, ts, series.photons[], time_range)
             accumulate_windowed!(xs, ys, ts, series.photons_smooth[], time_range)
         end
@@ -509,16 +543,18 @@ function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, sho
     end
 
     if plot_label == "Lifetime"
-        for (series, _) in shown
+        for (roi_series, _) in shown, series in roi_series
+            ts = series.timestamps[]
             accumulate_windowed!(xs, ys, ts, series.lifetime[], time_range)
             accumulate_windowed!(xs, ys, ts, series.lifetime_smooth[], time_range)
         end
-        accumulate_windowed!(xs, ys, ts, app_run.protocol_setpoint[], time_range)
+        accumulate_windowed!(xs, ys, app_run.timestamps[], app_run.protocol_setpoint[], time_range)
         return (xs, ys)
     end
 
     if plot_label == "Ion concentration"
-        for (series, _) in shown
+        for (roi_series, _) in shown, series in roi_series
+            ts = series.timestamps[]
             accumulate_windowed!(xs, ys, ts, series.concentration[], time_range)
             accumulate_windowed!(xs, ys, ts, series.concentration_smooth[], time_range)
         end
@@ -526,6 +562,7 @@ function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, sho
     end
 
     if plot_label == "Command"
+        ts = app_run.timestamps[]
         accumulate_windowed!(xs, ys, ts, app_run.command1[], time_range)
         accumulate_windowed!(xs, ys, ts, app_run.command2[], time_range)
         return (xs, ys)
@@ -535,30 +572,36 @@ function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, sho
 end
 
 """
-    notify_channel_series!(series::ChannelSeries; include_latest::Bool=false)
+    notify_channel_series!(series::ChannelSeries)
 
-Notify one channel's time-series observables; with `include_latest=true`
-also notify the latest histogram/fit/counts observables.
+Notify one channel's "latest frame" snapshot observables (histogram/fit/counts).
 """
-function notify_channel_series!(series::ChannelSeries; include_latest::Bool=false)
+function notify_channel_series!(series::ChannelSeries)
+    notify(series.histogram)
+    notify(series.fit)
+    notify(series.counts)
+    return nothing
+end
+
+"""
+    notify_roi_channel_series!(series::RoiChannelSeries)
+
+Notify one ROI's per-channel time-series observables (timestamps, photons,
+lifetime, concentration, and their smoothed counterparts).
+"""
+function notify_roi_channel_series!(series::RoiChannelSeries)
+    notify(series.timestamps)
     notify(series.photons)
     notify(series.photons_smooth)
     notify(series.lifetime)
     notify(series.lifetime_smooth)
     notify(series.concentration)
     notify(series.concentration_smooth)
-
-    if include_latest
-        notify(series.histogram)
-        notify(series.fit)
-        notify(series.counts)
-    end
-
     return nothing
 end
 
 function notify_runtime_observables!(app_run)
-    foreach(notify_channel_series!, channel_series(app_run))
+    foreach(notify_roi_channel_series!, roi_channel_series(app_run))
     notify(app_run.protocol_setpoint)
     notify(app_run.command1)
     notify(app_run.command2)

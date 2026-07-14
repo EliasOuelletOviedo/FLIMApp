@@ -227,18 +227,21 @@ function append_smooth_value!(app, source::Observable{Vector{Float64}}, target::
 end
 
 """
-    recompute_channel_smooth!(app, app_run, series::ChannelSeries)
+    recompute_roi_channel_smooth!(app, series::RoiChannelSeries)
 
-Recompute one channel's smoothed photon-count, lifetime, and concentration
-series (see `recompute_smooth_series!`) and notify their observables. Used
-when the smoothing level changes (handlers_layout.jl).
+Recompute one ROI's smoothed photon-count, lifetime, and concentration
+series (see `recompute_smooth_series!`) and notify their observables. Uses
+`series`' own `timestamps` (each ROI has its own, since it only receives
+every Nth frame — see `RoiChannelSeries` in data_types.jl), not a shared
+app-wide one. Used when the smoothing level changes (handlers_layout.jl),
+looping every `roi_channel_series(app_run)`.
 """
-function recompute_channel_smooth!(app, app_run, series::ChannelSeries)
-    recompute_smooth_series!(app, series.photons, series.photons_smooth, app_run.timestamps)
+function recompute_roi_channel_smooth!(app, series::RoiChannelSeries)
+    recompute_smooth_series!(app, series.photons, series.photons_smooth, series.timestamps)
     notify(series.photons_smooth)
-    recompute_smooth_series!(app, series.lifetime, series.lifetime_smooth, app_run.timestamps)
+    recompute_smooth_series!(app, series.lifetime, series.lifetime_smooth, series.timestamps)
     notify(series.lifetime_smooth)
-    recompute_smooth_series!(app, series.concentration, series.concentration_smooth, app_run.timestamps)
+    recompute_smooth_series!(app, series.concentration, series.concentration_smooth, series.timestamps)
     notify(series.concentration_smooth)
     return nothing
 end

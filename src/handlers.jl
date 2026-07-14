@@ -32,7 +32,7 @@ function update_stop_button_label!(app_run, blocks)
     return nothing
 end
 
-function clear_runtime_plots!(app_run)
+function clear_runtime_plots!(app, app_run, blocks)
     n_hist = length(app_run.hist_time[])
 
     for series in channel_series(app_run)
@@ -41,6 +41,12 @@ function clear_runtime_plots!(app_run)
         series.fit[] = fill(NaN, n_hist)
     end
 
+    # Replaces app_run.ch1_rois/ch2_rois wholesale (e.g. the ROI count or the
+    # ROI toggle may have changed since the last run) — render_plot_selection!
+    # below rebuilds the axes to match, same as after
+    # rebuild_roi_channel_series! in start_pressed (runtime.jl).
+    rebuild_roi_channel_series!(app, app_run)
+
     empty!(app_run.protocol_setpoint[])
     empty!(app_run.command1[])
     empty!(app_run.command2[])
@@ -48,12 +54,16 @@ function clear_runtime_plots!(app_run)
     app_run.i[] = 0
     app_run.save_progress[] = NaN
 
-    foreach(s -> notify_channel_series!(s; include_latest=true), channel_series(app_run))
+    foreach(notify_channel_series!, channel_series(app_run))
+    foreach(notify_roi_channel_series!, roi_channel_series(app_run))
     notify(app_run.protocol_setpoint)
     notify(app_run.command1)
     notify(app_run.command2)
     notify(app_run.timestamps)
     notify(app_run.i)
+
+    render_plot_selection!(app, app_run, blocks, :plot1)
+    render_plot_selection!(app, app_run, blocks, :plot2)
     return nothing
 end
 
@@ -101,11 +111,25 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
             if app_run.running[]
                 stop_pressed(app_run)
             end
-            clear_runtime_plots!(app_run)
+            clear_runtime_plots!(app, app_run, blocks)
         end
 
         update_start_button_label!(app_run, blocks)
         update_stop_button_label!(app_run, blocks)
+    end
+
+    # Live, mid-run update: app_run.target_frequency is a Threads.Atomic{Float64}
+    # (not an Observable) that start_playback's worker thread re-reads every
+    # cycle, so writing to it here immediately re-paces a running Playback
+    # acquisition — see acquisition.jl's start_playback docstring.
+    on(blocks.target_freq_textbox.stored_string) do new_string
+        parsed = tryparse(Float64, strip(new_string))
+        if parsed === nothing || !isfinite(parsed) || parsed <= 0
+            @warn "Invalid target frequency; ignoring" value=new_string
+            return
+        end
+
+        app_run.target_frequency[] = parsed
     end
 
     on(blocks.irf_button.clicks) do _

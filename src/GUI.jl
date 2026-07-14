@@ -200,6 +200,8 @@ function make_control_widgets!(button_grid, panelbtn_grid)
     connect = Button(button_grid[4, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
 
     label = Label(button_grid[5, 1], "Frequency: -- Hz\nFile: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
+    default_target_freq_string = string(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ)
+    target_freq = Textbox(button_grid[5, 2]; merge(SPINNER_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Target frequency (Hz)", :displayed_string => default_target_freq_string, :stored_string => default_target_freq_string, :validator => make_float_range_validator(0.01, 1.0e6)))...)
 
     mode = Menu(button_grid[6, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime", "Save"]))...)
     lifetimes = Menu(button_grid[6, 2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["1 lifetime", "2 lifetimes", "3 lifetimes"]))...)
@@ -216,7 +218,8 @@ function make_control_widgets!(button_grid, panelbtn_grid)
 
     return (start_button=start, stop_button=stop, irf_path_textbox=irf_path, irf_button=irf_button,
             folder_path_textbox=folder_path, folder_button=folder_button, port_menu=port,
-            connect_button=connect, info_label=label, mode_menu=mode, lifetimes_menu=lifetimes,
+            connect_button=connect, info_label=label, target_freq_textbox=target_freq,
+            mode_menu=mode, lifetimes_menu=lifetimes,
             panel_buttons=panel, no_port_selected_label=no_port_selected_label)
 end
 
@@ -306,6 +309,7 @@ function make_gui(app, app_run)
         folder_button       = widgets.folder_button,
         port_menu           = widgets.port_menu,
         connect_button      = widgets.connect_button,
+        target_freq_textbox = widgets.target_freq_textbox,
         mode_menu           = widgets.mode_menu,
         lifetimes_menu      = widgets.lifetimes_menu,
         panel_buttons       = widgets.panel_buttons,

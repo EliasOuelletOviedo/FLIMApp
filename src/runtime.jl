@@ -15,12 +15,16 @@ using DataFrames
 using Base.Threads
 
 """
-    accumulate_channel_sample!(app, series::ChannelSeries, frame::ChannelFrame)
+    accumulate_roi_channel_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
 
 Append one frame's scalar results (photons, lifetime, concentration and
-their smoothed values) onto one channel's time-series observables.
+their smoothed values) plus its own timestamp onto one ROI's per-channel
+time-series observables. Which `RoiChannelSeries` a frame is routed to is
+decided by the caller (`consumer_loop`'s round-robin `mod1(frame_index, N)`
+over `app_run.ch1_rois`/`ch2_rois`), not by this function.
 """
-function accumulate_channel_sample!(app, series::ChannelSeries, frame::ChannelFrame)
+function accumulate_roi_channel_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
+    push!(series.timestamps[], timestamp)
     push!(series.photons[], frame.photons)
     append_smooth_value!(app, series.photons, series.photons_smooth)
     push!(series.lifetime[], frame.lifetime)
@@ -111,8 +115,15 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                 ))
             end
 
-            accumulate_channel_sample!(app, app_run.ch1, sample.ch1)
-            accumulate_channel_sample!(app, app_run.ch2, sample.ch2)
+            # Round-robin file->ROI assignment: file 1 -> ROI 1, file 2 ->
+            # ROI 2, ..., file N+1 -> ROI 1 again. n_rois is fixed for the
+            # whole run by rebuild_roi_channel_series! (start_pressed) and
+            # is always >= 1 (a run with zero ROIs drawn keeps today's
+            # single-series behavior via that one-element vector).
+            n_rois = length(app_run.ch1_rois)
+            roi_idx = mod1(Int(sample.frame_index), n_rois)
+            accumulate_roi_channel_sample!(app, app_run.ch1_rois[roi_idx], sample.ch1, sample.timestamps)
+            accumulate_roi_channel_sample!(app, app_run.ch2_rois[roi_idx], sample.ch2, sample.timestamps)
             push!(app_run.protocol_setpoint[], sample.protocol_setpoint)
             push!(app_run.command1[], sample.command1)
             push!(app_run.command2[], sample.command2)
@@ -204,13 +215,26 @@ end
 """
     reset_channel_series!(series::ChannelSeries)
 
-Clear one channel's time-series observables and counters ahead of a fresh
-acquisition run. Does not notify — callers batch their own notifications.
+Clear one channel's "latest frame" counter ahead of a fresh acquisition
+run (histogram/fit are left as-is — callers that want them blanked, e.g.
+clear_runtime_plots! in handlers.jl, NaN-fill them separately). Does not
+notify — callers batch their own notifications.
 """
 function reset_channel_series!(series::ChannelSeries)
+    series.counts[] = 0.0
+    return nothing
+end
+
+"""
+    reset_roi_channel_series!(series::RoiChannelSeries)
+
+Clear one ROI's per-channel time-series observables ahead of a fresh
+acquisition run. Does not notify — callers batch their own notifications.
+"""
+function reset_roi_channel_series!(series::RoiChannelSeries)
+    empty!(series.timestamps[])
     empty!(series.photons[])
     empty!(series.photons_smooth[])
-    series.counts[] = 0.0
     empty!(series.lifetime[])
     empty!(series.lifetime_smooth[])
     empty!(series.concentration[])
@@ -219,12 +243,39 @@ function reset_channel_series!(series::ChannelSeries)
 end
 
 """
-    reset_acquisition_observables!(app_run)
+    rebuild_roi_channel_series!(app, app_run)
+
+Resize `app_run.ch1_rois`/`ch2_rois` to match the current number of drawn
+ROIs (`app_run.rois[]`) — but only when the ROI toggle (`app.roi.active`,
+set in the Protocol panel, handlers_protocol.jl) is on; otherwise always
+resize to 1, so multi-ROI splitting only kicks in when the user has
+explicitly enabled it, regardless of how many ROIs happen to be drawn.
+Discards all previously accumulated per-ROI data. Called ahead of a fresh
+acquisition run (`start_pressed`) and by the CLEAR button
+(`clear_runtime_plots!`, handlers.jl) — either could follow a change to the
+drawn ROI set or the toggle, and the round-robin routing in
+`consumer_loop` (`mod1(frame_index, length(app_run.ch1_rois))`) needs the
+two vectors to always be the same, non-zero length. Callers must re-render
+both plot slots (`render_plot_selection!`, plotting.jl) afterward: this
+replaces the `Observable`s themselves (not just their contents), so any
+existing `lines!` plot objects on the axes are left pointing at
+now-orphaned data.
+"""
+function rebuild_roi_channel_series!(app, app_run)
+    n = app.roi.active ? max(1, length(app_run.rois[])) : 1
+    app_run.ch1_rois = [RoiChannelSeries() for _ in 1:n]
+    app_run.ch2_rois = [RoiChannelSeries() for _ in 1:n]
+    return nothing
+end
+
+"""
+    reset_acquisition_observables!(app, app_run)
 
 Clear all time-series observables and counters ahead of a fresh acquisition run.
 """
-function reset_acquisition_observables!(app_run)
+function reset_acquisition_observables!(app, app_run)
     foreach(reset_channel_series!, channel_series(app_run))
+    rebuild_roi_channel_series!(app, app_run)
     empty!(app_run.protocol_setpoint[])
     empty!(app_run.command1[])
     empty!(app_run.command2[])
@@ -286,7 +337,7 @@ function dispatch_acquisition_worker!(app_run, selected_mode, layout, controller
             initial_guess=initial_guess,
             protocol=protocol_config,
             paused=app_run.paused,
-            target_frequency=1000.0
+            target_frequency=app_run.target_frequency
         )
     elseif selected_mode == "Realtime"
         app_run.worker_task = Threads.@spawn start_realtime(
@@ -326,7 +377,7 @@ function dispatch_acquisition_worker!(app_run, selected_mode, layout, controller
             initial_guess=initial_guess,
             protocol=protocol_config,
             paused=app_run.paused,
-            target_frequency=60.0
+            target_frequency=app_run.target_frequency
         )
     end
 
@@ -381,7 +432,13 @@ function start_pressed(app, app_run, blocks)
     # than just transiently.
     app_run.channel = Channel{AcquisitionSample}(512)
 
-    reset_acquisition_observables!(app_run)
+    reset_acquisition_observables!(app, app_run)
+    # rebuild_roi_channel_series! (inside reset_acquisition_observables!)
+    # replaced app_run.ch1_rois/ch2_rois wholesale, so the plot axes must be
+    # rebuilt to draw one line pair per new RoiChannelSeries instance —
+    # see its docstring.
+    render_plot_selection!(app, app_run, blocks, :plot1)
+    render_plot_selection!(app, app_run, blocks, :plot2)
 
     selected_mode = blocks.mode_menu.selection[]
     if !(selected_mode isa AbstractString)

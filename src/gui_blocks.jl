@@ -38,6 +38,7 @@ Base.@kwdef struct GuiBlocks
     folder_button::Button
     port_menu::Menu
     connect_button::Button
+    target_freq_textbox::Textbox
     mode_menu::Menu
     lifetimes_menu::Menu
     panel_buttons::Dict{Symbol, Button}

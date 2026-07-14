@@ -169,8 +169,8 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         function commit_layout_value!(key::Symbol, value)
             setfield!(app.layout, key, value)
             if key == :smoothing
-                for series in channel_series(app_run)
-                    recompute_channel_smooth!(app, app_run, series)
+                for series in roi_channel_series(app_run)
+                    recompute_roi_channel_smooth!(app, series)
                 end
             end
             save_state(app)

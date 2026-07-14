@@ -334,7 +334,11 @@ end
 
 Worker task for Playback mode: round-robins over all `.sdt` files in
 `get_data_root_path()` on a fixed-frequency schedule (`target_frequency`).
-See `run_acquisition_loop!` for the shared fitting/binning/PID body.
+`target_frequency` is a live `Threads.Atomic{Float64}` (typically
+`app_run.target_frequency`), re-read every cycle rather than captured once,
+so editing the target-frequency textbox (GUI.jl/handlers.jl) re-paces the
+schedule immediately, mid-run. See `run_acquisition_loop!` for the shared
+fitting/binning/PID body.
 """
 function start_playback(
         ch::Channel{AcquisitionSample},
@@ -346,7 +350,7 @@ function start_playback(
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         dt::Float64 = 0.0001,
         use_partial_fit::Bool = true,
-        target_frequency::Float64 = 60.0
+        target_frequency::Threads.Atomic{Float64} = Threads.Atomic{Float64}(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ)
     )
     try
         @info "Playback worker started on thread $(threadid())"
@@ -373,11 +377,15 @@ function start_playback(
             return nothing
         end
 
-        target_period_ns = round(Int, 1e9 / target_frequency)
         next_analysis_ns = Ref(time_ns())
 
         next_file! = function (n)
             while running[]
+                # Re-read every cycle (not captured once) so a live edit to
+                # the target-frequency textbox re-paces the schedule
+                # immediately instead of only on the next worker restart.
+                target_period_ns = round(Int, 1e9 / max(target_frequency[], 0.01))
+
                 if paused !== nothing && paused[]
                     next_analysis_ns[] = time_ns() + target_period_ns
                     sleep(min(dt, 0.02))
