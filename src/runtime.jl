@@ -407,9 +407,15 @@ end
 """
     start_pressed(app, app_run, blocks)
 
-Handler called when the START button is clicked.  It sets up the
-communication channel, resets all time-series observables, and launches
-four background tasks:
+Handler called when the START button is clicked. After its guard checks and
+claiming `running[]`/`paused[]` synchronously, the rest of the work — the
+ROI trigger-box upload, setting up the communication channel, resetting all
+time-series observables, and launching four background tasks — happens on
+its own `@async` task that this function does not wait on (see the comment
+above that task in the body for why: this function's own call stack is
+GLMakie's render-loop task, and blocking it blocks rendering).
+
+The four background tasks:
 
 * **worker_task** - the Playback/Realtime/Save acquisition loop (acquisition.jl)
   that reads data files and pushes samples onto the channel. Launched with
@@ -439,54 +445,91 @@ function start_pressed(app, app_run, blocks)
 
     @info "Starting acquisition"
 
-    # Position the trigger box (if active/connected) before any file-reading
-    # begins, so the first acquired frame already matches the first ROI in
-    # the scan cycle. No-op (see its own docstring) unless ROI mode is on,
-    # a serial device is connected, and at least one ROI is drawn.
-    build_and_send_roi_trigger_buffer!(app, app_run)
-
+    # Claimed synchronously, before any of the async work below, so a second
+    # click arriving while that work is still in flight is still correctly
+    # caught by the "already running" guard above instead of racing in as a
+    # second concurrent start. Neither field has any on(...) listener
+    # (they're plain Threads.Atomic{Bool}, not Observable — data_types.jl),
+    # so setting them early has no other side effect.
     app_run.running[] = true
     app_run.paused[] = false
-    # Capacity: the worker (its own thread since Threads.@spawn, see
-    # dispatch_acquisition_worker!) blocks on put! once this fills, so a
-    # transient GUI-thread slowdown (a GC pause, a Makie redraw, a
-    # smoothing-slider recompute) directly stalls the fit loop too, not
-    # just the display. 32 gave the worker under 100ms of headroom at
-    # realistic frame rates; 512 costs a few hundred KB more (each sample
-    # holds two Vector{Float64} histograms) and absorbs multi-second GC/JIT
-    # pauses without back-pressuring the worker, while still bounding
-    # worst-case backlog if the consumer falls behind persistently rather
-    # than just transiently.
-    app_run.channel = Channel{AcquisitionSample}(512)
 
-    reset_acquisition_observables!(app, app_run)
-    # rebuild_roi_channel_series! (inside reset_acquisition_observables!)
-    # replaced app_run.ch1_rois/ch2_rois wholesale, so the plot axes must be
-    # rebuilt to draw one line pair per new RoiChannelSeries instance —
-    # see its docstring.
-    render_plot_selection!(app, app_run, blocks, :plot1)
-    render_plot_selection!(app, app_run, blocks, :plot2)
+    # Everything below is real work — the ROI trigger-box upload alone can
+    # be 1000+ blocking serial round trips — so none of it runs directly in
+    # this function's own call stack. start_pressed is invoked synchronously
+    # from GLMakie's own render-loop task: button clicks are dispatched via
+    # GLFW.PollEvents() from inside that loop's while-loop (GLMakie
+    # screen.jl), so this function's call stack *is* that task. Blocking it
+    # — even indirectly, e.g. a wait() on some other task — blocks the
+    # render loop itself; nothing else can step in to draw a frame while
+    # it's suspended waiting. The previous attempt at this
+    # (`wait(@async build_and_send_roi_trigger_buffer!(...))`) still did
+    # exactly that, which is why the save_progress bar it drives (roi.jl)
+    # stayed invisible. Returning immediately here and doing the real work
+    # on its own task instead — never waited on from this call stack, same
+    # as consumer_task/serial_task/infos_task always have been — is what
+    # actually lets rendering keep happening while this runs.
+    @async begin
+        # Position the trigger box (if active/connected) before any
+        # file-reading begins, so the first acquired frame already matches
+        # the first ROI in the scan cycle. No-op (see its own docstring)
+        # unless ROI mode is on, a serial device is connected, and at least
+        # one ROI is drawn.
+        build_and_send_roi_trigger_buffer!(app, app_run)
 
-    selected_mode = blocks.mode_menu.selection[]
-    if !(selected_mode isa AbstractString)
-        selected_mode = "Playback"
+        # The GUI stays responsive during that upload now (that's the point
+        # of this task), which makes it newly possible for the user to
+        # click STOP while it's still running — stop_pressed (below) would
+        # see running[] already true and run its shutdown against state
+        # (channel/worker_task/...) this function hasn't created yet. Bail
+        # out here instead of dispatching a worker the user just asked to
+        # stop before it ever started.
+        if !app_run.running[]
+            @info "Acquisition stopped before it finished starting (during ROI trigger-box upload)"
+            return nothing
+        end
+
+        # Capacity: the worker (its own thread since Threads.@spawn, see
+        # dispatch_acquisition_worker!) blocks on put! once this fills, so a
+        # transient GUI-thread slowdown (a GC pause, a Makie redraw, a
+        # smoothing-slider recompute) directly stalls the fit loop too, not
+        # just the display. 32 gave the worker under 100ms of headroom at
+        # realistic frame rates; 512 costs a few hundred KB more (each sample
+        # holds two Vector{Float64} histograms) and absorbs multi-second GC/JIT
+        # pauses without back-pressuring the worker, while still bounding
+        # worst-case backlog if the consumer falls behind persistently rather
+        # than just transiently.
+        app_run.channel = Channel{AcquisitionSample}(512)
+
+        reset_acquisition_observables!(app, app_run)
+        # rebuild_roi_channel_series! (inside reset_acquisition_observables!)
+        # replaced app_run.ch1_rois/ch2_rois wholesale, so the plot axes must be
+        # rebuilt to draw one line pair per new RoiChannelSeries instance —
+        # see its docstring.
+        render_plot_selection!(app, app_run, blocks, :plot1)
+        render_plot_selection!(app, app_run, blocks, :plot2)
+
+        selected_mode = blocks.mode_menu.selection[]
+        if !(selected_mode isa AbstractString)
+            selected_mode = "Playback"
+        end
+
+        selected_lifetimes = blocks.lifetimes_menu.selection[]
+        if !(selected_lifetimes isa AbstractString)
+            selected_lifetimes = "2 lifetimes"
+        end
+
+        initial_guess = initial_guess_for_lifetime_count(selected_lifetimes)
+
+        sync_runtime_protocol!(app, app_run)
+        protocol_config = app_run.protocol
+
+        dispatch_acquisition_worker!(app_run, selected_mode, app.layout, app.controller, initial_guess, protocol_config)
+
+        app_run.consumer_task = @async consumer_loop(app, app_run, blocks; rate=10, acquisition_mode=selected_mode)
+        app_run.serial_task = @async serial_signal_loop(app, app_run; rate=20.0)
+        app_run.infos_task = @async infos_loop(app_run, blocks.info_label; rate=1)
     end
-
-    selected_lifetimes = blocks.lifetimes_menu.selection[]
-    if !(selected_lifetimes isa AbstractString)
-        selected_lifetimes = "2 lifetimes"
-    end
-
-    initial_guess = initial_guess_for_lifetime_count(selected_lifetimes)
-
-    sync_runtime_protocol!(app, app_run)
-    protocol_config = app_run.protocol
-
-    dispatch_acquisition_worker!(app_run, selected_mode, app.layout, app.controller, initial_guess, protocol_config)
-
-    app_run.consumer_task = @async consumer_loop(app, app_run, blocks; rate=10, acquisition_mode=selected_mode)
-    app_run.serial_task = @async serial_signal_loop(app, app_run; rate=20.0)
-    app_run.infos_task = @async infos_loop(app_run, blocks.info_label; rate=1)
 
     return nothing
 end

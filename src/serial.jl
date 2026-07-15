@@ -68,12 +68,23 @@ function serial_port_candidates(port_name::AbstractString)::Vector{String}
 end
 
 """
-    connect_to_port(port_name::AbstractString; baudrate::Integer=115200, timeout_sec::Integer=3)
+    connect_to_port(port_name::AbstractString; baudrate::Integer=115200, timeout_sec::Integer=3, settle_sec::Real=2.0)
 
 Attempt to connect to a serial port from a menu display name.
 Returns an open serial handle on success, or `nothing` on failure.
+
+`settle_sec` is how long to wait after opening the port before returning it
+ready to use. Many USB-serial boards (Arduino-compatible ones especially)
+reboot when the host opens the port (DTR toggling resets the MCU) and can't
+respond to anything until that reboot finishes — this used to be a flat
+`sleep(0.1)`, nowhere near a typical board's boot time, so the very first
+command sent right after connecting (the ROI trigger-box upload, roi.jl,
+if ROI mode is active) would time out waiting for a device that was still
+booting; every command after that worked fine since by then the board had
+finished rebooting and the *port* stays open across acquisition start/stop
+without reconnecting.
 """
-function connect_to_port(port_name::AbstractString; baudrate::Integer=115200, timeout_sec::Integer=3)
+function connect_to_port(port_name::AbstractString; baudrate::Integer=115200, timeout_sec::Integer=3, settle_sec::Real=2.0)
     candidates = serial_port_candidates(port_name)
     if isempty(candidates)
         @warn "No port selected"
@@ -86,7 +97,7 @@ function connect_to_port(port_name::AbstractString; baudrate::Integer=115200, ti
         try
             ser = LibSerialPort.open(device, baudrate)
             LibSerialPort.set_read_timeout(ser, timeout_sec)
-            sleep(0.1)
+            sleep(settle_sec)
             @info "Connection successful" device=device baudrate=baudrate
             return ser
         catch e
@@ -296,8 +307,8 @@ function serial_signal_loop(app, app_run; rate=10.0)
             cmd1 = last_or_nan(app_run.command1[])
             cmd2 = last_or_nan(app_run.command2[])
 
-            write_pwm_command!(serial_conn, 1, frequency, cmd1)
-            write_pwm_command!(serial_conn, 2, frequency, cmd2)
+            write_pwm_command!(serial_conn, 3, frequency, cmd1)
+            write_pwm_command!(serial_conn, 4, frequency, cmd2)
         catch e
             @warn "Serial signal send failed" error=string(e)
 
