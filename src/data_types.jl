@@ -375,6 +375,14 @@ during execution. It is NOT serialized.
   (acquisition.jl) reads it every cycle from its own worker thread
   (`Threads.@spawn`), not the GUI thread; the target-frequency textbox
   (GUI.jl/handlers.jl) writes to it live, so it takes effect mid-run
+- `imported_image_size::Tuple{Int,Int}`: `(width, height)` in pixels of the
+  most recently imported ROI-popup image (roi_popup.jl's `im_import_button`
+  handler) — `rois[]`'s coordinates are in this image's own pixel space.
+  Read by `roi_trigger_buffer` (roi.jl) to correct for an image shorter
+  than the trigger box's voltage calibration reference (see its docstring).
+  Defaults to `(1024, 1024)`, matching that calibration reference, so a run
+  started before any image has been imported this session behaves as if no
+  correction were needed.
 """
 mutable struct AppRun
     channel::Union{Channel{AcquisitionSample}, Nothing}
@@ -400,6 +408,7 @@ mutable struct AppRun
     protocol::Observable{ProtocolSettings}
     rois::Observable{Vector{RoiCoordinates}}
     target_frequency::Threads.Atomic{Float64}
+    imported_image_size::Tuple{Int,Int}
 end
 
 """
@@ -435,6 +444,7 @@ function AppRun()
         Observable(collect(1:DEFAULT_HISTOGRAM_RESOLUTION)),
         Observable(ProtocolSettings()),
         Observable(RoiCoordinates[]),
-        Threads.Atomic{Float64}(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ)
+        Threads.Atomic{Float64}(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ),
+        (1024, 1024)
     )
 end

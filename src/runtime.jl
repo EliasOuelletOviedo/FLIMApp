@@ -561,6 +561,11 @@ function stop_pressed(app_run)
         try
             send_command(app_run.serial_conn, "A 0 AO 1 0\n")
             send_command(app_run.serial_conn, "A 0 AO 2 0\n")
+            send_command(app_run.serial_conn, "A 0 AO 3 0\n")
+            send_command(app_run.serial_conn, "A 0 AO 4 0\n")
+            send_command(app_run.serial_conn, "A 0 DO 1 0\n")
+            send_command(app_run.serial_conn, "A 0 DO 2 0\n")
+            send_command(app_run.serial_conn, "A 0 DO 3 0\n")
         catch e
             @warn "Failed to send zero-signal command during stop" error=string(e)
         end

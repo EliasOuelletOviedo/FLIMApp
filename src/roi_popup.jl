@@ -508,6 +508,11 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         x_offset = (canvas_size - n_cols) ÷ 2
         y_offset = (canvas_size - n_rows) ÷ 2
         image_offset[] = (x_offset, y_offset)
+        # Recorded so roi.jl's trigger-box voltage mapping can apply this
+        # same centering to app_run.rois's coordinates (in this image's own,
+        # un-padded pixel space) at Start-button time, long after this popup
+        # and its local x_offset/y_offset above have gone away.
+        app_run.imported_image_size = (n_cols, n_rows)
 
         image_plot[] = heatmap!(image_axis, x_offset:(x_offset + n_cols - 1), y_offset:(y_offset + n_rows - 1), intensity, colormap = :grays)
         limits!(image_axis, 0, canvas_size, 0, canvas_size)

@@ -29,11 +29,19 @@ using Statistics
 # Plain variables, not `const` — meant to be hand-edited in this file
 # (not promoted to config.jl) as the trigger-box setup is tuned.
 
-# Full image pixel dimensions the ROIs were drawn against — needed to map
-# pixel coordinates to the trigger box's voltage range below. Must match
-# the actual imported/displayed image (roi_popup.jl); update if that changes.
-roi_image_width = 1024
-roi_image_height = 1024
+# Reference image size (pixels, square) the trigger-box voltage extremes
+# below were calibrated against: a 1024x1024 image maps its full pixel
+# extent onto the full voltage range. Real acquisitions are always 1024
+# wide but can be shorter than 1024 tall (e.g. a 1024x512 scan) — rather
+# than rescale a shorter image to fill the full voltage range (which would
+# use a *different* voltage-per-pixel scale than this calibration),
+# roi_trigger_buffer shifts a shorter image's ROI coordinates so they sit
+# centered within this same 1024x1024 reference frame before converting to
+# voltage, using the actual imported image size (app_run.imported_image_size,
+# recorded at import time by roi_popup.jl) to compute that shift — matching
+# roi_popup.jl's own canvas-centering (image_offset) for the on-screen
+# display of that same image.
+roi_voltage_calibration_size = 1024
 
 # Galvo output voltage range for each axis.
 trigger_box_v_min_x = -1000
@@ -372,7 +380,7 @@ to_voltage(coord::Real, n_pixels::Real, v_min::Real, v_max::Real) =
     -(v_min + (coord - 1) * (v_max - v_min) / (n_pixels - 1))
 
 """
-    roi_trigger_buffer(app, rois::Vector{RoiCoordinates})::Vector{Tuple{Int64,Int64}}
+    roi_trigger_buffer(app, app_run, rois::Vector{RoiCoordinates})::Vector{Tuple{Int64,Int64}}
 
 Build the galvo trigger-box scan buffer for `rois`, in voltage units: an
 optimized-order tour across ROI centers (`optimize_centers`), each followed
@@ -382,12 +390,22 @@ the first, and a final dwell back at the first ROI's center to close the
 cycle. Scan timing (`app.protocol.points_per_roi`/`.spiral_turns`/
 `.scan_time`/`.shift_time`) is read from `app` — GUI-editable via the
 Protocol panel, handlers_protocol.jl.
+
+`rois`' coordinates are in `app_run.imported_image_size`'s own pixel space,
+which can be shorter (in height) than `roi_voltage_calibration_size`'s
+1024x1024 calibration reference — shifted to sit centered within that
+reference frame before conversion to voltage; see that constant's
+docstring for why.
 """
-function roi_trigger_buffer(app, rois::Vector{RoiCoordinates})::Vector{Tuple{Int64,Int64}}
+function roi_trigger_buffer(app, app_run, rois::Vector{RoiCoordinates})::Vector{Tuple{Int64,Int64}}
     isempty(rois) && return Tuple{Int64,Int64}[]
 
     points_per_roi = app.protocol.points_per_roi
     dwell_points = round(Int, app.protocol.shift_time / app.protocol.scan_time * points_per_roi)
+
+    image_width, image_height = app_run.imported_image_size
+    x_shift = (roi_voltage_calibration_size - image_width) / 2
+    y_shift = (roi_voltage_calibration_size - image_height) / 2
 
     centers = [centroid_center(roi.xs, roi.ys) for roi in rois]
     ordered_centers = optimize_centers(centers)
@@ -399,12 +417,12 @@ function roi_trigger_buffer(app, rois::Vector{RoiCoordinates})::Vector{Tuple{Int
     for roi in ordered_rois
         cx, cy = centroid_center(roi.xs, roi.ys)
         center_v = (
-            round(Int64, to_voltage(cx, roi_image_width, trigger_box_v_min_x, trigger_box_v_max_x)),
-            round(Int64, to_voltage(cy, roi_image_height, trigger_box_v_min_y, trigger_box_v_max_y))
+            round(Int64, to_voltage(cx + x_shift, roi_voltage_calibration_size, trigger_box_v_min_x, trigger_box_v_max_x)),
+            round(Int64, to_voltage(cy + y_shift, roi_voltage_calibration_size, trigger_box_v_min_y, trigger_box_v_max_y))
         )
 
-        xs_v = [to_voltage(x, roi_image_width, trigger_box_v_min_x, trigger_box_v_max_x) for x in roi.xs]
-        ys_v = [to_voltage(y, roi_image_height, trigger_box_v_min_y, trigger_box_v_max_y) for y in roi.ys]
+        xs_v = [to_voltage(x + x_shift, roi_voltage_calibration_size, trigger_box_v_min_x, trigger_box_v_max_x) for x in roi.xs]
+        ys_v = [to_voltage(y + y_shift, roi_voltage_calibration_size, trigger_box_v_min_y, trigger_box_v_max_y) for y in roi.ys]
 
         if first_center_v === nothing
             first_center_v = center_v
@@ -468,8 +486,8 @@ function build_and_send_roi_trigger_buffer!(app, app_run)
         end
 
         try
-            @info "Building ROI trigger-box scan buffer" n_rois=length(rois) points_per_roi=app.protocol.points_per_roi attempt=attempt
-            buffer = roi_trigger_buffer(app, rois)
+            @info "Building ROI trigger-box scan buffer" n_rois=length(rois) points_per_roi=app.protocol.points_per_roi image_size=app_run.imported_image_size attempt=attempt
+            buffer = roi_trigger_buffer(app, app_run, rois)
 
             @info "Uploading ROI trigger-box scan buffer" n_points=length(buffer)
             app_run.save_progress[] = 0.0
