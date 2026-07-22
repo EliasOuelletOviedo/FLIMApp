@@ -26,11 +26,11 @@ over `app_run.ch1_rois`/`ch2_rois`), not by this function.
 function accumulate_roi_channel_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
     push!(series.timestamps[], timestamp)
     push!(series.photons[], frame.photons)
-    append_smooth_value!(app, series.photons, series.photons_smooth)
+    append_smooth_value!(app, series.photons, series.photons_smooth, series.timestamps, series.photons_kalman)
     push!(series.lifetime[], frame.lifetime)
-    append_smooth_value!(app, series.lifetime, series.lifetime_smooth)
+    append_smooth_value!(app, series.lifetime, series.lifetime_smooth, series.timestamps, series.lifetime_kalman)
     push!(series.concentration[], frame.concentration)
-    append_smooth_value!(app, series.concentration, series.concentration_smooth)
+    append_smooth_value!(app, series.concentration, series.concentration_smooth, series.timestamps, series.concentration_kalman)
     return nothing
 end
 

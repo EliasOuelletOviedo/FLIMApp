@@ -225,7 +225,7 @@ Draw the Ion concentration plot's series onto `axis`: each shown channel's
 raw concentration and its smoothed trace, one line pair per ROI — same
 per-ROI superimposed-same-color-no-legend treatment as
 `draw_lifetime_plot!` (see its docstring), using the exact same smoothing
-(compute_lifetime_smooth_at, see smoothing.jl). Shared by the Menu-selection
+(kalman_update!, see smoothing.jl). Shared by the Menu-selection
 handler and the initial-selection draw for the same reason as
 `draw_lifetime_plot!`.
 """
@@ -251,7 +251,7 @@ Draw the Photon counts plot's series onto `axis`: each shown channel's raw
 photon-count trace and its smoothed trace, one line pair per ROI — same
 per-ROI superimposed-same-color-no-legend treatment as
 `draw_lifetime_plot!` (see its docstring), using the exact same smoothing
-(compute_lifetime_smooth_at, see smoothing.jl). Shared by the Menu-selection
+(kalman_update!, see smoothing.jl). Shared by the Menu-selection
 handler and the initial-selection draw for the same reason as
 `draw_lifetime_plot!`.
 """

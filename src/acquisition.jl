@@ -42,7 +42,7 @@ end
     ChannelFitState
 
 One TCSPC channel's per-frame accumulator state for `run_acquisition_loop!`:
-sliding-window binning buffer, current MLE fit parameters, and PID error
+sliding-window binning buffer, current MLE fit parameters, and PI error
 accumulators. Not persisted/Observable like `AppState`/`AppRun` — this is
 purely acquisition-loop-internal state, one instance per channel.
 """
@@ -57,10 +57,7 @@ mutable struct ChannelFitState
     first_fit_pending::Bool
     I_error::Float64
     old_error::Float64
-    D_error::Float64
-    pid_prev_smooth_lifetime::Float64
-    pid_prev_raw_lifetime::Float64
-    pid_scale_est::Float64
+    pid_kalman::KalmanState
 end
 
 function ChannelFitState(initial_guess::Vector{Float64})
@@ -68,29 +65,32 @@ function ChannelFitState(initial_guess::Vector{Float64})
         zeros(100, DEFAULT_HISTOGRAM_RESOLUTION), 100,
         zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION), 1, 0,
         copy(initial_guess), copy(initial_guess), true,
-        0.0, 0.0, 0.0, NaN, NaN, 1.0e-6
+        0.0, 0.0, KalmanState()
     )
 end
 
 """
-    pid_command_from_state(state, setpoint_ns, P, I, D, inv, on)::Float64
+    pid_command_from_state(state, setpoint_ns, P, I, inv, on)::Float64
 
-Apply one controller's gains to `state`'s current error terms (`state.
-old_error` holds the latest P_error, `state.I_error`/`state.D_error` the
-integral/derivative terms — all just set by `process_channel_frame!`). Split
-out from `process_channel_frame!` so a single-channel acquisition (no second
-SDT channel in the file) can still drive controller 2's output from channel
-1's error dynamics with controller 2's own gains — this is exactly the
-original single-channel behavior (`command1`/`command2` were always two
-gain-weighted views of one shared error before channel 2 existed), preserved
-for files that only ever have one channel.
+Apply one controller's P/I gains to `state`'s current error terms (`state.
+old_error` holds the latest P_error, `state.I_error` the integral term —
+both just set by `process_channel_frame!`). No `D` term: the derivative
+was dropped in favor of `state.pid_kalman` (a Kalman observer) filtering
+the lifetime that `P_error` is computed from — see
+`process_channel_frame!`'s docstring. Split out from `process_channel_frame!`
+so a single-channel acquisition (no second SDT channel in the file) can
+still drive controller 2's output from channel 1's error dynamics with
+controller 2's own gains — this is exactly the original single-channel
+behavior (`command1`/`command2` were always two gain-weighted views of one
+shared error before channel 2 existed), preserved for files that only ever
+have one channel.
 """
-function pid_command_from_state(state::ChannelFitState, setpoint_ns::Float64, P::Float64, I::Float64, D::Float64, inv::Bool, on::Bool)::Float64
+function pid_command_from_state(state::ChannelFitState, setpoint_ns::Float64, P::Float64, I::Float64, inv::Bool, on::Bool)::Float64
     if isnan(setpoint_ns)
         return NaN
     end
 
-    command = P*state.old_error + I*state.I_error + D*state.D_error
+    command = P*state.old_error + I*state.I_error
     if inv
         command = -command
     end
@@ -101,15 +101,23 @@ end
 """
     process_channel_frame!(state, vector, histogram_resolution, n, layout, ctx,
                             partial_fit_enabled, partial_fit_period,
-                            setpoint_ns, frame_time, P, I, D, inv, on)
+                            setpoint_ns, frame_time, P, I, inv, on)
         -> (ChannelFrame, command)
 
 One TCSPC channel's per-frame work: sliding-window histogram binning, MLE
-lifetime fit (full or partial), and PID command computation — mutating
+lifetime fit (full or partial), and PI command computation — mutating
 `state` in place. `run_acquisition_loop!` calls this once per channel per
 frame with that channel's own `ChannelFitState` and controller sub-config
-(P1/I1/D1/ch1_inv/ch1_on vs P2/I2/D2/ch2_inv/ch2_on), so each channel is fit
-and controlled completely independently when both are present.
+(P1/I1/ch1_inv/ch1_on vs P2/I2/ch2_inv/ch2_on), so each channel is fit and
+controlled completely independently when both are present.
+
+The raw per-frame MLE-fit lifetime is filtered through `state.pid_kalman`
+(a constant-velocity Kalman observer, `kalman_update!`/smoothing.jl) before
+`P_error`/`I_error` are computed from it — this is what let the controller
+drop its `D` term (PID -> PI): a raw discrete derivative amplifies fit
+noise badly, while the observer's own velocity state tracks the lifetime's
+trend directly from a model of its dynamics instead of differentiating a
+noisy signal.
 """
 function process_channel_frame!(
         state::ChannelFitState,
@@ -122,7 +130,7 @@ function process_channel_frame!(
         partial_fit_period::Int,
         setpoint_ns::Float64,
         frame_time::Float32,
-        P::Float64, I::Float64, D::Float64,
+        P::Float64, I::Float64,
         inv::Bool, on::Bool
     )
     # Store in circular buffer
@@ -190,28 +198,19 @@ function process_channel_frame!(
     concentration = (9.5 / lifetime - 1) / 0.025
 
     smooth_level = layout_smoothing_level(layout)
-    lifetime_for_pid, state.pid_prev_smooth_lifetime, state.pid_prev_raw_lifetime, state.pid_scale_est =
-        update_pid_lifetime_kalman(
-            lifetime,
-            state.pid_prev_smooth_lifetime,
-            state.pid_prev_raw_lifetime,
-            state.pid_scale_est,
-            smooth_level
-        )
+    dt_sample = max(Float64(frame_time), eps(Float64))
+    lifetime_for_pid = kalman_update!(state.pid_kalman, lifetime, dt_sample, smooth_level)
 
     if !isnan(setpoint_ns)
-        dt_sample = max(Float64(frame_time), eps(Float64))
         P_error = setpoint_ns - lifetime_for_pid
         state.I_error += P_error * dt_sample
-        state.D_error = (P_error - state.old_error) / dt_sample
         state.old_error = P_error
     else
         state.I_error = 0.0
         state.old_error = 0.0
-        state.D_error = 0.0
     end
 
-    command = pid_command_from_state(state, setpoint_ns, P, I, D, inv, on)
+    command = pid_command_from_state(state, setpoint_ns, P, I, inv, on)
 
     return ChannelFrame(histogram, fit, photons, lifetime, concentration), command
 end
@@ -301,21 +300,21 @@ function run_acquisition_loop!(
         frame1, command1 = process_channel_frame!(
             state1, vector1, histogram_resolution, n, layout, ctx,
             partial_fit_enabled, partial_fit_period, setpoint_ns, frame_time,
-            controller.P1, controller.I1, controller.D1, controller.ch1_inv, controller.ch1_on
+            controller.P1, controller.I1, controller.ch1_inv, controller.ch1_on
         )
 
         if has_channel2
             frame2, command2 = process_channel_frame!(
                 state2, vector2, histogram_resolution, n, layout, ctx,
                 partial_fit_enabled, partial_fit_period, setpoint_ns, frame_time,
-                controller.P2, controller.I2, controller.D2, controller.ch2_inv, controller.ch2_on
+                controller.P2, controller.I2, controller.ch2_inv, controller.ch2_on
             )
         else
             # No second SDT channel: controller 2's output still tracks
             # channel 1's lifetime error (its own gains applied to channel
             # 1's error dynamics), exactly matching pre-two-channel behavior.
             frame2 = ChannelFrame()
-            command2 = pid_command_from_state(state1, setpoint_ns, controller.P2, controller.I2, controller.D2, controller.ch2_inv, controller.ch2_on)
+            command2 = pid_command_from_state(state1, setpoint_ns, controller.P2, controller.I2, controller.ch2_inv, controller.ch2_on)
         end
 
         # UInt32(1), not the literal 1 (Int64): n += 1 would silently

@@ -109,7 +109,11 @@ end
 """
     ControllerSettings
 
-Hardware controller configuration for the two PID output channels.
+Hardware controller configuration for the two PI output channels. No `D`
+gain: the derivative term was dropped in favor of a Kalman observer
+(`KalmanState`/`kalman_update!`, smoothing.jl) feeding the P/I error terms a
+filtered lifetime instead of the raw fit — see `process_channel_frame!`
+(acquisition.jl).
 """
 Base.@kwdef mutable struct ControllerSettings
     ch1_inv::Bool = false
@@ -119,14 +123,12 @@ Base.@kwdef mutable struct ControllerSettings
     freq::Int = 1000
     P1::Float64 = 0.0
     I1::Float64 = 0.0
-    D1::Float64 = 0.0
     ch2_inv::Bool = false
     ch2_on::Bool = false
     ch2_out::String = "Out 2"
     ch2_mode::String = "Digital"
     P2::Float64 = 0.0
     I2::Float64 = 0.0
-    D2::Float64 = 0.0
 end
 
 """
@@ -267,6 +269,47 @@ way to iterate "for each channel" over an `AppRun` for Histogram-plot data.
 channel_series(app_run) = (app_run.ch1, app_run.ch2)
 
 """
+    KalmanState
+
+Constant-velocity (2-state) Kalman filter state: estimated value (`pos`)
+and its rate of change (`vel`), their 2x2 covariance (`p11`/`p12`/`p22`),
+and an adaptively-tracked measurement-noise estimate (`r_est`, updated from
+successive raw measurements the same way the pre-Kalman heuristic's own
+`scale_est` was) used as the filter's own `R` term. `prev_raw` is the last
+raw (unfiltered) measurement seen, needed to compute `r_est`'s update.
+`typical_dt` is an EMA of the elapsed time between updates — needed because
+the process-noise growth `kalman_update!` applies over an interval `dt`
+scales as `dt^3`, so a `q` intensity calibrated for one acquisition's
+cadence would over- or under-smooth badly at another's (real files here
+have ranged from ~20ms to ~118s between frames); `q` is derived from
+`typical_dt`, not a fixed absolute constant, so "level 10" means the same
+relative amount of smoothing regardless of how fast frames actually arrive.
+
+One instance per (channel, metric) drives the PID observer
+(`ChannelFitState.pid_kalman`, acquisition.jl) and one per (channel, ROI,
+metric) drives plot smoothing (`RoiChannelSeries`, below) — same filter
+(`kalman_update!`, smoothing.jl), independent state in each case, since ROI
+mode's per-line smoothing stays independent from the PID's own observer
+(each ROI only sees every Nth frame; the PID observer sees every frame).
+
+`KalmanState()`'s all-`NaN`(/`0.0`-velocity) default is this filter's "never
+seen a sample yet" sentinel — `kalman_update!` (re)initializes properly
+from the first real measurement it's given.
+"""
+mutable struct KalmanState
+    pos::Float64
+    vel::Float64
+    p11::Float64
+    p12::Float64
+    p22::Float64
+    r_est::Float64
+    prev_raw::Float64
+    typical_dt::Float64
+end
+
+KalmanState() = KalmanState(NaN, 0.0, NaN, 0.0, NaN, NaN, NaN, NaN)
+
+"""
     RoiChannelSeries
 
 One ROI's accumulated runtime time series for one TCSPC channel — the unit
@@ -279,18 +322,27 @@ original single-series design did.
 
 # Fields
 - `timestamps::Observable{Vector{Float64}}`: this ROI's own frame timestamps
-- `photons::Observable{Vector{Float64}}` / `photons_smooth`: photon-count time series
-- `lifetime::Observable{Vector{Float64}}` / `lifetime_smooth`: fitted-lifetime time series
-- `concentration::Observable{Vector{Float64}}` / `concentration_smooth`: ion-concentration time series
+- `photons::Observable{Vector{Float64}}` / `photons_smooth` / `photons_kalman`: photon-count time series and its live Kalman filter state
+- `lifetime::Observable{Vector{Float64}}` / `lifetime_smooth` / `lifetime_kalman`: fitted-lifetime time series and its live Kalman filter state
+- `concentration::Observable{Vector{Float64}}` / `concentration_smooth` / `concentration_kalman`: ion-concentration time series and its live Kalman filter state
+
+The `_kalman` fields (`KalmanState`) are `smoothing.jl`'s `kalman_update!`
+running state for that metric's `_smooth` series — not plotted directly,
+just carried so `append_smooth_value!` can pick up where the last call left
+off, and reinitialized (not persisted) across a `recompute_smooth_series!`
+replay — see that function's docstring for why that's fine.
 """
 struct RoiChannelSeries
     timestamps::Observable{Vector{Float64}}
     photons::Observable{Vector{Float64}}
     photons_smooth::Observable{Vector{Float64}}
+    photons_kalman::KalmanState
     lifetime::Observable{Vector{Float64}}
     lifetime_smooth::Observable{Vector{Float64}}
+    lifetime_kalman::KalmanState
     concentration::Observable{Vector{Float64}}
     concentration_smooth::Observable{Vector{Float64}}
+    concentration_kalman::KalmanState
 end
 
 function RoiChannelSeries()
@@ -298,10 +350,13 @@ function RoiChannelSeries()
         Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),
+        KalmanState(),
         Observable(Float64[]),
         Observable(Float64[]),
+        KalmanState(),
         Observable(Float64[]),
-        Observable(Float64[])
+        Observable(Float64[]),
+        KalmanState()
     )
 end
 
