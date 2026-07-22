@@ -496,7 +496,7 @@ BUTTON_ATTRS = Dict{Symbol, Any}(
     :strokewidth        => 0,
     :tellheight         => true,
     :tellwidth          => true,
-    :valign             => :center, 
+    :valign             => :center,
     :width              => 112
 )
 
@@ -537,7 +537,7 @@ PANEL_ATTRS = Dict{Symbol, Any}(
     :strokewidth        => 0,
     :tellheight         => true,
     :tellwidth          => true,
-    :valign             => :center, 
+    :valign             => :center,
     :width              => nothing
 )
 
@@ -635,7 +635,7 @@ SPINNER_UP_ATTRS = Dict{Symbol, Any}(
     :strokewidth        => 0.2,
     :tellheight         => true,
     :tellwidth          => true,
-    :valign             => :top, 
+    :valign             => :top,
     :width              => 24
 )
 
@@ -660,7 +660,7 @@ SPINNER_DOWN_ATTRS = Dict{Symbol, Any}(
     :strokewidth        => 0.2,
     :tellheight         => true,
     :tellwidth          => true,
-    :valign             => :bottom, 
+    :valign             => :bottom,
     :width              => 24
 )
 
@@ -700,7 +700,7 @@ TOGGLE_ATTRS = Dict{Symbol, Any}(
     :tellheight         => false,
     :tellwidth          => true,
     :toggleduration     => 0.15,
-    :valign             => :center, 
+    :valign             => :center,
     :width              => 20
 )
 
@@ -758,6 +758,6 @@ PATH_BUTTON_ATTRS = Dict{Symbol, Any}(
     :strokewidth        => 0,
     :tellheight         => true,
     :tellwidth          => true,
-    :valign             => :center, 
+    :valign             => :center,
     :width              => 24
 )

@@ -154,13 +154,9 @@ function default_field_value(::Type{T}, name::Symbol) where T
 end
 
 """
-    save_state(state::AppState; path::String)
+    save_state(state::AppState; path=state_file_path())
 
-Serialize application state to disk as a plain `Dict` (see `struct_to_dict`).
-
-# Arguments
-- `state::AppState`: persistent configuration to save
-- `path::String`: file path (default: `state_file_path()` from config)
+Serialize `state` to disk as a plain `Dict` (see `struct_to_dict`).
 """
 function save_state(state::AppState; path::String=state_file_path())
     try
@@ -196,18 +192,10 @@ function valid_app_state(state)::Bool
 end
 
 """
-    load_state(path::String)::AppState
+    load_state(path=state_file_path())::Union{AppState, Nothing}
 
-Deserialize application state from disk.
-
-Returns cached state if file exists and is well-formed (see
-`valid_app_state`); otherwise returns nothing.
-
-# Arguments
-- `path::String`: file path (default: `state_file_path()` from config)
-
-# Returns
-- `AppState` if the file exists and is valid, `nothing` otherwise
+Deserialize state from disk, returning the `AppState` if the file exists and
+is well-formed (see `valid_app_state`), or `nothing` otherwise.
 """
 function load_state(path::String=state_file_path())
     if !isfile(path)

@@ -46,7 +46,7 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
         Box(panel_grid[7, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[8, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[9, 4:6]; SPINNER_BOX_ATTRS...)
-        
+
         protocol_params = Dict{Symbol, Any}(
             :PWM_frequency  => (Textbox(panel_grid[3, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.PWM_frequency), :stored_string => string(app.protocol.PWM_frequency)))...),
                                  Button(panel_grid[3, 4:6];  SPINNER_UP_ATTRS...),
@@ -133,7 +133,7 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
             open_roi_popup!(app, app_run, roi_popup_screen)
         end
 
-        [colsize!(panel_grid, n, 28) for n in 1:6]
+        foreach(n -> colsize!(panel_grid, n, 28), 1:6)
         colgap!(panel_grid, 8)
         # [rowsize!(panel_grid, n, 32) for n in 1:4]
         rowgap!(panel_grid, 1, 8)

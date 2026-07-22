@@ -1,16 +1,8 @@
 """
 config.jl
 
-Central configuration and application state initialization.
-
-This module establishes all application-level settings, paths, constants,
-and default configuration values that are used throughout the FLIM application.
-
-Contains:
-- File paths and configuration
-- Theme and UI constants
-- Default application states
-- Configuration utilities
+Paths, physics/UI constants, and theme definitions used across the app.
+Application-state defaults live with the settings structs in data_types.jl.
 """
 
 using Colors
@@ -55,18 +47,8 @@ trying to detect and migrate it.
 """
 state_file_path()::String = joinpath(user_data_dir(), "AppState.jls")
 
-"""
-    irf_filepath_cache()::String
-
-Path to the cache file remembering the last-selected IRF file path.
-"""
+# Cache files remembering the last-selected IRF file / data folder.
 irf_filepath_cache()::String = joinpath(user_data_dir(), "irf_filepath.txt")
-
-"""
-    folderpath_cache()::String
-
-Path to the cache file remembering the last-selected data folder path.
-"""
 folderpath_cache()::String = joinpath(user_data_dir(), "folderpath.txt")
 
 """
@@ -106,47 +88,12 @@ end
 # PHYSICS CONSTANTS
 # =============================================================================
 
-"""
-    DEFAULT_HISTOGRAM_RESOLUTION::Int
-
-Standard number of time bins in histograms.
-"""
-const DEFAULT_HISTOGRAM_RESOLUTION = 256
-
-"""
-    LASER_PULSE_PERIOD::Float64
-
-Period between laser pulses in nanoseconds.
-"""
-const LASER_PULSE_PERIOD = 12.5
-
-"""
-    NUM_PREVIOUS_PULSES::Int
-
-Number of previous laser pulses to account for in reconvolution.
-"""
-const NUM_PREVIOUS_PULSES = 5
-
-"""
-    TCSPC_LOW_CUT_INDEX::Int
-
-Lower bound index for time-correlated single photon counting.
-"""
-const TCSPC_LOW_CUT_INDEX = 13
-
-"""
-    TCSPC_HIGH_CUT_INDEX::Int
-
-Upper bound index for time-correlated single photon counting.
-"""
-const TCSPC_HIGH_CUT_INDEX = 12
-
-"""
-    PROTOCOL_STEP_COUNT::Int
-
-Number of steps in an experimental protocol (times/setpoints vectors).
-"""
-const PROTOCOL_STEP_COUNT = 10
+const DEFAULT_HISTOGRAM_RESOLUTION = 256   # time bins per histogram
+const LASER_PULSE_PERIOD = 12.5            # ns between laser pulses
+const NUM_PREVIOUS_PULSES = 5              # previous pulses for reconvolution
+const TCSPC_LOW_CUT_INDEX = 13             # TCSPC window lower-bound index
+const TCSPC_HIGH_CUT_INDEX = 12            # TCSPC window upper-bound index
+const PROTOCOL_STEP_COUNT = 10             # steps per protocol (times/setpoints length)
 
 """
     DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ::Float64
@@ -163,18 +110,14 @@ const DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ = 1000.0
 # UI THEME DEFINITIONS
 # =============================================================================
 
-"""
-    DARK_MODE_THEME::Dict
-
-Dark mode color scheme and typography settings.
-"""
+# Dark-mode color scheme and typography.
 const DARK_MODE_THEME = Dict{Symbol, Any}(
     :theme   => Dict{Symbol, Any}(
         :backgroundcolor => :gray12,
         :textcolor       => :gray80,
-        :fonts           => (; 
-            regular = "Arial", 
-            bold    = "Arial Bold", 
+        :fonts           => (;
+            regular = "Arial",
+            bold    = "Arial Bold",
             italic  = "Arial Italic"
         )
     ),
@@ -186,18 +129,14 @@ const DARK_MODE_THEME = Dict{Symbol, Any}(
     :text    => :white
 )
 
-"""
-    LIGHT_MODE_THEME::Dict
-
-Light mode color scheme and typography settings.
-"""
+# Light-mode color scheme and typography.
 const LIGHT_MODE_THEME = Dict{Symbol, Any}(
     :theme   => Dict{Symbol, Any}(
         :backgroundcolor => :gray88,
         :textcolor       => :gray20,
-        :fonts           => (; 
-            regular = "Arial", 
-            bold    = "Arial Bold", 
+        :fonts           => (;
+            regular = "Arial",
+            bold    = "Arial Bold",
             italic  = "Arial Italic"
         )
     ),
@@ -220,17 +159,11 @@ const LIGHT_MODE_THEME = Dict{Symbol, Any}(
 """
     get_theme_colors(use_dark_mode::Bool)::NamedTuple
 
-Returns RGB color objects for the specified theme.
-
-# Arguments
-- `use_dark_mode::Bool`: use the dark theme if `true`, the light theme if `false`
-
-# Returns
-- `NamedTuple` with `COLOR_1` through `COLOR_5` and `TEXT`
+RGB colors (`COLOR_1`..`COLOR_5`, `TEXT`) for the dark or light theme.
 """
 function get_theme_colors(use_dark_mode::Bool)
     theme = use_dark_mode ? DARK_MODE_THEME : LIGHT_MODE_THEME
-    
+
     return (
         COLOR_1 = parse(RGB{Float64}, theme[:color_1]),
         COLOR_2 = parse(RGB{Float64}, theme[:color_2]),
@@ -248,7 +181,7 @@ end
 """
     initialize_directories()
 
-Ensures all required directories exist. Called at application startup.
+Create the required data directories at startup (idempotent).
 """
 function initialize_directories()
     mkpath(user_data_dir())

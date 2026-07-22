@@ -84,7 +84,7 @@ function controller_panel_pressed!(app, app_run, blocks, panel, panel_grid; forc
             end
         end
 
-        [colsize!(panel_grid, n, 28) for n in 1:6]
+        foreach(n -> colsize!(panel_grid, n, 28), 1:6)
         colgap!(panel_grid, 8)
         rowgap!(panel_grid, 4, 8)
         rowgap!(panel_grid, 5, 32)

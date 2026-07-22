@@ -251,32 +251,26 @@ function start_port_menu_refresher!(fig, port_menu, no_port_label)
 end
 
 """
-    draw_initial_plot_selections!(app, app_run, blocks)
+    draw_initial_plots!(app, app_run, blocks)
 
 Draw the initially-selected series (per `app.layout.plot1`/`.plot2`, gated
 by that plot's own channel toggles) onto the two plot axes at GUI
-construction time, via `render_plot_selection!` (plotting.jl) — the same
+construction time, via `render_plot!` (plotting.jl) — the same
 function the Menu/Toggle handlers in handlers_layout.jl use, so this never
 drifts into a second copy of the per-plot-type drawing logic.
 """
-function draw_initial_plot_selections!(app, app_run, blocks)
-    render_plot_selection!(app, app_run, blocks, :plot1)
-    render_plot_selection!(app, app_run, blocks, :plot2)
+function draw_initial_plots!(app, app_run, blocks)
+    render_plot!(app, app_run, blocks, :plot1)
+    render_plot!(app, app_run, blocks, :plot2)
     return nothing
 end
 
 """
     make_gui(app, app_run) -> (Figure, GuiBlocks)
 
-Construct the Makie-based graphical user interface and return the
-`Figure` together with the `GuiBlocks` container of its elements.
-The function lays out the two plotting axes, control buttons, text
-fields and panel buttons.  It does not attach event handlers; that
-task is delegated to `make_handlers` in `handlers.jl`.
-
-# Arguments
-- `app`: persistent configuration (`AppState`)
-- `app_run`: runtime data (`AppRun`)
+Build the Makie GUI (plot axes, control buttons, text fields, panel
+buttons) and return the `Figure` with its `GuiBlocks`. Event handlers are
+attached separately by `make_handlers` (handlers.jl).
 """
 function make_gui(app, app_run)
     if app.dark
@@ -321,9 +315,9 @@ function make_gui(app, app_run)
     )
 
     start_port_menu_refresher!(fig, widgets.port_menu, widgets.no_port_selected_label)
-    draw_initial_plot_selections!(app, app_run, blocks)
+    draw_initial_plots!(app, app_run, blocks)
 
-    # Axis autoscaling is handled by plotting.jl's autoscale_values!/autoscale_plot_selection!
+    # Axis autoscaling is handled by plotting.jl's autoscale_values!/autoscale_plot!
     # (called directly from consumer_loop on the axes stored in `blocks`).
 
     return fig, blocks

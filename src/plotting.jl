@@ -35,7 +35,7 @@ function normalize_to_own_max(y::AbstractVector{<:Real})
 end
 
 # Normalize counts by the fit's peak, not counts' own peak.
-function normalized_counts_for_histogram(counts::AbstractVector{<:Real}, fit::AbstractVector{<:Real})
+function normalize_counts_to_fit(counts::AbstractVector{<:Real}, fit::AbstractVector{<:Real})
     out = zeros(Float64, length(counts))
     isempty(fit) && return out
 
@@ -112,12 +112,12 @@ functions above) so shapes are comparable regardless of photon counts. IRF
 is drawn once regardless of the toggles — one instrument response, not
 per-channel. Shared by the Menu-selection handler (handlers_layout.jl) and
 the initial-selection draw at GUI construction time (GUI.jl) via
-`render_plot_selection!` — both need the exact same rendering, so it lives
+`render_plot!` — both need the exact same rendering, so it lives
 here once instead of as two copies that can drift out of sync.
 """
 function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     for (series, color) in shown_snapshot_series(app_run, show_ch1, show_ch2)
-        counts_normalized = lift(normalized_counts_for_histogram, series.histogram, series.fit)
+        counts_normalized = lift(normalize_counts_to_fit, series.histogram, series.fit)
         fit_normalized = lift(normalize_to_own_max, series.fit)
         barplot!(axis, app_run.hist_time, counts_normalized, color=(color, 0.1), gap=0.0)
         lines!(axis, app_run.hist_time, fit_normalized, color=color, linewidth=PLOT_LINEWIDTH)
@@ -170,7 +170,7 @@ function protocol_setpoint_spans(
     return (starts, ends)
 end
 
-function add_protocol_setpoint_highlight!(ax, app_run)
+function add_setpoint_highlight!(ax, app_run)
     spans = lift(app_run.timestamps, app_run.protocol_setpoint) do ts, sp
         starts, ends = protocol_setpoint_spans(ts, sp)
         if isempty(starts)
@@ -198,11 +198,11 @@ channel's ROI lines share that channel's color (channel 1
 so a single-ROI (or no-ROI) run looks exactly as it did before this
 existed. Shared by the Menu-selection handler (handlers_layout.jl) and the
 initial-selection draw at GUI construction time (GUI.jl) via
-`render_plot_selection!` — see `draw_histogram_plot!` above for why this
+`render_plot!` — see `draw_histogram_plot!` above for why this
 needs to be one function, not two copies.
 """
 function draw_lifetime_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
-    add_protocol_setpoint_highlight!(axis, app_run)
+    add_setpoint_highlight!(axis, app_run)
     protocol_x, protocol_y = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
     lines!(axis, protocol_x, protocol_y, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
 
@@ -230,7 +230,7 @@ handler and the initial-selection draw for the same reason as
 `draw_lifetime_plot!`.
 """
 function draw_ion_concentration_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
-    add_protocol_setpoint_highlight!(axis, app_run)
+    add_setpoint_highlight!(axis, app_run)
 
     for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
         for series in roi_series
@@ -256,7 +256,7 @@ handler and the initial-selection draw for the same reason as
 `draw_lifetime_plot!`.
 """
 function draw_photon_counts_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
-    add_protocol_setpoint_highlight!(axis, app_run)
+    add_setpoint_highlight!(axis, app_run)
 
     for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
         for series in roi_series
@@ -271,7 +271,7 @@ function draw_photon_counts_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
 end
 
 """
-    render_plot_selection!(app, app_run, blocks, plot_slot::Symbol)
+    render_plot!(app, app_run, blocks, plot_slot::Symbol)
 
 Render whichever series `app.layout.plot1`/`.plot2` currently selects onto
 `plot_slot`'s axis (`:plot1` or `:plot2`), gated by that slot's own
@@ -279,11 +279,11 @@ Render whichever series `app.layout.plot1`/`.plot2` currently selects onto
 place that knows how to render a plot slot — the Menu `on(selection)`
 handler and the channel-toggle `on(active)` handler (both in
 handlers_layout.jl) and the initial render at GUI construction time
-(GUI.jl's `draw_initial_plot_selections!`) all call this instead of each
+(GUI.jl's `draw_initial_plots!`) all call this instead of each
 keeping its own copy, for the same reason `draw_histogram_plot!` etc. are
 shared functions above.
 """
-function render_plot_selection!(app, app_run, blocks, plot_slot::Symbol)
+function render_plot!(app, app_run, blocks, plot_slot::Symbol)
     if plot_slot == :plot1
         axis = blocks.plot_1_axis
         selection = app.layout.plot1
@@ -301,7 +301,7 @@ function render_plot_selection!(app, app_run, blocks, plot_slot::Symbol)
     empty!(axis)
 
     if selection == "Command"
-        add_protocol_setpoint_highlight!(axis, app_run)
+        add_setpoint_highlight!(axis, app_run)
 
         lines!(axis, app_run.timestamps, app_run.command1, color=PLOT_COLOR_CH1, linewidth=PLOT_LINEWIDTH)
         lines!(axis, app_run.timestamps, app_run.command2, color=PLOT_COLOR_CH2, linewidth=PLOT_LINEWIDTH)
@@ -333,7 +333,7 @@ function render_plot_selection!(app, app_run, blocks, plot_slot::Symbol)
         # While actively running this self-heals within one publish tick
         # (~100ms); while paused, consumer_loop is blocked and nothing else
         # would ever re-pin it.
-        autoscale_plot_selection!(app, app_run, axis, selection, show_ch1, show_ch2)
+        autoscale_plot!(app, app_run, axis, selection, show_ch1, show_ch2)
     end
 
     return nothing
@@ -344,7 +344,7 @@ end
 # -----------------------------------------------------------------------------
 #
 # Called directly from consumer_loop (runtime.jl) on each published update,
-# via autoscale_plot_selection! below — there is no separate autoscaler task.
+# via autoscale_plot! below — there is no separate autoscaler task.
 
 """
     autoscale_values!(ax)
@@ -475,7 +475,7 @@ each frame's duration (`run_acquisition_loop!` in acquisition.jl), so it is
 non-decreasing for the lifetime of one acquisition run — that lets
 `searchsortedfirst` locate the window boundary in O(log N) via binary
 search instead of an O(N) scan. This matters because `lookup_plot_series`/
-`autoscale_plot_selection!` run on every published update (up to 10 Hz) for
+`autoscale_plot!` run on every published update (up to 10 Hz) for
 as long as an acquisition runs: without windowing first, they scanned and
 `vcat`-copied the *entire* session history every call, which measured
 ~13 ms/call once a long real-time run had accumulated ~500k samples —
@@ -584,12 +584,12 @@ function notify_channel_series!(series::ChannelSeries)
 end
 
 """
-    notify_roi_channel_series!(series::RoiChannelSeries)
+    notify_roi_series!(series::RoiChannelSeries)
 
 Notify one ROI's per-channel time-series observables (timestamps, photons,
 lifetime, concentration, and their smoothed counterparts).
 """
-function notify_roi_channel_series!(series::RoiChannelSeries)
+function notify_roi_series!(series::RoiChannelSeries)
     notify(series.timestamps)
     notify(series.photons)
     notify(series.photons_smooth)
@@ -601,7 +601,7 @@ function notify_roi_channel_series!(series::RoiChannelSeries)
 end
 
 function notify_runtime_observables!(app_run)
-    foreach(notify_roi_channel_series!, roi_channel_series(app_run))
+    foreach(notify_roi_series!, roi_channel_series(app_run))
     notify(app_run.protocol_setpoint)
     notify(app_run.command1)
     notify(app_run.command2)
@@ -610,7 +610,7 @@ function notify_runtime_observables!(app_run)
     return nothing
 end
 
-function autoscale_plot_selection!(app, app_run, axis, plot_label, show_ch1::Bool, show_ch2::Bool)
+function autoscale_plot!(app, app_run, axis, plot_label, show_ch1::Bool, show_ch2::Bool)
     if plot_label == "Histogram"
         autoscale_values!(axis)
         return nothing

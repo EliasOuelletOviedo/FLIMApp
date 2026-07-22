@@ -170,7 +170,7 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
             setfield!(app.layout, key, value)
             if key == :smoothing
                 for series in roi_channel_series(app_run)
-                    recompute_roi_channel_smooth!(app, series)
+                    recompute_roi_smooth!(app, series)
                 end
             end
             save_state(app)
@@ -212,23 +212,23 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
 
             elseif block isa Menu
                 on(block.selection) do selection
-                    # commit first: render_plot_selection! (plotting.jl) reads
+                    # commit first: render_plot! (plotting.jl) reads
                     # app.layout.plot1/plot2 directly, so the new selection
                     # must already be stored before it runs.
                     commit_layout_value!(symbol, selection)
-                    render_plot_selection!(app, app_run, blocks, symbol)
+                    render_plot!(app, app_run, blocks, symbol)
                 end
 
             elseif block isa Toggle
                 on(block.active) do state
                     commit_layout_value!(symbol, state)
                     plot_slot = symbol in (:plot1_ch1, :plot1_ch2) ? :plot1 : :plot2
-                    render_plot_selection!(app, app_run, blocks, plot_slot)
+                    render_plot!(app, app_run, blocks, plot_slot)
                 end
             end
         end
 
-        [colsize!(panel_grid, n, 28) for n in 1:6]
+        foreach(n -> colsize!(panel_grid, n, 28), 1:6)
         colgap!(panel_grid, 8)
         rowgap!(panel_grid, 3, 32)
         rowgap!(panel_grid, 4, 8)

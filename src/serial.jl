@@ -11,26 +11,20 @@ using LibSerialPort
 """
     list_ports()::Vector{String}
 
-Return a sorted, de-duplicated list of available serial device names.
-
-Platform-specific behavior:
-- **Windows**: Queries WMI for COM ports via PowerShell
-- **macOS**: Scans /dev for USB tty devices
-- **Linux**: Checks /dev/serial/by-id and standard tty/ttyUSB devices
-
-# Returns
-- Vector of display names (e.g., `usbmodem1103`, `ttyUSB0`, `COM3`)
-- Empty vector if no devices found
+Sorted, de-duplicated display names of available serial devices (e.g.
+`usbmodem1103`, `ttyUSB0`, `COM3`); empty if none found. Discovery is
+platform-specific: Windows queries WMI for COM ports, macOS scans /dev for
+USB ttys, Linux checks /dev/serial/by-id and standard tty/ttyUSB devices.
 """
 function list_ports()::Vector{String}
     ports = String[]
-    
+
     if Sys.iswindows()
         enumerate_windows_ports!(ports)
     else
         enumerate_unix_ports!(ports)
     end
-    
+
     display_ports = map(port_display_name, ports)
     return sort(unique(display_ports))
 end
@@ -136,7 +130,7 @@ Query Windows COM ports using PowerShell WMI.
 """
 function enumerate_windows_ports!(ports::Vector{String})
     cmd = `powershell -NoProfile -Command "Get-WmiObject Win32_SerialPort | Select-Object -Property DeviceID,Caption | Format-Table -HideTableHeaders"`
-    
+
     try
         out = read(cmd, String)
         for line in split(out, '\n')
@@ -157,14 +151,14 @@ Scan /dev directory for Unix serial ports (macOS/Linux).
 """
 function enumerate_unix_ports!(ports::Vector{String})
     devdir = "/dev"
-    
+
     if !isdir(devdir)
         @warn "Device directory not found: $devdir"
         return
     end
-    
+
     files = readdir(devdir)
-    
+
     if Sys.islinux()
         enumerate_linux_ports!(ports, files)
     elseif Sys.isapple()
@@ -186,7 +180,7 @@ function enumerate_linux_ports!(ports::Vector{String}, files::Vector{String})
         for f in readdir(byid)
             full_path = joinpath(byid, f)
             push!(ports, full_path)
-            
+
             try
                 target = realpath(full_path)
                 push!(ports, target)
@@ -195,7 +189,7 @@ function enumerate_linux_ports!(ports::Vector{String}, files::Vector{String})
             end
         end
     end
-    
+
     # Also add standard device names
     devdir = "/dev"
     for f in files

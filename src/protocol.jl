@@ -28,7 +28,7 @@ function protocol_steps(protocol::ProtocolSettings)::Vector{Tuple{Float64, Float
     return steps
 end
 
-function protocol_setpoint_at_timestamp(protocol::ProtocolSettings, timestamp::Real)::Float64
+function protocol_setpoint_at(protocol::ProtocolSettings, timestamp::Real)::Float64
     t = Float64(timestamp)
     if !isfinite(t)
         return NaN

@@ -22,7 +22,7 @@ using Base.Threads
 # =============================================================================
 
 """
-    extract_file_sequence_number(filepath)::Union{Int, Nothing}
+    parse_file_sequence_number(filepath)::Union{Int, Nothing}
 
 Parse the trailing run of digits in `filepath`'s filename (before the
 extension) as this file's sequence number in the acquisition — e.g.
@@ -31,7 +31,7 @@ trailing digits to parse. See `AcquisitionSample`'s docstring
 (data_types.jl) for why this — not the app's own read-count — is what
 round-robin ROI assignment (`consumer_loop`, runtime.jl) is keyed on.
 """
-function extract_file_sequence_number(filepath::AbstractString)::Union{Int, Nothing}
+function parse_file_sequence_number(filepath::AbstractString)::Union{Int, Nothing}
     name = splitext(basename(filepath))[1]
     m = match(r"(\d+)$", name)
     m === nothing && return nothing
@@ -74,10 +74,10 @@ end
 
 Apply one controller's P/I gains to `state`'s current error terms (`state.
 old_error` holds the latest P_error, `state.I_error` the integral term —
-both just set by `process_channel_frame!`). No `D` term: the derivative
+both just set by `process_frame!`). No `D` term: the derivative
 was dropped in favor of `state.pid_kalman` (a Kalman observer) filtering
 the lifetime that `P_error` is computed from — see
-`process_channel_frame!`'s docstring. Split out from `process_channel_frame!`
+`process_frame!`'s docstring. Split out from `process_frame!`
 so a single-channel acquisition (no second SDT channel in the file) can
 still drive controller 2's output from channel 1's error dynamics with
 controller 2's own gains — this is exactly the original single-channel
@@ -99,7 +99,7 @@ function pid_command_from_state(state::ChannelFitState, setpoint_ns::Float64, P:
 end
 
 """
-    process_channel_frame!(state, vector, histogram_resolution, n, layout, ctx,
+    process_frame!(state, vector, histogram_resolution, n, layout, ctx,
                             partial_fit_enabled, partial_fit_period,
                             setpoint_ns, frame_time, P, I, inv, on)
         -> (ChannelFrame, command)
@@ -119,7 +119,7 @@ noise badly, while the observer's own velocity state tracks the lifetime's
 trend directly from a model of its dynamics instead of differentiating a
 noisy signal.
 """
-function process_channel_frame!(
+function process_frame!(
         state::ChannelFitState,
         vector::Vector{UInt16},
         histogram_resolution::Int,
@@ -197,7 +197,7 @@ function process_channel_frame!(
     lifetime = state.params[1]
     concentration = (9.5 / lifetime - 1) / 0.025
 
-    smooth_level = layout_smoothing_level(layout)
+    smooth_level = lifetime_smooth_level(layout)
     dt_sample = max(Float64(frame_time), eps(Float64))
     lifetime_for_pid = kalman_update!(state.pid_kalman, lifetime, dt_sample, smooth_level)
 
@@ -223,7 +223,7 @@ Shared body for all three acquisition modes. Repeatedly calls `next_file!(n)`
 (with `n` the current, pre-increment frame counter) to obtain the next
 `.sdt` filepath to process — or `nothing` to stop the loop, which each mode
 uses to encode its own pacing/waiting/termination policy. For each file it
-runs `process_channel_frame!` for channel 1 and, if the file has a second
+runs `process_frame!` for channel 1 and, if the file has a second
 TCSPC channel, independently for channel 2 too — decided once from the
 first file of the run (`has_channel2`) and held fixed for the rest of the
 acquisition, not re-checked per file. Then calls `emit!(sample, n)` — which
@@ -288,7 +288,7 @@ function run_acquisition_loop!(
 
         current_protocol = resolve_protocol_config(protocol)
         protocol_active = current_protocol !== nothing && current_protocol.active
-        setpoint_ns = protocol_active ? protocol_setpoint_at_timestamp(current_protocol, timestamps) : fallback_setpoint_ns
+        setpoint_ns = protocol_active ? protocol_setpoint_at(current_protocol, timestamps) : fallback_setpoint_ns
 
         # Distinct from setpoint_ns: PID control keeps regulating toward the
         # fallback setpoint even without an active protocol, but the plotted
@@ -297,14 +297,14 @@ function run_acquisition_loop!(
         # fallback value whenever the protocol is off.
         plot_setpoint_ns = protocol_active ? setpoint_ns : NaN
 
-        frame1, command1 = process_channel_frame!(
+        frame1, command1 = process_frame!(
             state1, vector1, histogram_resolution, n, layout, ctx,
             partial_fit_enabled, partial_fit_period, setpoint_ns, frame_time,
             controller.P1, controller.I1, controller.ch1_inv, controller.ch1_on
         )
 
         if has_channel2
-            frame2, command2 = process_channel_frame!(
+            frame2, command2 = process_frame!(
                 state2, vector2, histogram_resolution, n, layout, ctx,
                 partial_fit_enabled, partial_fit_period, setpoint_ns, frame_time,
                 controller.P2, controller.I2, controller.ch2_inv, controller.ch2_on
@@ -320,7 +320,7 @@ function run_acquisition_loop!(
         # UInt32(1), not the literal 1 (Int64): n += 1 would silently
         # promote n to Int64 after the first frame (mixed UInt32/Int64
         # addition promotes to Int64), which broke dispatch to
-        # process_channel_frame!'s strictly-typed n::UInt32 parameter —
+        # process_frame!'s strictly-typed n::UInt32 parameter —
         # caught by an actual `start_playback` run, not the syntax/type
         # checks above.
         n += UInt32(1)
@@ -332,7 +332,7 @@ function run_acquisition_loop!(
         sample = AcquisitionSample(
             frame1, frame2,
             command1, command2, timestamps, plot_setpoint_ns, n, String(filepath),
-            extract_file_sequence_number(filepath)
+            parse_file_sequence_number(filepath)
         )
         if !emit!(sample, n)
             break

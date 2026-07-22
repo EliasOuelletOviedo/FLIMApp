@@ -1,18 +1,12 @@
 """
 lifetime_analysis.jl
 
-Fluorescence lifetime fitting algorithms and IRF (Instrument Response Function) management.
+Fluorescence lifetime fitting and IRF (Instrument Response Function)
+management: IRF loading, IRF-decay convolution, and MLE fitting of
+multi-exponential decays (1, 2, 3+ lifetimes).
 
-This module implements:
-- IRF file loading and manipulation
-- Convolution of IRF with decay models
-- Maximum Likelihood Estimation (MLE) fitting for fluorescence decay
-- Multi-exponential decay component fitting (1, 2, 3+ lifetimes)
-
-References:
-- Bajzer et al. 1991 (MLE methodology)
-- Maus et al. 2001 (MLE for FLIM)
-- Enderlein, 1997 (IRF shift/delay compensation)
+References: Bajzer et al. 1991 (MLE methodology); Maus et al. 2001 (MLE for
+FLIM); Enderlein 1997 (IRF shift/delay compensation).
 """
 
 using FFTW
@@ -816,12 +810,12 @@ be warmed independently. Measured cost of skipping this: the very first
 `vec_to_lifetime` call in a process took 3-13 seconds of wall time in
 testing, and because Julia's compiler holds locks shared across threads,
 that stall was observed on the *main* GUI thread too, even though the fit
-itself runs on its own thread (see `dispatch_acquisition_worker!` in
+itself runs on its own thread (see `spawn_acquisition_worker!` in
 runtime.jl) — i.e. moving the worker off the GUI thread does not by itself
 prevent this specific freeze; only warming ahead of time does.
 
 Only 1- and 2-lifetime are warmed: 3-lifetime has a separate, pre-existing
-bug (`initial_guess_for_lifetime_count("3 lifetimes")` returns a 7-element
+bug (`initial_guess_for_lifetimes("3 lifetimes")` returns a 7-element
 guess but the model's bounds need 8) that throws before doing any fit work,
 so there is nothing productive to warm there.
 

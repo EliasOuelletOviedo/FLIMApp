@@ -1,12 +1,8 @@
 """
 path_utils.jl
 
-Shared path and picker helpers used by GUI and handlers.
-
-Responsibilities:
-- Handle file/folder picker failures safely
-- Read/write path cache files
-- Convert full paths to short display names
+Path and picker helpers shared by GUI and handlers: safe file/folder
+pickers, path-cache read/write, and full-path-to-display-name conversion.
 """
 
 """

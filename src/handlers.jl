@@ -42,10 +42,10 @@ function clear_runtime_plots!(app, app_run, blocks)
     end
 
     # Replaces app_run.ch1_rois/ch2_rois wholesale (e.g. the ROI count or the
-    # ROI toggle may have changed since the last run) — render_plot_selection!
+    # ROI toggle may have changed since the last run) — render_plot!
     # below rebuilds the axes to match, same as after
-    # rebuild_roi_channel_series! in start_pressed (runtime.jl).
-    rebuild_roi_channel_series!(app, app_run)
+    # rebuild_roi_series! in start_pressed (runtime.jl).
+    rebuild_roi_series!(app, app_run)
 
     empty!(app_run.protocol_setpoint[])
     empty!(app_run.command1[])
@@ -55,15 +55,15 @@ function clear_runtime_plots!(app, app_run, blocks)
     app_run.save_progress[] = NaN
 
     foreach(notify_channel_series!, channel_series(app_run))
-    foreach(notify_roi_channel_series!, roi_channel_series(app_run))
+    foreach(notify_roi_series!, roi_channel_series(app_run))
     notify(app_run.protocol_setpoint)
     notify(app_run.command1)
     notify(app_run.command2)
     notify(app_run.timestamps)
     notify(app_run.i)
 
-    render_plot_selection!(app, app_run, blocks, :plot1)
-    render_plot_selection!(app, app_run, blocks, :plot2)
+    render_plot!(app, app_run, blocks, :plot1)
+    render_plot!(app, app_run, blocks, :plot2)
     return nothing
 end
 

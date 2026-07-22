@@ -49,6 +49,6 @@ let protocol = FLIMApp.ProtocolSettings(
         times=vcat([10.0, 20.0], fill(NaN, FLIMApp.PROTOCOL_STEP_COUNT - 2)),
         setpoints=vcat([3.5, 4.0], fill(NaN, FLIMApp.PROTOCOL_STEP_COUNT - 2))
     )
-    FLIMApp.protocol_setpoint_at_timestamp(protocol, 15.0)
+    FLIMApp.protocol_setpoint_at(protocol, 15.0)
     FLIMApp.normalize_protocol_config(protocol)
 end

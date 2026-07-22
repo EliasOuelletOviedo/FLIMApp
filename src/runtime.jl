@@ -15,7 +15,7 @@ using DataFrames
 using Base.Threads
 
 """
-    accumulate_roi_channel_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
+    accumulate_roi_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
 
 Append one frame's scalar results (photons, lifetime, concentration and
 their smoothed values) plus its own timestamp onto one ROI's per-channel
@@ -23,7 +23,7 @@ time-series observables. Which `RoiChannelSeries` a frame is routed to is
 decided by the caller (`consumer_loop`'s round-robin `mod1(frame_index, N)`
 over `app_run.ch1_rois`/`ch2_rois`), not by this function.
 """
-function accumulate_roi_channel_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
+function accumulate_roi_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
     push!(series.timestamps[], timestamp)
     push!(series.photons[], frame.photons)
     append_smooth_value!(app, series.photons, series.photons_smooth, series.timestamps, series.photons_kalman)
@@ -35,13 +35,13 @@ function accumulate_roi_channel_sample!(app, series::RoiChannelSeries, frame::Ch
 end
 
 """
-    publish_channel_frame!(series::ChannelSeries, frame::ChannelFrame)
+    publish_frame!(series::ChannelSeries, frame::ChannelFrame)
 
 Publish one frame's histogram/fit/counts onto one channel's "latest value"
 observables (the throttled GUI-facing update, as opposed to the per-frame
 time-series accumulation above).
 """
-function publish_channel_frame!(series::ChannelSeries, frame::ChannelFrame)
+function publish_frame!(series::ChannelSeries, frame::ChannelFrame)
     series.histogram[] = frame.histogram
     series.fit[] = frame.fit
     series.counts[] = frame.photons
@@ -118,7 +118,7 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
 
             # Round-robin file->ROI assignment: file 1 -> ROI 1, file 2 ->
             # ROI 2, ..., file N+1 -> ROI 1 again. n_rois is fixed for the
-            # whole run by rebuild_roi_channel_series! (start_pressed) and
+            # whole run by rebuild_roi_series! (start_pressed) and
             # is always >= 1 (a run with zero ROIs drawn keeps today's
             # single-series behavior via that one-element vector).
             #
@@ -142,8 +142,8 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                 sequence_number = Int(sample.frame_index)
             end
             roi_idx = mod1(sequence_number, n_rois)
-            accumulate_roi_channel_sample!(app, app_run.ch1_rois[roi_idx], sample.ch1, sample.timestamps)
-            accumulate_roi_channel_sample!(app, app_run.ch2_rois[roi_idx], sample.ch2, sample.timestamps)
+            accumulate_roi_sample!(app, app_run.ch1_rois[roi_idx], sample.ch1, sample.timestamps)
+            accumulate_roi_sample!(app, app_run.ch2_rois[roi_idx], sample.ch2, sample.timestamps)
             push!(app_run.protocol_setpoint[], sample.protocol_setpoint)
             push!(app_run.command1[], sample.command1)
             push!(app_run.command2[], sample.command2)
@@ -153,23 +153,23 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
             now_s = time()
 
             if publish_live_updates && now_s - last_publish_time >= publish_interval_s
-                publish_channel_frame!(app_run.ch1, sample.ch1)
-                publish_channel_frame!(app_run.ch2, sample.ch2)
+                publish_frame!(app_run.ch1, sample.ch1)
+                publish_frame!(app_run.ch2, sample.ch2)
 
                 notify_runtime_observables!(app_run)
 
                 last_publish_time = now_s
 
-                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout.plot1, app.layout.plot1_ch1, app.layout.plot1_ch2)
-                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout.plot2, app.layout.plot2_ch1, app.layout.plot2_ch2)
+                autoscale_plot!(app, app_run, plot_1_axis, app.layout.plot1, app.layout.plot1_ch1, app.layout.plot1_ch2)
+                autoscale_plot!(app, app_run, plot_2_axis, app.layout.plot2, app.layout.plot2_ch1, app.layout.plot2_ch2)
             end
         end
 
         # Publish the final frame once the loop ends, so the plots show the
         # last processed data even if it arrived between throttled updates.
         if last_sample !== nothing
-            publish_channel_frame!(app_run.ch1, last_sample.ch1)
-            publish_channel_frame!(app_run.ch2, last_sample.ch2)
+            publish_frame!(app_run.ch1, last_sample.ch1)
+            publish_frame!(app_run.ch2, last_sample.ch2)
 
             notify_runtime_observables!(app_run)
 
@@ -184,8 +184,8 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                 xlims!(plot_1_axis, 0.0, max(Float64(xmax1), 0.0))
                 xlims!(plot_2_axis, 0.0, max(Float64(xmax2), 0.0))
             else
-                autoscale_plot_selection!(app, app_run, plot_1_axis, app.layout.plot1, app.layout.plot1_ch1, app.layout.plot1_ch2)
-                autoscale_plot_selection!(app, app_run, plot_2_axis, app.layout.plot2, app.layout.plot2_ch1, app.layout.plot2_ch2)
+                autoscale_plot!(app, app_run, plot_1_axis, app.layout.plot1, app.layout.plot1_ch1, app.layout.plot1_ch2)
+                autoscale_plot!(app, app_run, plot_2_axis, app.layout.plot2, app.layout.plot2_ch1, app.layout.plot2_ch2)
             end
         end
 
@@ -246,12 +246,12 @@ function reset_channel_series!(series::ChannelSeries)
 end
 
 """
-    reset_roi_channel_series!(series::RoiChannelSeries)
+    reset_roi_series!(series::RoiChannelSeries)
 
 Clear one ROI's per-channel time-series observables ahead of a fresh
 acquisition run. Does not notify — callers batch their own notifications.
 """
-function reset_roi_channel_series!(series::RoiChannelSeries)
+function reset_roi_series!(series::RoiChannelSeries)
     empty!(series.timestamps[])
     empty!(series.photons[])
     empty!(series.photons_smooth[])
@@ -263,7 +263,7 @@ function reset_roi_channel_series!(series::RoiChannelSeries)
 end
 
 """
-    rebuild_roi_channel_series!(app, app_run)
+    rebuild_roi_series!(app, app_run)
 
 Resize `app_run.ch1_rois`/`ch2_rois` to match the current number of drawn
 ROIs (`app_run.rois[]`) — but only when the ROI toggle (`app.roi.active`,
@@ -276,12 +276,12 @@ acquisition run (`start_pressed`) and by the CLEAR button
 drawn ROI set or the toggle, and the round-robin routing in
 `consumer_loop` (`mod1(frame_index, length(app_run.ch1_rois))`) needs the
 two vectors to always be the same, non-zero length. Callers must re-render
-both plot slots (`render_plot_selection!`, plotting.jl) afterward: this
+both plot slots (`render_plot!`, plotting.jl) afterward: this
 replaces the `Observable`s themselves (not just their contents), so any
 existing `lines!` plot objects on the axes are left pointing at
 now-orphaned data.
 """
-function rebuild_roi_channel_series!(app, app_run)
+function rebuild_roi_series!(app, app_run)
     n = app.roi.active ? max(1, length(app_run.rois[])) : 1
     app_run.ch1_rois = [RoiChannelSeries() for _ in 1:n]
     app_run.ch2_rois = [RoiChannelSeries() for _ in 1:n]
@@ -289,13 +289,13 @@ function rebuild_roi_channel_series!(app, app_run)
 end
 
 """
-    reset_acquisition_observables!(app, app_run)
+    reset_acquisition_state!(app, app_run)
 
 Clear all time-series observables and counters ahead of a fresh acquisition run.
 """
-function reset_acquisition_observables!(app, app_run)
+function reset_acquisition_state!(app, app_run)
     foreach(reset_channel_series!, channel_series(app_run))
-    rebuild_roi_channel_series!(app, app_run)
+    rebuild_roi_series!(app, app_run)
     empty!(app_run.protocol_setpoint[])
     empty!(app_run.command1[])
     empty!(app_run.command2[])
@@ -306,12 +306,12 @@ function reset_acquisition_observables!(app, app_run)
 end
 
 """
-    initial_guess_for_lifetime_count(selected_lifetimes::AbstractString)::Vector{Float64}
+    initial_guess_for_lifetimes(selected_lifetimes::AbstractString)::Vector{Float64}
 
 Map the Lifetimes menu selection ("1 lifetime"/"2 lifetimes"/"3 lifetimes") to
 the corresponding initial parameter guess for the MLE fit.
 """
-function initial_guess_for_lifetime_count(selected_lifetimes::AbstractString)::Vector{Float64}
+function initial_guess_for_lifetimes(selected_lifetimes::AbstractString)::Vector{Float64}
     if selected_lifetimes == "1 lifetime"
         return [3.0, 0.0, 5.0e-5]
     elseif selected_lifetimes == "3 lifetimes"
@@ -322,7 +322,7 @@ function initial_guess_for_lifetime_count(selected_lifetimes::AbstractString)::V
 end
 
 """
-    dispatch_acquisition_worker!(app_run, selected_mode, layout, controller, initial_guess, protocol_config)
+    spawn_acquisition_worker!(app_run, selected_mode, layout, controller, initial_guess, protocol_config)
 
 Launch the background worker task for the selected acquisition mode
 (Playback/Realtime/Save, defaulting to Playback for an unrecognized mode)
@@ -347,7 +347,7 @@ thread it degrades gracefully to the same cooperative scheduling as
 they touch `Observable`s and the GLMakie figure directly, which are not
 safe to mutate concurrently from multiple threads.
 """
-function dispatch_acquisition_worker!(app_run, selected_mode, layout, controller, initial_guess, protocol_config)
+function spawn_acquisition_worker!(app_run, selected_mode, layout, controller, initial_guess, protocol_config)
     if selected_mode == "Playback"
         app_run.worker_task = Threads.@spawn start_playback(
             app_run.channel,
@@ -419,7 +419,7 @@ The four background tasks:
 
 * **worker_task** - the Playback/Realtime/Save acquisition loop (acquisition.jl)
   that reads data files and pushes samples onto the channel. Launched with
-  `Threads.@spawn` (see `dispatch_acquisition_worker!`), since it is
+  `Threads.@spawn` (see `spawn_acquisition_worker!`), since it is
   CPU-bound (dominated by the MLE fit) and must not block the GUI thread;
 * **consumer_task** - pulls samples from the channel and updates the
   `app_run` observables so that the plots react. Stays on `@async` (pinned
@@ -490,7 +490,7 @@ function start_pressed(app, app_run, blocks)
         end
 
         # Capacity: the worker (its own thread since Threads.@spawn, see
-        # dispatch_acquisition_worker!) blocks on put! once this fills, so a
+        # spawn_acquisition_worker!) blocks on put! once this fills, so a
         # transient GUI-thread slowdown (a GC pause, a Makie redraw, a
         # smoothing-slider recompute) directly stalls the fit loop too, not
         # just the display. 32 gave the worker under 100ms of headroom at
@@ -501,13 +501,13 @@ function start_pressed(app, app_run, blocks)
         # than just transiently.
         app_run.channel = Channel{AcquisitionSample}(512)
 
-        reset_acquisition_observables!(app, app_run)
-        # rebuild_roi_channel_series! (inside reset_acquisition_observables!)
+        reset_acquisition_state!(app, app_run)
+        # rebuild_roi_series! (inside reset_acquisition_state!)
         # replaced app_run.ch1_rois/ch2_rois wholesale, so the plot axes must be
         # rebuilt to draw one line pair per new RoiChannelSeries instance —
         # see its docstring.
-        render_plot_selection!(app, app_run, blocks, :plot1)
-        render_plot_selection!(app, app_run, blocks, :plot2)
+        render_plot!(app, app_run, blocks, :plot1)
+        render_plot!(app, app_run, blocks, :plot2)
 
         selected_mode = blocks.mode_menu.selection[]
         if !(selected_mode isa AbstractString)
@@ -519,12 +519,12 @@ function start_pressed(app, app_run, blocks)
             selected_lifetimes = "2 lifetimes"
         end
 
-        initial_guess = initial_guess_for_lifetime_count(selected_lifetimes)
+        initial_guess = initial_guess_for_lifetimes(selected_lifetimes)
 
         sync_runtime_protocol!(app, app_run)
         protocol_config = app_run.protocol
 
-        dispatch_acquisition_worker!(app_run, selected_mode, app.layout, app.controller, initial_guess, protocol_config)
+        spawn_acquisition_worker!(app_run, selected_mode, app.layout, app.controller, initial_guess, protocol_config)
 
         app_run.consumer_task = @async consumer_loop(app, app_run, blocks; rate=10, acquisition_mode=selected_mode)
         app_run.serial_task = @async serial_signal_loop(app, app_run; rate=20.0)

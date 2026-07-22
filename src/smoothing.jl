@@ -6,7 +6,7 @@ Shared lifetime smoothing: a constant-velocity (2-state) Kalman filter
 the plot-facing smoothing filter (`RoiChannelSeries`'s `_smooth` series,
 runtime.jl) and as the PID observer (`ChannelFitState.pid_kalman`,
 acquisition.jl) that replaced the PID's derivative term — see
-`process_channel_frame!`'s docstring for why. Independent `KalmanState`
+`process_frame!`'s docstring for why. Independent `KalmanState`
 instances in each case (per (channel, ROI, metric) for plots, per
 (channel, metric) for the PID observer): same filter, not shared state.
 """
@@ -15,32 +15,19 @@ function lifetime_smooth_level(layout::LayoutSettings)::Int
     return clamp(layout.smoothing, 0, 10)
 end
 
-@inline function layout_smoothing_level(layout::LayoutSettings)::Int
-    return lifetime_smooth_level(layout)
-end
-
-@inline function smooth_strength_factor(level::Int)::Float64
-    # Keep level 1 unchanged and map level 10 to ~10x stronger smoothing.
-    clamped_level = clamp(level, 1, 10)
-    return 10.0 ^ ((clamped_level - 1) / 9)
-end
-
 """
     KALMAN_LEVEL_SPAN::Float64
 
 Ratio, level 1 to level 10, of how much process noise `kalman_update!`
 lets accumulate per typical inter-sample interval — level 10's `q` is
-`1/KALMAN_LEVEL_SPAN` of level 1's. *Not* `smooth_strength_factor`'s
-generic 10x: a steady-state constant-velocity Kalman filter's position-
-noise reduction scales only as the *fourth root* of `r/q` (a standard
-result for the 2-state constant-velocity/"CV" model — the coupled velocity
-state means shrinking `q` helps position estimates much less per-decade
-than in a 1-state filter), confirmed numerically here (each 10x cut in `q`
-bought only ~1.7x more noise reduction, not 10x). Reaching a level 10
-that's meaningfully stronger than level 1 (rather than the two being
-barely distinguishable, which is what using `smooth_strength_factor`
-directly gave here) therefore needs `q` to range over several *orders of
-magnitude* between the two ends, not just one.
+`1/KALMAN_LEVEL_SPAN` of level 1's. Deliberately *not* a generic 10x span:
+a steady-state constant-velocity Kalman filter's position-noise reduction
+scales only as the *fourth root* of `r/q` (a standard result for the CV
+model — the coupled velocity state means shrinking `q` helps position
+estimates much less per-decade than in a 1-state filter; confirmed here,
+each 10x cut in `q` bought only ~1.7x more noise reduction). So level 10
+being meaningfully stronger than level 1 needs `q` to range over several
+*orders of magnitude*, not just one.
 """
 const KALMAN_LEVEL_SPAN = 1.0e6
 
@@ -290,7 +277,7 @@ function append_smooth_value!(app, source::Observable{Vector{Float64}}, target::
 end
 
 """
-    recompute_roi_channel_smooth!(app, series::RoiChannelSeries)
+    recompute_roi_smooth!(app, series::RoiChannelSeries)
 
 Recompute one ROI's smoothed photon-count, lifetime, and concentration
 series (see `recompute_smooth_series!`) and notify their observables. Uses
@@ -299,7 +286,7 @@ every Nth frame — see `RoiChannelSeries` in data_types.jl), not a shared
 app-wide one. Used when the smoothing level changes (handlers_layout.jl),
 looping every `roi_channel_series(app_run)`.
 """
-function recompute_roi_channel_smooth!(app, series::RoiChannelSeries)
+function recompute_roi_smooth!(app, series::RoiChannelSeries)
     recompute_smooth_series!(app, series.photons, series.photons_smooth, series.timestamps, series.photons_kalman)
     notify(series.photons_smooth)
     recompute_smooth_series!(app, series.lifetime, series.lifetime_smooth, series.timestamps, series.lifetime_kalman)

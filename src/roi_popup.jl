@@ -252,7 +252,7 @@ function add_roi_from_boundary!(image_axis, volume::Array{Float64,3}, x_offset::
     summed_hist = roi_summed_histogram(volume, pixels)
 
     params_raw, _ = try
-        vec_to_lifetime(summed_hist; guess=initial_guess_for_lifetime_count("1 lifetime"), histogram_resolution=n_bins)
+        vec_to_lifetime(summed_hist; guess=initial_guess_for_lifetimes("1 lifetime"), histogram_resolution=n_bins)
     catch e
         @warn "Lifetime fit failed for ROI" roi=roi_label error=string(e)
         return DrawnROI(shifted_xs, shifted_ys, plots)

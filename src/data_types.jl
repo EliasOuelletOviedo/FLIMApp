@@ -27,7 +27,7 @@ histogram, its fitted decay curve, and the scalar fit results. Two of these
 (one per channel) make up an `AcquisitionSample`. The "absent channel"
 convention (a file with only one TCSPC channel) uses the same sentinels as
 everywhere else: `NaN` for scalars, `Float64[]` for vectors — see
-`ChannelFrame()` below and `process_channel_frame!` in acquisition.jl.
+`ChannelFrame()` below and `process_frame!` in acquisition.jl.
 """
 struct ChannelFrame
     histogram::Vector{Float64}
@@ -60,7 +60,7 @@ actually produced, so a file the upstream hardware/software never wrote
 (e.g. a lag spike at the source) is invisible to it and it silently drifts
 out of sync with the real physical sequence from that point on.
 `file_sequence_number` (parsed from `source_file`'s name, see
-`extract_file_sequence_number` in acquisition.jl) is this file's own
+`parse_file_sequence_number` in acquisition.jl) is this file's own
 embedded position in that sequence instead, so a missing file just leaves a
 gap rather than shifting everything after it — used by `consumer_loop`
 (runtime.jl) for round-robin ROI assignment specifically because of this.
@@ -112,7 +112,7 @@ end
 Hardware controller configuration for the two PI output channels. No `D`
 gain: the derivative term was dropped in favor of a Kalman observer
 (`KalmanState`/`kalman_update!`, smoothing.jl) feeding the P/I error terms a
-filtered lifetime instead of the raw fit — see `process_channel_frame!`
+filtered lifetime instead of the raw fit — see `process_frame!`
 (acquisition.jl).
 """
 Base.@kwdef mutable struct ControllerSettings
@@ -178,19 +178,10 @@ Base.@kwdef mutable struct ConsoleSettings end
 """
     AppState
 
-Persistent configuration state that can be serialized to disk.
-
-# Fields
-- `dark::Bool`: dark mode toggle (true for dark, false for light)
-- `current_panel::Symbol`: currently active UI panel (:layout, :controller, :protocol, :console)
-- `layout::LayoutSettings`: layout and display settings
-- `controller::ControllerSettings`: hardware controller configuration
-- `protocol::ProtocolSettings`: experimental protocol settings
-- `roi::RoiSettings`: ROI settings
-- `console::ConsoleSettings`: console and logging settings
-
-This structure is serialized to `state_file_path()` to preserve user
-preferences across application sessions.
+Persistent user preferences, serialized to `state_file_path()` to survive
+across sessions. `current_panel` is the active UI panel (:layout,
+:controller, :protocol, :console); the settings fields group the per-panel
+configuration.
 """
 mutable struct AppState
     dark::Bool
@@ -205,13 +196,7 @@ end
 """
     AppState(use_dark::Bool)
 
-Constructor creating AppState with default values.
-
-# Arguments
-- `use_dark::Bool`: initialize with dark theme if true
-
-# Returns
-- `AppState` with all settings initialized to defaults
+All-defaults state, with the dark theme when `use_dark` is true.
 """
 function AppState(use_dark::Bool)
     return AppState(
@@ -240,11 +225,6 @@ for the per-ROI accumulated time series that back every other plot).
 `AppRun` holds one instance per channel (`ch1`/`ch2`), so every "do X for
 each channel" site loops over `(app_run.ch1, app_run.ch2)` instead of
 duplicating `_ch1`/`_ch2` code.
-
-# Fields
-- `histogram::Observable{Vector{Float64}}`: current histogram data
-- `fit::Observable{Vector{Float64}}`: fitted decay curve
-- `counts::Observable{Float64}`: current photon count
 """
 struct ChannelSeries
     histogram::Observable{Vector{Float64}}
@@ -315,7 +295,7 @@ KalmanState() = KalmanState(NaN, 0.0, NaN, 0.0, NaN, NaN, NaN, NaN)
 One ROI's accumulated runtime time series for one TCSPC channel — the unit
 that gets duplicated once per drawn ROI (`app_run.rois`), per channel, when
 incoming acquisition frames are round-robin assigned to ROIs (see
-`accumulate_roi_channel_sample!` in runtime.jl). Carries its own
+`accumulate_roi_sample!` in runtime.jl). Carries its own
 `timestamps` because each ROI only receives every Nth frame (N = number of
 ROIs), so it can't share a single app-wide per-frame x-axis the way the
 original single-series design did.
@@ -407,7 +387,7 @@ during execution. It is NOT serialized.
 - `ch1_rois::Vector{RoiChannelSeries}` / `ch2_rois::Vector{RoiChannelSeries}`: per-channel,
   per-ROI accumulated time series (every other plot) — always the same
   length as each other, `max(1, length(rois[]))` as of the last
-  `rebuild_roi_channel_series!` call (`start_pressed`/CLEAR, runtime.jl),
+  `rebuild_roi_series!` call (`start_pressed`/CLEAR, runtime.jl),
   but only when the ROI toggle (`app.roi.active`, Protocol panel,
   handlers_protocol.jl) is on; a single-element vector — reproducing the
   original un-split single-series behavior — otherwise, regardless of how
@@ -469,11 +449,7 @@ end
 """
     AppRun()
 
-Constructor creating AppRun with initialized observables and null task references.
-
-# Returns
-- `AppRun` with all observables initialized to empty vectors/defaults,
-  all tasks set to nothing, and channel set to nothing
+Fresh runtime state: empty observables, all tasks and the channel `nothing`.
 """
 function AppRun()
     return AppRun(
