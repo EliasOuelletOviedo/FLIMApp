@@ -274,6 +274,27 @@ function send_command(serial_conn, command_str::AbstractString)
     return nothing
 end
 
+"""
+    zero_all_outputs!(serial_conn)
+
+Drive every analog (AO 1–4) and digital (DO 1–3) output to zero — the safe
+resting state sent on both STOP (runtime.jl) and disconnect (handlers.jl).
+Failures are logged, not raised, so a flaky port can't block shutdown.
+"""
+function zero_all_outputs!(serial_conn)
+    try
+        for ch in 1:4
+            send_command(serial_conn, "A 0 AO $ch 0\n")
+        end
+        for ch in 1:3
+            send_command(serial_conn, "A 0 DO $ch 0\n")
+        end
+    catch e
+        @warn "Failed to zero hardware outputs" error=string(e)
+    end
+    return nothing
+end
+
 
 """
     serial_signal_loop(app, app_run; rate=10.0)

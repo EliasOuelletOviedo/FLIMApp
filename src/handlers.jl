@@ -12,6 +12,19 @@ Wires up:
 Uses Observables for reactive updates and on(...) bindings for event attachment.
 """
 
+"""
+    show_status!(blocks, message::AbstractString)
+
+Write a short user-facing message to the info label — used to surface
+failures (no IRF, missing data folder, connection error) in the window
+instead of only in the console log. `infos_loop` overwrites it with the live
+frequency/file readout once an acquisition is actually running.
+"""
+function show_status!(blocks, message::AbstractString)
+    blocks.info_label.text[] = String(message)
+    return nothing
+end
+
 function update_start_button_label!(app_run, blocks)
     if !app_run.running[]
         blocks.start_button.label[] = "START"
@@ -164,17 +177,7 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
 
     on(blocks.connect_button.clicks) do _
         if app_run.serial_conn !== nothing
-            try
-                send_command(app_run.serial_conn, "A 0 AO 1 0\n")
-                send_command(app_run.serial_conn, "A 0 AO 2 0\n")
-                send_command(app_run.serial_conn, "A 0 AO 3 0\n")
-                send_command(app_run.serial_conn, "A 0 AO 4 0\n")
-                send_command(app_run.serial_conn, "A 0 DO 1 0\n")
-                send_command(app_run.serial_conn, "A 0 DO 2 0\n")
-                send_command(app_run.serial_conn, "A 0 DO 3 0\n")
-            catch e
-                @warn "Failed to send zero-signal command during disconnect" error=string(e)
-            end
+            zero_all_outputs!(app_run.serial_conn)
 
             try
                 close(app_run.serial_conn)
@@ -191,12 +194,14 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
         selected_port = blocks.port_menu.selection[]
         if !(selected_port isa AbstractString) || selected_port == "No port selected"
             @warn "No port selected"
+            show_status!(blocks, "Select a serial port first")
             return
         end
 
         ser = connect_to_port(selected_port)
         if ser === nothing
             blocks.connect_button.label[] = "CONNECT"
+            show_status!(blocks, "Could not connect to $selected_port")
             return
         end
 

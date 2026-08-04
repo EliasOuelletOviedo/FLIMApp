@@ -187,7 +187,7 @@ function add_setpoint_highlight!(ax, app_run)
 end
 
 """
-    draw_lifetime_plot!(axis, app_run, show_ch1, show_ch2)
+    draw_lifetime_plot!(axis, app, app_run, show_ch1, show_ch2)
 
 Draw the Lifetime plot's series onto `axis`: the protocol-setpoint
 highlight and trace (channel-agnostic — it's the PID target, not measured
@@ -201,15 +201,15 @@ initial-selection draw at GUI construction time (GUI.jl) via
 `render_plot!` — see `draw_histogram_plot!` above for why this
 needs to be one function, not two copies.
 """
-function draw_lifetime_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
+function draw_lifetime_plot!(axis, app, app_run, show_ch1::Bool, show_ch2::Bool)
     add_setpoint_highlight!(axis, app_run)
-    protocol_x, protocol_y = aligned_xy_observables(app_run.timestamps, app_run.protocol_setpoint)
+    protocol_x, protocol_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.protocol_setpoint)
     lines!(axis, protocol_x, protocol_y, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
 
     for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
         for series in roi_series
-            raw_x, raw_y = aligned_xy_observables(series.timestamps, series.lifetime)
-            smooth_x, smooth_y = aligned_xy_observables(series.timestamps, series.lifetime_smooth)
+            raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, series.lifetime)
+            smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, series.lifetime_smooth)
             lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
             lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
         end
@@ -219,7 +219,7 @@ function draw_lifetime_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
 end
 
 """
-    draw_ion_concentration_plot!(axis, app_run, show_ch1, show_ch2)
+    draw_ion_concentration_plot!(axis, app, app_run, show_ch1, show_ch2)
 
 Draw the Ion concentration plot's series onto `axis`: each shown channel's
 raw concentration and its smoothed trace, one line pair per ROI — same
@@ -229,13 +229,13 @@ per-ROI superimposed-same-color-no-legend treatment as
 handler and the initial-selection draw for the same reason as
 `draw_lifetime_plot!`.
 """
-function draw_ion_concentration_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
+function draw_ion_concentration_plot!(axis, app, app_run, show_ch1::Bool, show_ch2::Bool)
     add_setpoint_highlight!(axis, app_run)
 
     for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
         for series in roi_series
-            raw_x, raw_y = aligned_xy_observables(series.timestamps, series.concentration)
-            smooth_x, smooth_y = aligned_xy_observables(series.timestamps, series.concentration_smooth)
+            raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, series.concentration)
+            smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, series.concentration_smooth)
             lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
             lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
         end
@@ -245,7 +245,7 @@ function draw_ion_concentration_plot!(axis, app_run, show_ch1::Bool, show_ch2::B
 end
 
 """
-    draw_photon_counts_plot!(axis, app_run, show_ch1, show_ch2)
+    draw_photon_counts_plot!(axis, app, app_run, show_ch1, show_ch2)
 
 Draw the Photon counts plot's series onto `axis`: each shown channel's raw
 photon-count trace and its smoothed trace, one line pair per ROI — same
@@ -255,13 +255,13 @@ per-ROI superimposed-same-color-no-legend treatment as
 handler and the initial-selection draw for the same reason as
 `draw_lifetime_plot!`.
 """
-function draw_photon_counts_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
+function draw_photon_counts_plot!(axis, app, app_run, show_ch1::Bool, show_ch2::Bool)
     add_setpoint_highlight!(axis, app_run)
 
     for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
         for series in roi_series
-            raw_x, raw_y = aligned_xy_observables(series.timestamps, series.photons)
-            smooth_x, smooth_y = aligned_xy_observables(series.timestamps, series.photons_smooth)
+            raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, series.photons)
+            smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, series.photons_smooth)
             lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
             lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
         end
@@ -303,16 +303,18 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol)
     if selection == "Command"
         add_setpoint_highlight!(axis, app_run)
 
-        lines!(axis, app_run.timestamps, app_run.command1, color=PLOT_COLOR_CH1, linewidth=PLOT_LINEWIDTH)
-        lines!(axis, app_run.timestamps, app_run.command2, color=PLOT_COLOR_CH2, linewidth=PLOT_LINEWIDTH)
+        cmd1_x, cmd1_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.command1)
+        cmd2_x, cmd2_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.command2)
+        lines!(axis, cmd1_x, cmd1_y, color=PLOT_COLOR_CH1, linewidth=PLOT_LINEWIDTH)
+        lines!(axis, cmd2_x, cmd2_y, color=PLOT_COLOR_CH2, linewidth=PLOT_LINEWIDTH)
     elseif selection == "Lifetime"
-        draw_lifetime_plot!(axis, app_run, show_ch1, show_ch2)
+        draw_lifetime_plot!(axis, app, app_run, show_ch1, show_ch2)
     elseif selection == "Histogram"
         draw_histogram_plot!(axis, app_run, show_ch1, show_ch2)
     elseif selection == "Ion concentration"
-        draw_ion_concentration_plot!(axis, app_run, show_ch1, show_ch2)
+        draw_ion_concentration_plot!(axis, app, app_run, show_ch1, show_ch2)
     elseif selection == "Photon counts"
-        draw_photon_counts_plot!(axis, app_run, show_ch1, show_ch2)
+        draw_photon_counts_plot!(axis, app, app_run, show_ch1, show_ch2)
     end
 
     if !app_run.running[]
@@ -321,18 +323,14 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol)
         xmax = lim.origin[1] + lim.widths[1]
         xlims!(axis, 0.0, max(Float64(xmax), 0.0))
     else
-        # Running (including paused): re-pin the axis to the correct rolling
-        # window immediately, via the same function consumer_loop calls on
-        # every publish tick. Without this, a plot-type switch away from
-        # "Histogram" leaves the x-axis limits in the "automatic" state that
-        # autoscale_values!(axis) (the Histogram-only 1-arg method) sets —
-        # Makie then recomputes x reactively from the newly drawn plot's
-        # *unwindowed* full-history data (see draw_lifetime_plot! etc., which
-        # plot the whole `app_run.timestamps` series, not a time_range-clipped
-        # slice) rather than the intended last-`time_range`-seconds window.
-        # While actively running this self-heals within one publish tick
-        # (~100ms); while paused, consumer_loop is blocked and nothing else
-        # would ever re-pin it.
+        # Running (including paused): pin the axis to the rolling window now,
+        # via the same function consumer_loop calls on every publish tick. The
+        # drawn lines are already clipped to the last time_range seconds
+        # (plot_xy_observables), but the axis *limits* still need setting so a
+        # mid-run plot-type switch shows that window immediately rather than
+        # whatever autolimits makes of the just-drawn data. While running this
+        # self-heals within one publish tick (~100ms); while paused,
+        # consumer_loop is blocked and nothing else would ever re-pin it.
         autoscale_plot!(app, app_run, axis, selection, show_ch1, show_ch2)
     end
 
@@ -447,17 +445,23 @@ function autoscale_values!(app, ax, xs::AbstractVector, ys::AbstractVector; pad_
 end
 
 """
-    aligned_xy_observables(x_obs, y_obs)
+    plot_xy_observables(app, app_run, x_obs, y_obs)
 
-Return a pair of lifted observables holding the common-length prefix of
-`x_obs`/`y_obs`, so plotting code never sees mismatched-length series while
-a background task is still appending to one of them.
+Pair of lifted observables feeding one plotted line. Always trims to the
+common-length prefix of `x_obs`/`y_obs` (so plotting never sees a
+mismatched-length series while a task is mid-append). While an acquisition
+is running it further clips to the last `time_range` seconds
+(`windowed_slice`), so per-frame render/allocation cost stays bounded no
+matter how long the session runs instead of growing with the full history;
+when stopped it returns the whole series, so the final view shows the entire
+run (matching `render_plot!`'s full-history autolimits on stop).
 """
-function aligned_xy_observables(x_obs::Observable{Vector{Float64}}, y_obs::Observable{Vector{Float64}})
+function plot_xy_observables(app, app_run, x_obs::Observable{Vector{Float64}}, y_obs::Observable{Vector{Float64}})
     paired = lift(x_obs, y_obs) do xs, ys
         n = min(length(xs), length(ys))
-        if n == 0
-            return (Float64[], Float64[])
+        n == 0 && return (Float64[], Float64[])
+        if app_run.running[]
+            return windowed_slice(xs, ys, app.layout.time_range)
         end
         return (xs[1:n], ys[1:n])
     end

@@ -206,7 +206,9 @@ end
 
 function infos_loop(app_run, info_label; rate=1.0)
     last_i = app_run.i[]
+    last_t = time()
     dt = 1/float(rate)
+    freq_ema = NaN   # smoothed frame rate (Hz), EMA of the instantaneous rate
     while app_run.running[]
         if app_run.paused[]
             sleep(min(dt, 0.05))
@@ -216,10 +218,16 @@ function infos_loop(app_run, info_label; rate=1.0)
         sleep(dt)
         try
             i = app_run.i[]
-            if i != last_i
-                di = i - last_i
+            now = time()
+            elapsed = now - last_t
+            if i != last_i && elapsed > 0
+                # Rate over the true elapsed time (not the nominal dt), smoothed
+                # so the readout doesn't jump with each integer frame-count tick.
+                inst = (i - last_i) / elapsed
+                freq_ema = isfinite(freq_ema) ? 0.6 * freq_ema + 0.4 * inst : inst
+                info_label.text[] = "Frequency: $(round(freq_ema, digits=1)) Hz\nFile: $i"
                 last_i = i
-                info_label.text[] = "Frequency: $di Hz\nFile: $i"
+                last_t = now
             end
         catch e
             @warn "Infos loop error" e
@@ -405,6 +413,21 @@ function spawn_acquisition_worker!(app_run, selected_mode, layout, controller, i
 end
 
 """
+    abort_start!(app_run, blocks)
+
+Undo the `running`/`paused` flags claimed by `start_pressed` and restore the
+button labels when a start is abandoned after those flags were set (e.g. a
+missing data folder found during the async validation).
+"""
+function abort_start!(app_run, blocks)
+    app_run.running[] = false
+    app_run.paused[] = false
+    update_start_button_label!(app_run, blocks)
+    update_stop_button_label!(app_run, blocks)
+    return nothing
+end
+
+"""
     start_pressed(app, app_run, blocks)
 
 Handler called when the START button is clicked. After its guard checks and
@@ -437,9 +460,18 @@ function start_pressed(app, app_run, blocks)
         return
     end
 
+    # A previous run's async teardown (stop_pressed) may still be draining its
+    # tasks; starting now would let that teardown clobber the fresh channel/tasks.
+    if tasks_still_running(app_run)
+        @info "Previous run is still shutting down; ignoring START"
+        show_status!(blocks, "Finishing previous run…")
+        return
+    end
+
     # Check if IRF is loaded before starting
     if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
         @error "Cannot start acquisition: IRF not loaded. Please load an IRF file first."
+        show_status!(blocks, "Load an IRF file before starting")
         return
     end
 
@@ -489,6 +521,33 @@ function start_pressed(app, app_run, blocks)
             return nothing
         end
 
+        selected_mode = blocks.mode_menu.selection[]
+        if !(selected_mode isa AbstractString)
+            selected_mode = "Playback"
+        end
+
+        # Validate the data source here, on the GUI thread, so the common
+        # "clicked START but nothing happened" cases surface in the window
+        # instead of only in the worker's console log. Realtime waits for
+        # files to appear, so it just needs the folder to exist.
+        data_path = get_data_root_path()
+        if !isdir(data_path)
+            show_status!(blocks, "Data folder not found")
+            abort_start!(app_run, blocks)
+            return nothing
+        end
+        if selected_mode != "Realtime" && !any(f -> endswith(lowercase(f), ".sdt"), readdir(data_path))
+            show_status!(blocks, "No .sdt files in the data folder")
+            abort_start!(app_run, blocks)
+            return nothing
+        end
+
+        selected_lifetimes = blocks.lifetimes_menu.selection[]
+        if !(selected_lifetimes isa AbstractString)
+            selected_lifetimes = "2 lifetimes"
+        end
+        initial_guess = initial_guess_for_lifetimes(selected_lifetimes)
+
         # Capacity: the worker (its own thread since Threads.@spawn, see
         # spawn_acquisition_worker!) blocks on put! once this fills, so a
         # transient GUI-thread slowdown (a GC pause, a Makie redraw, a
@@ -508,18 +567,6 @@ function start_pressed(app, app_run, blocks)
         # see its docstring.
         render_plot!(app, app_run, blocks, :plot1)
         render_plot!(app, app_run, blocks, :plot2)
-
-        selected_mode = blocks.mode_menu.selection[]
-        if !(selected_mode isa AbstractString)
-            selected_mode = "Playback"
-        end
-
-        selected_lifetimes = blocks.lifetimes_menu.selection[]
-        if !(selected_lifetimes isa AbstractString)
-            selected_lifetimes = "2 lifetimes"
-        end
-
-        initial_guess = initial_guess_for_lifetimes(selected_lifetimes)
 
         sync_runtime_protocol!(app, app_run)
         protocol_config = app_run.protocol
@@ -549,26 +596,43 @@ function resume_pressed(app_run)
 end
 
 """
+    background_tasks(app_run)
+
+The five background-task slots, in the order `stop_pressed` tears them down.
+"""
+background_tasks(app_run) = (app_run.worker_task, app_run.consumer_task,
+                             app_run.autoscaler_task, app_run.infos_task, app_run.serial_task)
+
+"""
+    tasks_still_running(app_run)::Bool
+
+True while a previous run's tasks are still shutting down (`stop_pressed`
+waits for them off the render loop, see below). `start_pressed` checks this
+so a restart can't race the async teardown and have its fresh channel/tasks
+clobbered by the tail of the old one.
+"""
+function tasks_still_running(app_run)::Bool
+    return any(t -> t !== nothing && !istaskdone(t), background_tasks(app_run))
+end
+
+"""
     stop_pressed(app_run)
 
-Stop any running acquisition.  This function clears the `running`
-flag, closes the channel and waits for any background tasks to
-complete.  Exceptions from worker or consumer tasks are caught and
-logged instead of propagating.
+Stop any running acquisition: zero the hardware outputs, clear `running`,
+and close the channel — all synchronously — then `wait` on the background
+tasks from a detached `@async` task rather than inline.
+
+The `wait` is what makes the difference: `stop_pressed` runs on GLMakie's
+render-loop task (it's a button handler), and waiting there for a worker
+mid-fit froze the window until the fit finished. Doing it on a separate
+task keeps rendering live. The task refs are deliberately left in place (not
+nil'd) so `tasks_still_running` can see the teardown is ongoing and block a
+restart until it completes — `start_pressed` overwrites them with the fresh
+run's tasks once they're done.
 """
 function stop_pressed(app_run)
     if app_run.serial_conn !== nothing
-        try
-            send_command(app_run.serial_conn, "A 0 AO 1 0\n")
-            send_command(app_run.serial_conn, "A 0 AO 2 0\n")
-            send_command(app_run.serial_conn, "A 0 AO 3 0\n")
-            send_command(app_run.serial_conn, "A 0 AO 4 0\n")
-            send_command(app_run.serial_conn, "A 0 DO 1 0\n")
-            send_command(app_run.serial_conn, "A 0 DO 2 0\n")
-            send_command(app_run.serial_conn, "A 0 DO 3 0\n")
-        catch e
-            @warn "Failed to send zero-signal command during stop" error=string(e)
-        end
+        zero_all_outputs!(app_run.serial_conn)
     end
 
     if !app_run.running[]
@@ -584,9 +648,11 @@ function stop_pressed(app_run)
     if app_run.channel !== nothing && isopen(app_run.channel)
         close(app_run.channel)
     end
+    app_run.channel = nothing
+    app_run.save_progress[] = NaN
 
-    for t in (app_run.worker_task, app_run.consumer_task,
-              app_run.autoscaler_task, app_run.infos_task, app_run.serial_task)
+    tasks = background_tasks(app_run)
+    @async for t in tasks
         if t !== nothing && !istaskdone(t)
             try
                 wait(t)
@@ -596,13 +662,5 @@ function stop_pressed(app_run)
         end
     end
 
-    app_run.worker_task = nothing
-    app_run.consumer_task = nothing
-    app_run.autoscaler_task = nothing
-    app_run.infos_task = nothing
-    app_run.serial_task = nothing
-
-    app_run.channel = nothing
-    app_run.save_progress[] = NaN
     return nothing
 end
