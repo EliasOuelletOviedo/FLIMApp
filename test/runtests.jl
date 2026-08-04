@@ -256,4 +256,51 @@ end
     end
 end
 
+@testset "pixel_lifetime_map" begin
+    ctx = FLIMApp.RUNTIME[]
+    saved = (ctx.irf, ctx.irf_bin_size, ctx.tcspc_window_size)
+
+    try
+        n = FLIMApp.DEFAULT_HISTOGRAM_RESOLUTION
+        bin = FLIMApp.LASER_PULSE_PERIOD / n
+
+        # Same synthetic IRF as the MLE fit test above: a narrow Gaussian
+        # peak near the start of the window.
+        irf = zeros(n, 2)
+        irf[:, 1] = (0:(n - 1)) .* bin
+        for i in 1:n
+            irf[i, 2] = exp(-((i - 10)^2) / 8)
+        end
+        ctx.irf = irf
+        ctx.irf_bin_size = bin
+        mean_irf = FLIMApp.find_mean_arrival_time(irf[:, 2])
+
+        # 1x3 "image": pixel 1 is a bright, late point-mass decay; pixel 2 an
+        # equally bright but earlier one; pixel 3 is placed like pixel 1 but
+        # too dim overall to trust.
+        volume = zeros(1, 3, n)
+        volume[1, 1, 50] = 1000.0
+        volume[1, 2, 20] = 1000.0
+        volume[1, 3, 50] = 5.0
+
+        result = FLIMApp.pixel_lifetime_map(volume; min_photons=50.0)
+        @test size(result) == (1, 3)
+
+        # Point-mass histograms make find_mean_arrival_time exact, so the
+        # per-pixel result should match the same first-moment formula
+        # lifetime_estimate uses, computed independently here.
+        @test isapprox(result[1, 1], (50.0 - mean_irf) * bin; atol=1e-9)
+        @test isapprox(result[1, 2], (20.0 - mean_irf) * bin; atol=1e-9)
+        @test result[1, 1] > result[1, 2]   # later arrival -> longer apparent lifetime
+        @test isnan(result[1, 3])           # below min_photons -> masked out
+
+        # No IRF loaded: errors rather than returning a meaningless map.
+        ctx.irf = nothing
+        ctx.irf_bin_size = nothing
+        @test_throws ErrorException FLIMApp.pixel_lifetime_map(volume)
+    finally
+        ctx.irf, ctx.irf_bin_size, ctx.tcspc_window_size = saved
+    end
+end
+
 end # @testset FLIMApp

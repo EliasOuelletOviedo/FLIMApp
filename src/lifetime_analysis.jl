@@ -592,6 +592,49 @@ function lifetime_estimate(counts::AbstractVector{<:Real}; bin_size=0.039, tcspc
     return ((mean_data_arrival_time - mean_irf_arrival_time) * bin_size)::Float64
 end
 
+"""
+    pixel_lifetime_map(volume::Array{Float64,3}; min_photons::Real=50.0, tcspc_high_cut_index::Int64=0)::Matrix{Float64}
+
+Per-pixel approximate lifetime (ns), via the same first-moment analysis as
+`lifetime_estimate` (mean photon arrival time minus the IRF's own mean
+arrival time, scaled by the IRF's bin size) but applied to every pixel's own
+256-bin histogram (`volume[x, y, :]`, see `extract_sdt_volume` in
+roi_popup.jl) instead of one combined ROI histogram. No MLE fit — this is
+the cheap, no-optimizer estimate, meant for a quick per-pixel preview where
+fitting every pixel individually would be far too slow.
+
+A pixel with fewer than `min_photons` total counts gets `NaN` — first-moment
+analysis is biased and noisy at low counts, so the caller (roi_popup.jl)
+renders `NaN` as transparent rather than a misleading color. The IRF's own
+mean arrival time is computed once up front, not per pixel (unlike calling
+`lifetime_estimate` directly for every pixel would), so this stays cheap
+even across a full ~10^6-pixel image.
+
+Errors if the IRF hasn't been loaded (`RUNTIME[].irf`/`irf_bin_size`) —
+there is no "reliable" lifetime without it.
+"""
+function pixel_lifetime_map(volume::Array{Float64,3}; min_photons::Real=50.0, tcspc_high_cut_index::Int64=0)::Matrix{Float64}
+    irf = RUNTIME[].irf
+    bin_size = RUNTIME[].irf_bin_size
+    if irf === nothing || bin_size === nothing
+        error("IRF not loaded. Call init_irf_runtime!() before computing a pixel lifetime map.")
+    end
+
+    mean_irf_arrival_time = find_mean_arrival_time(irf[:, 2]; tcspc_high_cut_index=tcspc_high_cut_index)
+
+    n_cols, n_rows, n_bins = size(volume)
+    result = fill(NaN, n_cols, n_rows)
+
+    for y in 1:n_rows, x in 1:n_cols
+        counts = @view volume[x, y, :]
+        sum(counts) < min_photons && continue
+        mean_arrival_time = find_mean_arrival_time(counts; tcspc_high_cut_index=tcspc_high_cut_index)
+        result[x, y] = (mean_arrival_time - mean_irf_arrival_time) * bin_size
+    end
+
+    return result
+end
+
 # `fixed_parameters`'s default MUST track `params`'s length via `fill(NaN,
 # length(params))`, not a fixed literal: mle_objective (below) infers
 # number_of_lifetimes purely from `length(fixed_parameters)`, so a caller

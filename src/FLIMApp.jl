@@ -393,4 +393,4 @@ export AppState, AppRun, run_app, save_state, load_state
 
 @info "FLIM Application module loaded. Call run_app() to start."
 
-end # module FLIMApp
+end # module

@@ -355,12 +355,20 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # click) below.
     image_axis = Axis(axis_layout[1, 1]; merge(AXIS_IMAGE_ATTRS, Dict{Symbol, Any}(:title => "ROI Image", :yreversed => true, :aspect => DataAspect(), :xrectzoom => false, :yrectzoom => false))...)
 
-    im_import_button   = Button(buttons_layout[1, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import image"))...)
-    cellpose_button    = Button(buttons_layout[2, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Cellpose"))...)
-    roi_import_button  = Button(buttons_layout[1, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import ROI"))...)
-    roi_export_button  = Button(buttons_layout[2, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Export ROI"))...)
-    roi_clear_button   = Button(buttons_layout[1, 3]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Clear ROI"))...)
-    popup_close_button = Button(buttons_layout[2, 3]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Close"))...)
+    # First-moment (mean-arrival-time) per-pixel lifetime preview — see
+    # pixel_lifetime_map (lifetime_analysis.jl) and refresh_image_display!
+    # below. min_photons_textbox's default matches pixel_lifetime_map's own.
+    lifetime_map_label  = Label(buttons_layout[1, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Lifetime map"))...)
+    min_photons_label   = Label(buttons_layout[2, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Min photons"))...)
+    lifetime_map_toggle = Toggle(buttons_layout[1, 2];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => false))...)
+    min_photons_textbox = Textbox(buttons_layout[2, 2]; merge(TEXT_ATTRS,   Dict{Symbol, Any}(:displayed_string => "25", :stored_string => "25"))...)
+
+    im_import_button    = Button(buttons_layout[1, 3];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import image"))...)
+    cellpose_button     = Button(buttons_layout[2, 3];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Cellpose"))...)
+    roi_import_button   = Button(buttons_layout[1, 4];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import ROI"))...)
+    roi_export_button   = Button(buttons_layout[2, 4];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Export ROI"))...)
+    roi_clear_button    = Button(buttons_layout[1, 5];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Clear ROI"))...)
+    popup_close_button  = Button(buttons_layout[2, 5];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Close"))...)
 
     image_plot = Ref{Any}(nothing)
     # Every ROI currently shown on image_axis (imported or manually drawn),
@@ -377,6 +385,105 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # (same (x, y) extent, already padded-row-trimmed to match) — the data
     # ROI lifetime fits are actually computed from.
     pixel_volume = Ref{Union{Nothing, Array{Float64,3}}}(nothing)
+    # Grayscale intensity image for the currently displayed image, cached
+    # alongside pixel_volume so update_lifetime_overlay! (below) can redraw
+    # the overlay without re-reading the SDT file.
+    intensity_image = Ref{Union{Nothing, Matrix{Float64}}}(nothing)
+    # The lifetime-map overlay heatmap, drawn on top of the always-visible
+    # grayscale image[] — nothing if none has been computed yet (or the
+    # computation failed/found no qualifying pixel). Unlike image_plot,
+    # toggling it on/off (see lifetime_map_toggle below) only flips its
+    # `.visible` attribute; it is not deleted/recreated, so a toggle click is
+    # a cheap redraw, not a recompute.
+    lifetime_map_plot = Ref{Any}(nothing)
+    # Lifetime-map Colorbar: unlike a heatmap plot, a Colorbar block has no
+    # settable `visible`, so it's created only while the overlay is actually
+    # shown and deleted (not hidden) when the overlay is toggled off.
+    lifetime_colorbar = Ref{Any}(nothing)
+    # Last valid min-photons threshold, restored into the textbox on an
+    # unparseable edit — same reset-to-last-valid idiom as the Controller
+    # panel's P/I textboxes (handlers_controller.jl).
+    min_photons = Ref(50.0)
+
+    """
+        update_lifetime_overlay!()
+
+    Recompute the lifetime-map overlay (`pixel_lifetime_map`,
+    lifetime_analysis.jl) from the cached `pixel_volume`/`min_photons` and
+    redraw it — called once right after an image import and again whenever
+    `min_photons_textbox` commits a new threshold, so the overlay is always
+    ready the moment `lifetime_map_toggle` is switched on (no compute lag on
+    the toggle click itself). No-op if no image is loaded.
+
+    Always replaces the previous overlay heatmap/colorbar outright (cheap:
+    this only runs on import or an explicit threshold edit, not per toggle
+    click) rather than updating them in place. The overlay heatmap's
+    `visible` is set to match `lifetime_map_toggle`'s current state, so
+    changing the threshold while the overlay is showing updates it live,
+    and while hidden leaves it hidden. Falls back to no overlay (grayscale
+    image only, via the always-present `image_plot`) if the map computation
+    fails (e.g. IRF not loaded) or no pixel meets the photon threshold —
+    logging why either way.
+
+    Color range is `mean ± 3σ` over the qualifying (non-NaN) pixels, not
+    `extrema` — low-photon pixels that clear `min_photons` but still carry
+    high first-moment variance produce occasional far-outlier estimates that
+    would otherwise stretch the whole colormap and wash out the real
+    contrast. Pixel values outside that range are clamped to it (not just
+    the colormap, so `nan_color`-excluded pixels aside, what's displayed is
+    the actual capped data) before drawing.
+    """
+    function update_lifetime_overlay!()
+        volume = pixel_volume[]
+        volume === nothing && return nothing
+
+        if lifetime_map_plot[] !== nothing
+            delete!(image_axis, lifetime_map_plot[])
+            lifetime_map_plot[] = nothing
+        end
+        if lifetime_colorbar[] !== nothing
+            delete!(lifetime_colorbar[])
+            lifetime_colorbar[] = nothing
+        end
+
+        lifetime_map = try
+            pixel_lifetime_map(volume; min_photons=min_photons[])
+        catch e
+            @warn "Failed to compute pixel lifetime map" error=string(e)
+            return nothing
+        end
+
+        finite_values = filter(isfinite, vec(lifetime_map))
+        if isempty(finite_values)
+            @warn "No pixel has enough photons for a lifetime map" min_photons=min_photons[]
+            return nothing
+        end
+
+        # mean ± 3σ, degrading gracefully to a small pad around the mean
+        # when there's no meaningful spread to measure (a single qualifying
+        # pixel, or all of them identical).
+        mu = mean(finite_values)
+        sigma = length(finite_values) >= 2 ? std(finite_values) : 0.0
+        lo, hi = mu - 3*sigma, mu + 3*sigma
+        if !(hi > lo)
+            lo -= 0.5
+            hi += 0.5
+        end
+
+        clamped_map = clamp.(lifetime_map, lo, hi)   # NaN passes through unchanged
+
+        x_offset, y_offset = image_offset[]
+        n_cols, n_rows = size(clamped_map)
+        xs = x_offset:(x_offset + n_cols - 1)
+        ys = y_offset:(y_offset + n_rows - 1)
+
+        lifetime_map_plot[] = heatmap!(image_axis, xs, ys, clamped_map; colormap = :turbo, colorrange = (lo, hi), nan_color = :transparent, visible = lifetime_map_toggle.active[])
+        if lifetime_map_toggle.active[]
+            lifetime_colorbar[] = Colorbar(axis_layout[1, 2]; colormap = :turbo, limits = (lo, hi), label = "ns")
+        end
+
+        return nothing
+    end
 
     # drawn_rois and app_run.rois are kept in lockstep, index-for-index:
     # drawn_rois holds this popup's GUI plot objects (never leaves this
@@ -498,10 +605,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             return
         end
         pixel_volume[] = volume
-
-        if image_plot[] !== nothing
-            delete!(image_axis, image_plot[])
-        end
+        intensity_image[] = intensity
 
         n_cols, n_rows = size(intensity)
         canvas_size = max(n_cols, n_rows)
@@ -514,10 +618,49 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         # and its local x_offset/y_offset above have gone away.
         app_run.imported_image_size = (n_cols, n_rows)
 
+        # Grayscale base image: always drawn, never hidden by the lifetime
+        # toggle below — the lifetime map (if any) is a separate heatmap
+        # layered on top of it.
+        if image_plot[] !== nothing
+            delete!(image_axis, image_plot[])
+        end
         image_plot[] = heatmap!(image_axis, x_offset:(x_offset + n_cols - 1), y_offset:(y_offset + n_rows - 1), intensity, colormap = :grays)
+        update_lifetime_overlay!()
         limits!(image_axis, 0, canvas_size, 0, canvas_size)
 
         @info "Image imported" path=filepath size=size(intensity) canvas_size=canvas_size offset=(x_offset, y_offset)
+    end
+
+    # Cheap show/hide: no recompute, since update_lifetime_overlay! already
+    # kept lifetime_map_plot current (import time, and any threshold edit).
+    on(lifetime_map_toggle.active) do is_active
+        plot = lifetime_map_plot[]
+        if plot !== nothing
+            plot.visible[] = is_active
+        end
+
+        if is_active
+            if plot !== nothing && lifetime_colorbar[] === nothing
+                lo, hi = plot.colorrange[]
+                lifetime_colorbar[] = Colorbar(axis_layout[1, 2]; colormap = :turbo, limits = (lo, hi), label = "ns")
+            end
+        elseif lifetime_colorbar[] !== nothing
+            delete!(lifetime_colorbar[])
+            lifetime_colorbar[] = nothing
+        end
+    end
+
+    on(min_photons_textbox.stored_string) do new_str
+        val = tryparse(Float64, new_str)
+        if val !== nothing && val >= 0
+            min_photons[] = val
+            min_photons_textbox.displayed_string[] = string(val)
+        else
+            min_photons_textbox.displayed_string[] = string(min_photons[])
+            min_photons_textbox.stored_string[]    = string(min_photons[])
+        end
+
+        update_lifetime_overlay!()
     end
 
     on(roi_import_button.clicks) do _

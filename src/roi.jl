@@ -506,6 +506,8 @@ function build_and_send_roi_trigger_buffer!(app, app_run)
             response = send_roi_trigger_command(serial_conn, "S 1 D 1 R 1\n")
             response *= send_roi_trigger_command(serial_conn, "A 1 AA $f $(length(buffer))\n")
             response *= send_roi_trigger_command(serial_conn, "A 1 DD 1 $(f * n_rois) $duty_percent 2 $n_rois 10\n")
+            response *= send_roi_trigger_command(serial_conn, "A 1 DD 1 $(f * n_rois) $duty_percent 2 1 10\n")
+            # response *= send_roi_trigger_command(serial_conn, "A 1 DD 1 $f $duty_percent 2 1 $duty_percent\n")
             response *= send_roi_trigger_command(serial_conn, "A 0 DO 3 1\n")
 
             if occursin("ERR", response)
