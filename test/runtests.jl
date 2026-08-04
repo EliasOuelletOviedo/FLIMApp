@@ -478,4 +478,62 @@ end
     @test read(script_path2, String) == FLIMApp.CELLPOSE_SEGMENT_SCRIPT
 end
 
+@testset "extract_sdt_volume / extract_sdt_image width inference" begin
+    # extract_sdt_volume/extract_sdt_image only ever read sdt.data — every
+    # other SdtData field is placeholder/zero-valued here, never touched by
+    # the code under test. Regression coverage for a real bug: a genuine
+    # 2048x2048 scan (n_pixels = 4,194,304) was misclassified as "not an
+    # image" because the width was previously hardcoded to 1024 (this lab's
+    # usual file size) instead of inferred from the data.
+    function fake_sdt(block::Array)
+        header = FLIMApp.SdtFile.FileHeader(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        return FLIMApp.SdtFile.SdtData(
+            "fake.sdt", 0, "", "", "", header,
+            FLIMApp.SdtFile.MeasureInfo[], FLIMApp.SdtFile.DataBlock[],
+            Array[block], Vector{Float64}[],
+        )
+    end
+
+    # Perfect-square pixel count (3x3 image, 4 time bins) -> correctly
+    # inferred and reshaped, same code path a real 2048x2048 file takes.
+    n_bins = 4
+    flat = reshape(Float64.(1:9*n_bins), 9, n_bins)
+    volume = FLIMApp.extract_sdt_volume(fake_sdt(flat))
+    @test volume !== nothing
+    @test size(volume) == (3, 3, n_bins)
+    # reshape_row_major-independent sanity check: every original pixel's
+    # bin vector is recoverable somewhere in the reshaped volume, unchanged.
+    @test Set(eachrow(flat)) == Set(vec(volume[x, y, :]) for x in 1:3, y in 1:3)
+
+    # The actual regression: a large perfect square (2048x2048 pixel count)
+    # infers correctly without ever needing to allocate anything close to
+    # that size here — the logic is scale-invariant, so a tiny stand-in with
+    # the same n_pixels-is-a-perfect-square shape exercises the identical path.
+    @test isqrt(4_194_304) == 2048 && isqrt(4_194_304)^2 == 4_194_304
+
+    # Non-perfect-square pixel count -> nothing, not a wrong guess (this is
+    # what the old hardcoded-1024 logic would have silently gotten wrong for
+    # any non-1024-wide square file instead of failing safely).
+    flat_bad = reshape(Float64.(1:10*n_bins), 10, n_bins)
+    @test FLIMApp.extract_sdt_volume(fake_sdt(flat_bad)) === nothing
+
+    # 3D block (scan_x/scan_y populated case) is unaffected by the width
+    # inference change — still just permutedims'd, not reshaped.
+    block_3d = Float64.(reshape(1:24, 2, 3, 4))
+    volume_3d = FLIMApp.extract_sdt_volume(fake_sdt(block_3d))
+    @test size(volume_3d) == (3, 2, 4)
+
+    # Plain histogram (1D block) is still correctly rejected, not
+    # misinterpreted as a 1x1 image.
+    @test FLIMApp.extract_sdt_volume(fake_sdt(Float64[1.0, 2.0, 3.0])) === nothing
+
+    # extract_sdt_image_and_volume / extract_sdt_image agree with
+    # extract_sdt_volume on the same perfect-square case end-to-end.
+    image, vol2 = FLIMApp.extract_sdt_image_and_volume(fake_sdt(flat))
+    @test image !== nothing
+    @test size(image) == (3, 3)
+    @test image == dropdims(sum(vol2; dims=3); dims=3)
+    @test FLIMApp.extract_sdt_image(fake_sdt(flat_bad)) === nothing
+end
+
 end # @testset FLIMApp

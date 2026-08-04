@@ -7,15 +7,6 @@ the imported ROI overlays on demand.
 """
 
 """
-Fixed image width (in pixels) for the `(n_pixels, adc_re)` per-pixel-vector
-SDT layout (`extract_sdt_image`'s 2D branch). Real acquisitions from this
-lab's setup don't populate `MeasureInfo.scan_x`/`scan_y` (both read back as
-0), so the width can't be recovered from file metadata; height is derived
-as `n_pixels ÷ SDT_IMAGE_WIDTH`.
-"""
-const SDT_IMAGE_WIDTH = 1024
-
-"""
 Fraction of the image's total intensity a row parity (all odd- or all
 even-indexed rows) may carry and still be considered "padding" in
 `collapse_padded_rows`. Real SDT files don't zero out the padded parity
@@ -57,10 +48,12 @@ end
     collapse_padded_rows(image::Matrix{Float64})::Matrix{Float64}
 
 Some SDT acquisitions record at half the vertical resolution (e.g. a real
-1024x512 scan) but still fill the full `SDT_IMAGE_WIDTH`-tall reshape,
-padding every other row (`image[:, y]`) with near-zero filler. A genuine
-full-height acquisition (e.g. a real 1024x1024 scan) has no such gap: real
-signal lands in both odd- and even-indexed rows.
+1024x512 scan) but still fill the full square stored buffer (see
+`extract_sdt_volume`'s `isqrt(n_pixels)`-inferred width — this lab's setup
+always stores width == height), padding every other row (`image[:, y]`)
+with near-zero filler. A genuine full-height acquisition (e.g. a real
+1024x1024 scan) has no such gap: real signal lands in both odd- and
+even-indexed rows.
 
 Distinguish the two by comparing each row parity's share of the image's
 total intensity: if one parity holds less than `PADDED_ROW_ENERGY_FRACTION`
@@ -83,6 +76,20 @@ plain histogram block is 1D). Same `(x, y)` axis convention and pixel
 reshape as `extract_sdt_image`, but without summing over bins or trimming
 padded rows (see `extract_sdt_image_and_volume`, which does both and keeps
 this volume in sync with the displayed image).
+
+For the `(n_pixels, adc_re)` per-pixel-vector layout (2D branch — what this
+lab's own acquisitions actually produce, since their `MeasureInfo.scan_x`/
+`scan_y` read back as 0 and `image_x`/`image_y` are unreliable, e.g. a real
+2048x2048 scan's own `image_x`/`image_y` metadata read `1062`/`1062`,
+matching neither the true width nor the pixel count), the width is inferred
+as `isqrt(n_pixels)`, not assumed fixed: this lab's setup always stores a
+*square* raw buffer regardless of the true scanned height (see
+`collapse_padded_rows` for the shorter-real-scan case, which pads out to
+that same square shape rather than storing a non-square buffer directly),
+so `n_pixels` is the square of the real stored width for every file from
+this setup — 1024x1024, 2048x2048, or any other size, not just 1024. Falls
+back to `nothing` (rather than guessing) when `n_pixels` isn't a perfect
+square.
 """
 function extract_sdt_volume(sdt::SdtFile.SdtData)::Union{Nothing, Array{Float64,3}}
     isempty(sdt.data) && return nothing
@@ -92,9 +99,9 @@ function extract_sdt_volume(sdt::SdtFile.SdtData)::Union{Nothing, Array{Float64,
         return permutedims(Float64.(block), (2, 1, 3))
     elseif ndims(block) == 2
         n_pixels, n_bins = size(block)
-        n_pixels % SDT_IMAGE_WIDTH == 0 || return nothing
-        height = n_pixels ÷ SDT_IMAGE_WIDTH
-        return Float64.(reshape(block, SDT_IMAGE_WIDTH, height, n_bins))
+        width = isqrt(n_pixels)
+        width * width == n_pixels || return nothing
+        return Float64.(reshape(block, width, width, n_bins))
     else
         return nothing
     end
@@ -129,11 +136,14 @@ with padded rows collapsed out (see `collapse_padded_rows`).
 
 Handles both shapes `SdtFile.compute_shape` can produce for an image:
 - 2D `(n_pixels, adc_re)` — one contiguous time-bin vector per pixel, no
-  spatial metadata — which is what this lab's own `.sdt` files actually
-  contain (`scan_x`/`scan_y` read back as 0). Reshaped to
-  `(SDT_IMAGE_WIDTH, height, adc_re)` and summed over the time-bin axis,
-  matching the reshape used to reconstruct the image from raw pixel
-  vectors: `reshape(pixels, width, height, bins)` then `sum(dims=3)`.
+  (trustworthy) spatial metadata — which is what this lab's own `.sdt`
+  files actually contain (`scan_x`/`scan_y` read back as 0, `image_x`/
+  `image_y` don't reliably match the real pixel count). Reshaped to
+  `(isqrt(n_pixels), isqrt(n_pixels), adc_re)` (see `extract_sdt_volume`
+  for why this lab's setup always stores a square buffer) and summed over
+  the time-bin axis, matching the reshape used to reconstruct the image
+  from raw pixel vectors: `reshape(pixels, width, height, bins)` then
+  `sum(dims=3)`.
 - 3D `(scan_y, scan_x, adc_re)`, when the file's `scan_x`/`scan_y` metadata
   is populated; summed over the time-bin axis and transposed to the
   `(x, y)` convention above.
