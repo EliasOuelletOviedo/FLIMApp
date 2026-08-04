@@ -190,6 +190,102 @@ function roi_pixel_mask(xs::Vector{Float64}, ys::Vector{Float64}, n_cols::Int, n
 end
 
 """
+    pixel_label_boundary(mask_xy::AbstractMatrix{<:Integer}, label::Integer)::Tuple{Vector{Float64}, Vector{Float64}}
+
+Outer boundary of every pixel in `mask_xy` (an `(n_cols, n_rows)` integer
+label image — 0 = background, see `read_cellpose_masks`) equal to `label`,
+as a closed polygon in the same 0-based pixel-index coordinate convention
+`roi_boundary_points` uses — so it plugs directly into `add_and_track_roi!`
+the same as an imported or manually-drawn ROI, and `roi_pixel_mask` on the
+result reproduces `label`'s exact pixel set (verified: traces vertices at
+pixel *corners*, not centers, so the polygon boundary and the pixel-center
+points `roi_pixel_mask` tests against never coincide — the classic
+ray-casting point-on-boundary ambiguity that a naive pixel-center trace
+would hit on roughly half of every blob's own perimeter pixels).
+
+Traced via edge cancellation: every masked pixel's unit-square footprint
+(in pixel-corner coordinates) contributes its 4 edges; an edge shared by two
+adjacent masked pixels cancels (appears twice); the remaining odd-count
+edges are the boundary, walked into one closed loop from an arbitrary
+starting edge. Assumes each label is one 4-connected blob with no interior
+hole, true of real Cellpose output; the one failure mode is a label whose
+pixels touch themselves only diagonally (never produced by Cellpose's
+smooth probability-map segmentation, but possible in principle) — the walk
+then can't close and this returns two empty vectors rather than a
+partial/self-intersecting polygon, so the caller (`run_cellpose_segmentation!`)
+can skip that label safely instead of handing a broken boundary to
+`add_and_track_roi!` (and, downstream, `roi_trigger_buffer`'s hardware scan
+path).
+"""
+function pixel_label_boundary(mask_xy::AbstractMatrix{<:Integer}, label::Integer)::Tuple{Vector{Float64}, Vector{Float64}}
+    n_cols, n_rows = size(mask_xy)
+
+    # Corner coordinates on a half-integer grid (actual coordinate = value/2)
+    # so edge endpoints compare by exact integer equality — no floating-point
+    # tie-breaking risk from repeated `x - 0.5` arithmetic.
+    edge_count = Dict{Tuple{Tuple{Int,Int}, Tuple{Int,Int}}, Int}()
+    function add_edge!(a::Tuple{Int,Int}, b::Tuple{Int,Int})
+        key = a <= b ? (a, b) : (b, a)
+        edge_count[key] = get(edge_count, key, 0) + 1
+        return nothing
+    end
+
+    any_pixel = false
+    for y in 1:n_rows, x in 1:n_cols
+        mask_xy[x, y] == label || continue
+        any_pixel = true
+
+        px, py = x - 1, y - 1   # 0-based pixel index
+        tl = (2px - 1, 2py - 1)
+        tr = (2px + 1, 2py - 1)
+        br = (2px + 1, 2py + 1)
+        bl = (2px - 1, 2py + 1)
+        add_edge!(tl, tr)
+        add_edge!(tr, br)
+        add_edge!(br, bl)
+        add_edge!(bl, tl)
+    end
+    any_pixel || return Float64[], Float64[]
+
+    boundary_edges = [k for (k, c) in edge_count if isodd(c)]
+    isempty(boundary_edges) && return Float64[], Float64[]
+
+    adjacency = Dict{Tuple{Int,Int}, Vector{Tuple{Int,Int}}}()
+    for (a, b) in boundary_edges
+        push!(get!(() -> Tuple{Int,Int}[], adjacency, a), b)
+        push!(get!(() -> Tuple{Int,Int}[], adjacency, b), a)
+    end
+
+    start = boundary_edges[1][1]
+    path = Tuple{Int,Int}[start]
+    prev = nothing
+    current = start
+    closed = false
+
+    # Generous but finite: a real (non-adversarial) boundary closes in
+    # exactly `length(boundary_edges)` steps; this only guards against
+    # hanging on a pathological input, not normal operation.
+    for _ in 1:(length(boundary_edges) + 4)
+        next = something(findfirst(!=(prev), adjacency[current]), 1)
+        next_corner = adjacency[current][next]
+
+        if next_corner == start
+            closed = true
+            break
+        end
+        push!(path, next_corner)
+        prev = current
+        current = next_corner
+    end
+    closed || return Float64[], Float64[]
+
+    push!(path, start)
+    xs = Float64[p[1] / 2.0 for p in path]
+    ys = Float64[p[2] / 2.0 for p in path]
+    return xs, ys
+end
+
+"""
     roi_summed_histogram(volume::Array{Float64,3}, pixels::Vector{Tuple{Int,Int}})::Vector{Float64}
 
 Sum every pixel's own 256-bin TCSPC histogram (`volume[x, y, :]`) across
@@ -314,6 +410,198 @@ function read_rois(filepath::String)::Vector{ImageJROI.ROIData}
         return [ImageJROI.read_roi(filepath)]
     else
         error("Unsupported ROI file extension (expected .roi or .zip): $filepath")
+    end
+end
+
+# "cpsam_v2" is CellposeModel's own default pretrained model in Cellpose
+# 4.x (its general-purpose SAM-based segmentation model) — the classic
+# cyto/cyto2/cyto3/nuclei family (this constant's original value) no longer
+# exists as of 4.x (confirmed against a real 4.2.1.1 install: MODEL_NAMES =
+# ['cpsam_v2', 'cpdino', 'cpdino-vitb', 'cpsam']). If you're on an older
+# Cellpose install, change this back to "cyto3".
+const CELLPOSE_MODEL_TYPE = "cpsam_v2"
+const CELLPOSE_DIAMETER = 0.0   # 0 lets Cellpose auto-estimate object size
+
+"""
+    cellpose_venv_python_path()::String
+
+Path to the python executable inside the dedicated Cellpose virtual
+environment this app expects at `~/.flimapp/cellpose-env` — set up once,
+outside the app:
+
+    python3 -m venv ~/.flimapp/cellpose-env
+    ~/.flimapp/cellpose-env/bin/pip install cellpose
+
+A fixed, `homedir()`-anchored path, not a bare `"python3"` resolved via
+`PATH`: a macOS `.app` launched by double-click (build/create_app.jl) gets a
+minimal `PATH` that excludes Homebrew/venv/pyenv locations, so PATH
+resolution works from a terminal but silently breaks once compiled — this
+app also wouldn't otherwise know *which* `python3` (if several are
+installed) actually has Cellpose. A function, not a `const`, for the same
+reason `user_data_dir()` (config.jl) is: evaluated at call time, not baked
+into the build.
+"""
+function cellpose_venv_python_path()::String
+    venv_dir = joinpath(user_data_dir(), "cellpose-env")
+    return Sys.iswindows() ? joinpath(venv_dir, "Scripts", "python.exe") : joinpath(venv_dir, "bin", "python3")
+end
+
+"""
+    CELLPOSE_SEGMENT_SCRIPT::String
+
+Full source of `cellpose_segment.py`, read once when this file is
+*compiled* (a plain `read` at an `@__DIR__`-derived path — the same kind of
+compile-time file access every other `include`d file in src/ already
+relies on) and embedded directly in the resulting binary/sysimage.
+`cellpose_script_path()` below writes this text out to a real file at *run*
+time — see its docstring for why *locating* an external file via `@__DIR__`
+at runtime is unsafe in a PackageCompiler app, even though *reading* one at
+compile time, as done here, is not.
+"""
+const CELLPOSE_SEGMENT_SCRIPT = read(normpath(joinpath(@__DIR__, "..", "scripts", "cellpose_segment.py")), String)
+
+"""
+    cellpose_script_path(; dir=user_data_dir())::String
+
+Path to an on-disk copy of `cellpose_segment.py`, (re)written from the
+compiled-in `CELLPOSE_SEGMENT_SCRIPT` whenever it's missing or stale.
+Materialized under `dir` (`user_data_dir()`, i.e. `~/.flimapp`, by default —
+overridable so tests don't touch the real one) rather than looked up via
+`@__DIR__`: `@__DIR__` resolves to a fixed string at *compile* time, so a
+`const` built from it directly — this function's own earlier, now-fixed
+version — bakes in wherever `scripts/` sat on the *build machine*, not
+wherever a PackageCompiler bundle (build/create_app.jl) actually ends up
+(`FLIMApp.app/Contents/Resources/app/...`, an entirely different path).
+Embedding the script's *contents* at compile time (`CELLPOSE_SEGMENT_SCRIPT`)
+sidesteps that: nothing at runtime needs to locate the original `scripts/`
+folder at all.
+"""
+function cellpose_script_path(; dir::AbstractString=user_data_dir())::String
+    path = joinpath(dir, "cellpose_segment.py")
+    if !isfile(path) || read(path, String) != CELLPOSE_SEGMENT_SCRIPT
+        mkpath(dir)
+        write(path, CELLPOSE_SEGMENT_SCRIPT)
+    end
+    return path
+end
+
+"""
+    write_cellpose_input(path, image_xy::Matrix{Float64})
+
+Write `image_xy` (an `(n_cols, n_rows)` image, FLIMApp's own `(x, y)`
+convention — see `extract_sdt_image`) to `path` as the flat binary format
+`cellpose_segment.py` reads: an `(n_cols, n_rows)` `Int64` header, then the
+pixel data in Julia's native column-major order (which `write` on a plain
+`Array` already writes as raw memory — no manual reshaping needed here).
+"""
+function write_cellpose_input(path::AbstractString, image_xy::Matrix{Float64})
+    open(path, "w") do io
+        write(io, Int64.(size(image_xy))...)
+        write(io, image_xy)
+    end
+    return nothing
+end
+
+"""
+    read_cellpose_masks(path)::Matrix{Int32}
+
+Read the `(n_cols, n_rows)` `Int32` label mask `cellpose_segment.py` writes
+back (0 = background, 1..N = one region each) — the inverse binary layout
+of `write_cellpose_input`.
+"""
+function read_cellpose_masks(path::AbstractString)::Matrix{Int32}
+    return open(path, "r") do io
+        n_cols = read(io, Int64)
+        n_rows = read(io, Int64)
+        data = Vector{Int32}(undef, n_cols * n_rows)
+        read!(io, data)
+        reshape(data, n_cols, n_rows)
+    end
+end
+
+"""
+    run_cellpose_segmentation(image_xy::Matrix{Float64})::Union{Nothing, Matrix{Int32}}
+
+Run `cellpose_segment.py` as a subprocess on `image_xy` and return its
+`(n_cols, n_rows)` `Int32` label mask, or `nothing` on any failure — the
+Cellpose venv missing, Cellpose not installed in it, a segmentation error,
+or a malformed output file — always logged via `@error`, including the
+subprocess's own stderr (e.g. Cellpose's own Python traceback), so a real
+failure is diagnosable from the app's log without reproducing it
+separately.
+
+A subprocess, not an in-process Python bridge (PyCall.jl/PythonCall.jl):
+this repo has no Python dependency otherwise and ships as a compiled
+PackageCompiler binary (build/create_app.jl) that cannot bundle a
+Python/PyTorch runtime. Talks to the script over two temp files
+(`write_cellpose_input`/`read_cellpose_masks`), not stdin/stdout, so a large
+image doesn't need to round-trip through a pipe.
+
+`run(...; wait=false)` + explicit `wait`/`success` (rather than plain
+`run(cmd)`, which throws on a nonzero exit) is what lets a Cellpose failure
+be reported through this function's own return value/log instead of an
+uncaught exception on the GUI thread.
+
+`python_cmd`/`script_path`/`model_type`/`diameter` default to
+`cellpose_venv_python_path()`/`cellpose_script_path()`/the `CELLPOSE_*`
+constants — the button handler below calls this with no overrides — but are
+keyword arguments (not hardcoded) so tests can swap in a stand-in
+script/interpreter without a real Cellpose install.
+"""
+function run_cellpose_segmentation(
+        image_xy::Matrix{Float64};
+        python_cmd::AbstractString=cellpose_venv_python_path(),
+        script_path::AbstractString=cellpose_script_path(),
+        model_type::AbstractString=CELLPOSE_MODEL_TYPE,
+        diameter::Real=CELLPOSE_DIAMETER
+    )::Union{Nothing, Matrix{Int32}}
+    if !isfile(script_path)
+        @error "Cellpose wrapper script not found" path=script_path
+        return nothing
+    end
+
+    if Sys.which(python_cmd) === nothing
+        @error "Cellpose virtual environment not found" expected_path=python_cmd hint="python3 -m venv ~/.flimapp/cellpose-env && ~/.flimapp/cellpose-env/bin/pip install cellpose"
+        return nothing
+    end
+
+    input_path = tempname()
+    output_path = tempname()
+
+    try
+        write_cellpose_input(input_path, image_xy)
+
+        cmd = `$python_cmd $script_path $input_path $output_path $model_type $diameter`
+        stdout_io = IOBuffer()
+        stderr_io = IOBuffer()
+
+        process = try
+            p = run(pipeline(cmd; stdout=stdout_io, stderr=stderr_io); wait=false)
+            wait(p)
+            p
+        catch e
+            @error "Failed to launch Cellpose" python_cmd=python_cmd error=string(e)
+            return nothing
+        end
+
+        if !success(process)
+            @error "Cellpose segmentation failed" exit_code=process.exitcode stderr=strip(String(take!(stderr_io)))
+            return nothing
+        end
+
+        if !isfile(output_path)
+            @error "Cellpose subprocess exited successfully but wrote no output" stderr=strip(String(take!(stderr_io)))
+            return nothing
+        end
+
+        @info "Cellpose segmentation finished" output=strip(String(take!(stdout_io)))
+        return read_cellpose_masks(output_path)
+    catch e
+        @error "Cellpose segmentation failed" error=string(e)
+        return nothing
+    finally
+        rm(input_path; force=true)
+        rm(output_path; force=true)
     end
 end
 
@@ -506,6 +794,10 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     manual_roi_count = Ref(0)
     # D-click-to-delete: held the same way A (drawing) is.
     deleting_active = Ref(false)
+    # Guards against a double-click launching a second Cellpose subprocess
+    # while one is already segmenting (cellpose_button.clicks handler,
+    # below) — segmentation can take anywhere from seconds to a minute.
+    cellpose_running = Ref(false)
 
     function clear_drawing_preview!()
         for p in drawing_preview_plots
@@ -696,6 +988,67 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         end
 
         @info "ROIs imported" path=filepath count=length(rois)
+    end
+
+    on(cellpose_button.clicks) do _
+        volume = pixel_volume[]
+        intensity = intensity_image[]
+        if volume === nothing || intensity === nothing
+            @warn "No image imported yet; cannot run Cellpose"
+            return
+        end
+
+        # add_and_track_roi! -> add_roi_from_boundary! -> vec_to_lifetime
+        # mutates the shared, non-thread-safe RUNTIME[] singleton the
+        # acquisition worker thread also writes to — same guard as
+        # roi_import_button above.
+        if app_run.running[]
+            @warn "Acquisition is running; skipping Cellpose segmentation"
+            return
+        end
+
+        if cellpose_running[]
+            @info "Cellpose is already running; ignoring click"
+            return
+        end
+        cellpose_running[] = true
+        cellpose_button.label[] = "Running..."
+
+        # Segmentation is a slow (seconds-to-a-minute) external subprocess —
+        # @async, not synchronous, for the same reason as start_pressed's own
+        # heavy-lifting body (runtime.jl): this handler's call stack IS
+        # GLMakie's render-loop task, and wait()-ing on the subprocess
+        # in-line would freeze the window for the whole segmentation run.
+        # Plain @async (not Threads.@spawn) keeps the ROI-drawing calls below
+        # (poly!/lines!/text! onto image_axis) on the render-loop's own
+        # thread, where touching GLMakie/Observables is safe.
+        @async begin
+            try
+                masks = run_cellpose_segmentation(intensity)
+                if masks === nothing
+                    return   # run_cellpose_segmentation already logged why
+                end
+
+                x_offset, y_offset = image_offset[]
+                labels = sort(filter(!=(0), unique(masks)))
+                n_added = 0
+
+                for label in labels
+                    xs, ys = pixel_label_boundary(masks, label)
+                    if isempty(xs)
+                        @warn "Skipping a Cellpose object whose boundary could not be traced" label=label
+                        continue
+                    end
+                    add_and_track_roi!(volume, x_offset, y_offset, xs, ys, "cellpose-$label")
+                    n_added += 1
+                end
+
+                @info "Cellpose ROIs imported" found=length(labels) added=n_added
+            finally
+                cellpose_running[] = false
+                cellpose_button.label[] = "Cellpose"
+            end
+        end
     end
 
     on(roi_clear_button.clicks) do _

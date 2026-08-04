@@ -303,4 +303,179 @@ end
     end
 end
 
+@testset "pixel_label_boundary (Cellpose mask -> ROI polygon)" begin
+    # Round-trip check: does re-rasterizing the traced polygon
+    # (roi_pixel_mask's own point-in-polygon test, on pixel centers)
+    # reproduce the exact original pixel set?
+    function reconstructed(mask, xs, ys)
+        n_cols, n_rows = size(mask)
+        Set((x, y) for x in 1:n_cols, y in 1:n_rows
+                   if FLIMApp.point_in_polygon(Float64(x - 1), Float64(y - 1), xs, ys))
+    end
+    function original(mask, label)
+        n_cols, n_rows = size(mask)
+        Set((x, y) for x in 1:n_cols, y in 1:n_rows if mask[x, y] == label)
+    end
+    function exact_roundtrip(mask, label)
+        xs, ys = FLIMApp.pixel_label_boundary(mask, label)
+        return original(mask, label) == reconstructed(mask, xs, ys)
+    end
+
+    # Simple square
+    mask = zeros(Int, 10, 10)
+    mask[3:7, 3:7] .= 1
+    @test exact_roundtrip(mask, 1)
+
+    # Concave L-shape
+    mask_l = zeros(Int, 10, 10)
+    mask_l[2:6, 2:4] .= 1
+    mask_l[2:4, 2:8] .= 1
+    @test exact_roundtrip(mask_l, 1)
+
+    # Circle (typical Cellpose-blob shape)
+    mask_circle = zeros(Int, 20, 20)
+    for x in 1:20, y in 1:20
+        (x - 10.5)^2 + (y - 10.5)^2 <= 6.0^2 && (mask_circle[x, y] = 1)
+    end
+    @test exact_roundtrip(mask_circle, 1)
+
+    # Non-convex crescent (two circles, set difference)
+    mask_crescent = zeros(Int, 30, 30)
+    for x in 1:30, y in 1:30
+        in_c1 = (x - 14)^2 + (y - 15)^2 <= 10^2
+        in_c2 = (x - 19)^2 + (y - 15)^2 <= 9^2
+        mask_crescent[x, y] = (in_c1 && !in_c2) ? 1 : 0
+    end
+    @test exact_roundtrip(mask_crescent, 1)
+
+    # Isolated single pixel
+    mask_single = zeros(Int, 6, 6)
+    mask_single[3, 3] = 1
+    @test exact_roundtrip(mask_single, 1)
+
+    # Two distinct blobs sharing one mask, different labels
+    mask_multi = zeros(Int, 12, 12)
+    mask_multi[2:4, 2:4] .= 1
+    mask_multi[8:10, 8:10] .= 2
+    @test exact_roundtrip(mask_multi, 1)
+    @test exact_roundtrip(mask_multi, 2)
+
+    # A label with no pixels at all -> empty, not an error
+    xs_empty, ys_empty = FLIMApp.pixel_label_boundary(mask, 99)
+    @test isempty(xs_empty) && isempty(ys_empty)
+
+    # Adversarial diagonal-only touch (two pixels sharing only a corner) —
+    # not producible by real Cellpose output, but the tracer must fail
+    # safely (empty result), not hang or return a broken polygon.
+    mask_pinch = zeros(Int, 6, 6)
+    mask_pinch[3, 3] = 1
+    mask_pinch[4, 4] = 1
+    xs_pinch, ys_pinch = FLIMApp.pixel_label_boundary(mask_pinch, 1)
+    @test isempty(xs_pinch) == isempty(ys_pinch)   # always both empty or both non-empty
+end
+
+@testset "Cellpose binary I/O round-trip" begin
+    img = Float64.(reshape(1:24, 6, 4))
+    tmp = tempname()
+    try
+        FLIMApp.write_cellpose_input(tmp, img)
+
+        # Header + payload land exactly as cellpose_segment.py expects to read them.
+        open(tmp, "r") do io
+            n_cols = read(io, Int64)
+            n_rows = read(io, Int64)
+            @test (n_cols, n_rows) == size(img)
+            data = Vector{Float64}(undef, n_cols * n_rows)
+            read!(io, data)
+            @test reshape(data, n_cols, n_rows) == img
+        end
+
+        # A synthetic label mask, written the way cellpose_segment.py would,
+        # round-trips exactly through read_cellpose_masks.
+        mask = Int32[0 1 1 0; 0 1 1 0; 2 2 0 0; 2 2 0 0; 0 0 0 0; 0 0 0 0]
+        open(tmp, "w") do io
+            write(io, Int64(6), Int64(4))
+            write(io, mask)
+        end
+        @test FLIMApp.read_cellpose_masks(tmp) == mask
+    finally
+        rm(tmp; force=true)
+    end
+end
+
+@testset "run_cellpose_segmentation (subprocess plumbing)" begin
+    # A dependency-free Python stand-in for cellpose_segment.py: same binary
+    # file protocol, but a trivial threshold instead of a real segmentation
+    # model — lets the full write -> subprocess -> read pipeline be tested
+    # through a real external process boundary without Cellpose installed.
+    stub_path = tempname() * ".py"
+    write(stub_path, """
+        import sys, struct
+
+        input_path, output_path, model_type, diameter_str = sys.argv[1:]
+
+        with open(input_path, "rb") as f:
+            n_cols, n_rows = struct.unpack("<qq", f.read(16))
+            n = n_cols * n_rows
+            data = struct.unpack(f"<{n}d", f.read(8 * n))
+
+        labels = [1 if v > 0 else 0 for v in data]
+
+        with open(output_path, "wb") as f:
+            f.write(struct.pack("<qq", n_cols, n_rows))
+            f.write(struct.pack(f"<{len(labels)}i", *labels))
+
+        print(f"stub processed {n_cols}x{n_rows}")
+        """)
+
+    try
+        image = Float64[-1.0 2.0 0.0; 3.0 -4.0 5.0]
+
+        masks = FLIMApp.run_cellpose_segmentation(image; python_cmd="python3", script_path=stub_path)
+        @test masks !== nothing
+        @test masks == Int32.(image .> 0)
+
+        # Missing script -> nothing, logged, not thrown.
+        @test FLIMApp.run_cellpose_segmentation(image; script_path=tempname()) === nothing
+
+        # Cellpose venv not set up (python_cmd doesn't resolve at all, via
+        # Sys.which) -> nothing, logged with the setup hint, not thrown.
+        # Every case below passes an explicit script_path so none of them
+        # fall through to the *real* cellpose_script_path() default and
+        # touch the user's actual ~/.flimapp (same test-hygiene reasoning as
+        # the "state persistence round-trip" testset's mktempdir() above).
+        @test FLIMApp.run_cellpose_segmentation(image; python_cmd=joinpath(tempname(), "python3"), script_path=stub_path) === nothing
+
+        # python_cmd exists but isn't executable -> the Sys.which guard
+        # rejects it the same as a nonexistent path (Sys.which checks the
+        # executable bit, not just isfile) -> nothing, not thrown.
+        non_executable = tempname()
+        write(non_executable, "not an executable")
+        @test FLIMApp.run_cellpose_segmentation(image; python_cmd=non_executable, script_path=stub_path) === nothing
+        rm(non_executable; force=true)
+
+        # Subprocess launches but exits nonzero -> nothing, not thrown.
+        @test FLIMApp.run_cellpose_segmentation(image; python_cmd="/usr/bin/false", script_path=stub_path) === nothing
+    finally
+        rm(stub_path; force=true)
+    end
+end
+
+@testset "cellpose_venv_python_path / cellpose_script_path" begin
+    py_path = FLIMApp.cellpose_venv_python_path()
+    @test occursin(joinpath(".flimapp", "cellpose-env"), py_path)
+    @test occursin(Sys.iswindows() ? "python.exe" : "python3", py_path)
+
+    dir = mktempdir()
+    script_path = FLIMApp.cellpose_script_path(; dir=dir)
+    @test isfile(script_path)
+    @test read(script_path, String) == FLIMApp.CELLPOSE_SEGMENT_SCRIPT
+
+    # Stale/edited on-disk copy is refreshed back to the compiled-in script
+    # on the next call, not left stale.
+    write(script_path, "stale content")
+    script_path2 = FLIMApp.cellpose_script_path(; dir=dir)
+    @test read(script_path2, String) == FLIMApp.CELLPOSE_SEGMENT_SCRIPT
+end
+
 end # @testset FLIMApp

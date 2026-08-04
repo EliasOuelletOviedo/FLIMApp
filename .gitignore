@@ -8,6 +8,10 @@ Thumbs.db
 # VSCode
 .vscode/
 
+# Python (scripts/cellpose_segment.py, invoked as a subprocess by roi_popup.jl)
+__pycache__/
+*.pyc
+
 # dist
 dist/
 
