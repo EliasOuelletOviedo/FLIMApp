@@ -849,12 +849,14 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     axis_layout = GridLayout(popup_figure[1, 1])
     buttons_layout = GridLayout(popup_figure[2, 1])
 
-    # yreversed=false: image row 0 (ImageJ/SdtFile's top-left pixel origin)
-    # is plotted at the BOTTOM of the axis — a display-only flip (Makie
-    # handles the screen<->data mapping transparently either way, so
-    # heatmap!/poly!/lines! coordinates, mouseposition(), and every ROI
-    # pixel-mask/boundary computation below all stay in the same 0-based
-    # (x=column, y=row) data space regardless of this setting).
+    # yreversed=true: image row 0 (ImageJ/SdtFile's top-left pixel origin)
+    # is plotted at the TOP of the axis — confirmed against real acquisitions
+    # (a tissue/background boundary visible in the raw data, checked against
+    # its known real-world position). Display-only (Makie handles the
+    # screen<->data mapping transparently either way, so heatmap!/poly!/
+    # lines! coordinates, mouseposition(), and every ROI pixel-mask/boundary
+    # computation below all stay in the same 0-based (x=column, y=row) data
+    # space regardless of this setting).
     # aspect=DataAspect(): keeps pixels square regardless of the axis
     # widget's own on-screen dimensions, so a non-square image (e.g. after
     # collapse_padded_rows halves the height) doesn't get stretched to fill
@@ -867,17 +869,27 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # First-moment (mean-arrival-time) per-pixel lifetime preview — see
     # pixel_lifetime_map (lifetime_analysis.jl) and refresh_image_display!
     # below. min_photons_textbox's default matches pixel_lifetime_map's own.
-    lifetime_map_label  = Label(buttons_layout[1, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Lifetime map"))...)
-    min_photons_label   = Label(buttons_layout[2, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Min photons"))...)
-    lifetime_map_toggle = Toggle(buttons_layout[1, 2];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => false))...)
-    min_photons_textbox = Textbox(buttons_layout[2, 2]; merge(TEXT_ATTRS,   Dict{Symbol, Any}(:displayed_string => "25", :stored_string => "25"))...)
+    lifetime_map_label  = Label(buttons_layout[1, 1][1, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Lifetime map"))...)
+    min_photons_label   = Label(buttons_layout[2, 1][1, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Min photons"))...)
+    lifetime_map_toggle = Toggle(buttons_layout[1, 1][1, 2];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => false))...)
+    min_photons_textbox = Textbox(buttons_layout[2, 1][1, 2]; merge(TEXT_ATTRS,   Dict{Symbol, Any}(:displayed_string => "25", :stored_string => "25"))...)
 
-    im_import_button    = Button(buttons_layout[1, 3];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import image"))...)
-    cellpose_button     = Button(buttons_layout[2, 3];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Cellpose"))...)
-    roi_import_button   = Button(buttons_layout[1, 4];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import ROI"))...)
-    roi_export_button   = Button(buttons_layout[2, 4];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Export ROI"))...)
-    roi_clear_button    = Button(buttons_layout[1, 5];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Clear ROI"))...)
-    popup_close_button  = Button(buttons_layout[2, 5];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Close"))...)
+    im_import_button    = Button(buttons_layout[1, 2];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import image"))...)
+    cellpose_button     = Button(buttons_layout[2, 2];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Cellpose"))...)
+    roi_import_button   = Button(buttons_layout[1, 3];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import ROI"))...)
+    roi_export_button   = Button(buttons_layout[2, 3];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Export ROI"))...)
+    roi_clear_button    = Button(buttons_layout[1, 4];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Clear ROI"))...)
+    popup_close_button  = Button(buttons_layout[2, 4];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Close"))...)
+
+    x_min_label = Label(buttons_layout[3, 1]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "X min [mV]"))...)
+    x_max_label = Label(buttons_layout[3, 2]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "X max [mV]"))...)
+    y_min_label = Label(buttons_layout[3, 3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Y min [mV]"))...)
+    y_max_label = Label(buttons_layout[3, 4]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Y max [mV]"))...)
+
+    x_min_textbox = Textbox(buttons_layout[4, 1]; merge(TEXT_ATTRS, Dict{Symbol, Any}(:displayed_string => string(app.roi.v_min_x), :stored_string => string(app.roi.v_min_x), :width => 100))...)
+    x_max_textbox = Textbox(buttons_layout[4, 2]; merge(TEXT_ATTRS, Dict{Symbol, Any}(:displayed_string => string(app.roi.v_max_x), :stored_string => string(app.roi.v_max_x), :width => 100))...)
+    y_min_textbox = Textbox(buttons_layout[4, 3]; merge(TEXT_ATTRS, Dict{Symbol, Any}(:displayed_string => string(app.roi.v_min_y), :stored_string => string(app.roi.v_min_y), :width => 100))...)
+    y_max_textbox = Textbox(buttons_layout[4, 4]; merge(TEXT_ATTRS, Dict{Symbol, Any}(:displayed_string => string(app.roi.v_max_y), :stored_string => string(app.roi.v_max_y), :width => 100))...)
 
     image_plot = Ref{Any}(nothing)
     # Every ROI currently shown on image_axis (imported or manually drawn),
@@ -1139,7 +1151,11 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         end
         image_plot[] = heatmap!(image_axis, x_offset:(x_offset + n_cols - 1), y_offset:(y_offset + n_rows - 1), intensity, colormap = :grays)
         update_lifetime_overlay!()
-        limits!(image_axis, 0, canvas_size, 0, canvas_size)
+        # Set the limits attribute directly rather than calling limits!/ylims!:
+        # those helpers reset ax.yreversed[] to false whenever the y-limits are
+        # passed low-to-high (their own convention for "not reversed"), which
+        # would silently undo the yreversed=true set at axis construction.
+        image_axis.limits[] = (0, canvas_size, 0, canvas_size)
 
         @info "Image imported" path=filepath size=size(intensity) canvas_size=canvas_size offset=(x_offset, y_offset)
     end
@@ -1174,6 +1190,25 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         end
 
         update_lifetime_overlay!()
+    end
+
+    # Galvo voltage range textboxes: commit straight to app.roi (RoiSettings,
+    # data_types.jl) and persist, so roi_trigger_buffer (roi.jl) picks up the
+    # edited range next time it reads app.roi, and the range survives across
+    # sessions like every other persisted setting.
+    for (textbox, field) in ((x_min_textbox, :v_min_x), (x_max_textbox, :v_max_x), (y_min_textbox, :v_min_y), (y_max_textbox, :v_max_y))
+        on(textbox.stored_string) do new_str
+            val = tryparse(Int64, new_str)
+            if val !== nothing
+                setfield!(app.roi, field, val)
+                textbox.displayed_string[] = string(val)
+            else
+                textbox.displayed_string[] = string(getfield(app.roi, field))
+                textbox.stored_string[]    = string(getfield(app.roi, field))
+            end
+
+            save_state(app)
+        end
     end
 
     on(roi_import_button.clicks) do _

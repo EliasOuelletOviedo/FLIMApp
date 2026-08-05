@@ -158,10 +158,16 @@ end
 """
     RoiSettings
 
-ROI panel settings.
+ROI panel settings. `v_min_x`/`v_max_x`/`v_min_y`/`v_max_y` are the ROI
+trigger-box galvo voltage range (mV) for each axis, editable from the ROI
+popup — see `roi_trigger_buffer` (roi.jl) for how they're used.
 """
 Base.@kwdef mutable struct RoiSettings
     active::Bool = false
+    v_min_x::Int64 = -1000
+    v_max_x::Int64 = 1000
+    v_min_y::Int64 = -1000
+    v_max_y::Int64 = 1000
 end
 
 """

@@ -11,9 +11,11 @@ before files start arriving.
 
 Scan-timing parameters (points per ROI, spiral turns, scan/shift time)
 live on `app.protocol` (`ProtocolSettings`, data_types.jl) — GUI-editable
-and persisted, via the Protocol panel (handlers_protocol.jl). The remaining
-tunables below stay plain (non-persisted) module variables, hand-edited
-directly in this file.
+and persisted, via the Protocol panel (handlers_protocol.jl). The galvo
+voltage range (`v_min_x`/`v_max_x`/`v_min_y`/`v_max_y`) lives on `app.roi`
+(`RoiSettings`, data_types.jl) the same way, editable from the ROI popup
+(roi_popup.jl). The remaining tunables below stay plain (non-persisted)
+module variables, hand-edited directly in this file.
 
 Ported from the standalone prototype `Test_roi_trigger_box.jl` (same
 directory): that script loaded its own image/ROI-zip files and only
@@ -42,12 +44,6 @@ using Statistics
 # roi_popup.jl's own canvas-centering (image_offset) for the on-screen
 # display of that same image.
 roi_voltage_calibration_size = 1024
-
-# Galvo output voltage range for each axis.
-trigger_box_v_min_x = -1100
-trigger_box_v_max_x = 1400
-trigger_box_v_min_y = -900
-trigger_box_v_max_y = 1100
 
 # Delay between writing a command and reading the trigger box's response
 # (send_roi_trigger_command), giving the device time to process and reply
@@ -403,6 +399,9 @@ function roi_trigger_buffer(app, app_run, rois::Vector{RoiCoordinates})::Vector{
     points_per_roi = app.protocol.points_per_roi
     dwell_points = round(Int, app.protocol.shift_time / app.protocol.scan_time * points_per_roi)
 
+    v_min_x, v_max_x = app.roi.v_min_x, app.roi.v_max_x
+    v_min_y, v_max_y = app.roi.v_min_y, app.roi.v_max_y
+
     image_width, image_height = app_run.imported_image_size
     x_shift = (roi_voltage_calibration_size - image_width) / 2
     y_shift = (roi_voltage_calibration_size - image_height) / 2
@@ -417,12 +416,12 @@ function roi_trigger_buffer(app, app_run, rois::Vector{RoiCoordinates})::Vector{
     for roi in ordered_rois
         cx, cy = centroid_center(roi.xs, roi.ys)
         center_v = (
-            round(Int64, to_voltage(cx + x_shift, roi_voltage_calibration_size, trigger_box_v_min_x, trigger_box_v_max_x)),
-            round(Int64, to_voltage(cy + y_shift, roi_voltage_calibration_size, trigger_box_v_min_y, trigger_box_v_max_y))
+            round(Int64, to_voltage(cx + x_shift, roi_voltage_calibration_size, v_min_x, v_max_x)),
+            round(Int64, to_voltage(cy + y_shift, roi_voltage_calibration_size, v_min_y, v_max_y))
         )
 
-        xs_v = [to_voltage(x + x_shift, roi_voltage_calibration_size, trigger_box_v_min_x, trigger_box_v_max_x) for x in roi.xs]
-        ys_v = [to_voltage(y + y_shift, roi_voltage_calibration_size, trigger_box_v_min_y, trigger_box_v_max_y) for y in roi.ys]
+        xs_v = [to_voltage(x + x_shift, roi_voltage_calibration_size, v_min_x, v_max_x) for x in roi.xs]
+        ys_v = [to_voltage(y + y_shift, roi_voltage_calibration_size, v_min_y, v_max_y) for y in roi.ys]
 
         if first_center_v === nothing
             first_center_v = center_v
