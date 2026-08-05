@@ -45,6 +45,45 @@ function padded_row_keep_range(image::Matrix{Float64})::AbstractVector{Int}
 end
 
 """
+    active_bounding_box(intensity::Matrix{Float64})::Tuple{UnitRange{Int}, UnitRange{Int}}
+
+`(x_range, y_range)`, each `1:n`, covering the smallest top-left-anchored
+rectangle holding essentially all of `intensity`'s total — a *different*
+padding pattern than `padded_row_keep_range`'s interleaved rows: some real
+acquisitions from this lab store a smaller true scan inside a larger fixed
+buffer as one contiguous block (e.g. a real 2048x2048-stored file whose
+actual content occupied only columns 1:1062, rows 1:1048 — confirmed on a
+real file: *exactly* zero beyond that box, 100% of the total intensity
+inside it), rather than interleaving real/padding rows throughout. Both
+patterns are independent and real; `extract_sdt_image_streamed!` applies
+this crop first, then still checks the cropped region for interleaving.
+
+A column/row is "active" if its sum exceeds `PADDED_ROW_ENERGY_FRACTION` of
+the mean sum among all nonzero columns/rows (same threshold constant as
+`padded_row_keep_range`, applied per-row/column here instead of per-parity
+— the two observed real cases are both cleanly separated by orders of
+magnitude, so this doesn't need to be more precise than that). Assumes the
+active region starts at index 1 in both axes (true of every real case seen
+so far); returns the full range unchanged if nothing looks padded.
+"""
+function active_bounding_box(intensity::Matrix{Float64})::Tuple{UnitRange{Int}, UnitRange{Int}}
+    n_cols, n_rows = size(intensity)
+    col_sums = vec(sum(intensity; dims=2))
+    row_sums = vec(sum(intensity; dims=1))
+
+    function active_extent(sums::Vector{Float64})
+        n = length(sums)
+        nonzero = filter(>(0), sums)
+        isempty(nonzero) && return n
+        threshold = PADDED_ROW_ENERGY_FRACTION * (sum(nonzero) / length(nonzero))
+        hi = findlast(>(threshold), sums)
+        return hi === nothing ? n : hi
+    end
+
+    return (1:active_extent(col_sums), 1:active_extent(row_sums))
+end
+
+"""
     collapse_padded_rows(image::Matrix{Float64})::Matrix{Float64}
 
 Some SDT acquisitions record at half the vertical resolution (e.g. a real
@@ -150,6 +189,175 @@ Handles both shapes `SdtFile.compute_shape` can produce for an image:
 """
 function extract_sdt_image(sdt::SdtFile.SdtData)::Union{Nothing, Matrix{Float64}}
     return first(extract_sdt_image_and_volume(sdt))
+end
+
+"""
+    ROW_STREAM_CHUNK_BYTES::Int
+
+Output chunk size for `raw_inflate_stream` calls in `extract_sdt_image_streamed`
+below — large enough (a few MiB) that a ~2GB decompression completes in
+under a second (measured), small enough that peak memory for the
+decompression itself stays negligible next to the final extracted volume.
+"""
+const ROW_STREAM_CHUNK_BYTES = 8 * 1024 * 1024
+
+"""
+    stream_stored_rows(f::Function, compressed_bytes, stored_width::Int, adc_re::Int)::Bool
+
+Decompress `compressed_bytes` (one SDT IMG block's raw DEFLATE payload, see
+`SdtFile.locate_first_data_block`) and call `f(y, row_u16)` once per stored
+row, in order, where `row_u16` is a `reshape`d `(adc_re, stored_width)`
+view — `row_u16[:, x]` is pixel `(x, y)`'s own `adc_re`-bin histogram — for
+row `y` of the `stored_width`-wide raw buffer. `f`'s `row_u16` view is only
+valid for the duration of that call (backed by a reused buffer). Returns
+`raw_inflate_stream`'s own success flag.
+
+Shared by `extract_sdt_image_streamed`'s two passes (summed-intensity, then
+full-volume extraction) so the row-framing/buffering logic — the part with
+real off-by-one risk — exists once, not twice.
+"""
+function stream_stored_rows(f::Function, compressed_bytes, stored_width::Int, adc_re::Int)::Bool
+    row_bytes = stored_width * adc_re * sizeof(UInt16)
+    buf = UInt8[]
+    pos = Ref(1)     # 1-based index of the first unread byte in buf
+    y = Ref(1)
+
+    return SdtFile.raw_inflate_stream(compressed_bytes, ROW_STREAM_CHUNK_BYTES) do chunk
+        append!(buf, chunk)
+        while length(buf) - pos[] + 1 >= row_bytes && y[] <= stored_width
+            row_u16 = reshape(reinterpret(UInt16, view(buf, pos[]:pos[]+row_bytes-1)), adc_re, stored_width)
+            f(y[], row_u16)
+            pos[] += row_bytes
+            y[] += 1
+        end
+        # Compact only once the unread tail grows large, not on every row —
+        # an O(n) shift on every one of `stored_width` rows would dominate
+        # runtime for no benefit (the unread tail between rows is always
+        # under one row's worth of bytes already).
+        if pos[] > 8 * ROW_STREAM_CHUNK_BYTES
+            deleteat!(buf, 1:pos[]-1)
+            pos[] = 1
+        end
+    end
+end
+
+"""
+    extract_sdt_image_streamed(filepath::AbstractString)::Tuple{Union{Nothing,Matrix{Float64}}, Union{Nothing,Array{Float64,3}}}
+
+Memory-bounded equivalent of `extract_sdt_image_and_volume(SdtFile.read_sdt(...))`
+for a large compressed IMG block: `read_sdt` decompresses the *entire*
+block into one buffer up front (hundreds of MB to several GB — for a real
+2048x2048x256 file, ~2GB just for that buffer, then *another* ~8GB to
+convert it to `Float64`, on top of whatever the padding this lab's setup
+can store around the true content — enough together to exhaust an 8GB
+machine's RAM well before the padding is even trimmed off). This instead:
+
+1. Locates the block's raw DEFLATE payload without decompressing it
+   (`SdtFile.locate_first_data_block`).
+2. **Pass 1**: streams it once (`stream_stored_rows`), row by row, summing
+   each pixel's bins into a `(stored_width, stored_width)` intensity image
+   — the *only* thing held for the full stored buffer, a few tens of MB
+   regardless of `adc_re`. From it, determines the true content region:
+   `active_bounding_box` for the contiguous-block padding pattern (a
+   smaller real scan stored inside a larger fixed buffer), then
+   `padded_row_keep_range` on the cropped image for the interleaved-row
+   pattern (`collapse_padded_rows`'s own case) within it — the two are
+   independent and both are checked.
+3. **Pass 2**: streams the *same* payload again (decompression is fast —
+   under a second for ~2GB measured — so re-decompressing rather than
+   buffering pass 1's rows until the crop is known is the simpler, still
+   cheap choice), this time keeping only the identified rows/columns,
+   building the final `(kept_width, kept_height, adc_re)` `Float64` volume
+   directly at its true size — for the file this was written against,
+   ~2.3GB, in line with what an ordinary already-supported 1024x1024 file
+   needs, not the ~10GB the naive full-buffer path would have required.
+
+Falls back to `(nothing, nothing)` wherever `extract_sdt_volume` would:
+the block isn't compressed 2D image data, or its pixel count isn't a
+perfect square (see that function's docstring). Also returns `(nothing,
+nothing)` — logging why via `@warn` — if the file can't be read/located,
+since unlike `extract_sdt_volume` this does its own file I/O.
+"""
+function extract_sdt_image_streamed(filepath::AbstractString)::Tuple{Union{Nothing, Matrix{Float64}}, Union{Nothing, Array{Float64,3}}}
+    b = try
+        read(filepath)
+    catch e
+        @warn "Failed to read SDT file" path=filepath error=string(e)
+        return nothing, nothing
+    end
+
+    loc = SdtFile.locate_first_data_block(b)
+    if loc === nothing
+        @warn "SDT file has no readable data block" path=filepath
+        return nothing, nothing
+    end
+
+    if !loc.compressed || loc.dtype != UInt16 || loc.adc_re == 0 || (loc.scan_x > 0 && loc.scan_y > 0)
+        # Uncompressed (or non-image) blocks aren't the memory problem this
+        # function exists for — already at their final size in the file,
+        # nothing to stream-decompress. A populated scan_x/scan_y means
+        # SdtFile.compute_shape would pick its 3D (scan_y, scan_x, adc_re)
+        # shape, not the flat 2D pixel-list one this function only handles
+        # (real files from this lab's own setup never hit this — scan_x/
+        # scan_y read back 0 — so it's untested territory; falling back
+        # avoids silently mis-shaping it instead). Either way, fall back to
+        # the simple, existing path.
+        sdt = try
+            SdtFile.read_sdt(b, basename(filepath))
+        catch e
+            @warn "Failed to read SDT file" path=filepath error=string(e)
+            return nothing, nothing
+        end
+        return extract_sdt_image_and_volume(sdt)
+    end
+
+    n_pixels = loc.dsize ÷ loc.adc_re
+    stored_width = isqrt(n_pixels)
+    if stored_width * stored_width != n_pixels
+        @warn "SDT image pixel count is not a perfect square; cannot infer stored width" path=filepath n_pixels=n_pixels
+        return nothing, nothing
+    end
+    adc_re = loc.adc_re
+
+    # Pass 1: cheap (stored_width, stored_width) summed-intensity image.
+    intensity = zeros(Float64, stored_width, stored_width)
+    ok1 = stream_stored_rows(loc.bytes, stored_width, adc_re) do y, row_u16
+        @views intensity[:, y] .= vec(sum(Float64, row_u16; dims=1))
+    end
+    if !ok1
+        @warn "Failed to decompress SDT image data (pass 1/2)" path=filepath
+        return nothing, nothing
+    end
+
+    x_range, y_range = active_bounding_box(intensity)
+    cropped = intensity[x_range, y_range]
+    row_keep_local = padded_row_keep_range(cropped)
+    keep_x = collect(x_range)
+    keep_y = collect(y_range)[row_keep_local]
+    keep_y_set = Set(keep_y)
+    y_out_of = Dict(y => i for (i, y) in enumerate(keep_y))  # original row -> output row index
+
+    kept_width = length(keep_x)
+    kept_height = length(keep_y)
+
+    # Pass 2: re-decompress (fast — see docstring), this time keeping only
+    # the identified rows/columns, building the final right-sized volume
+    # directly (never materializing the full stored_width x stored_width
+    # buffer at Float64 precision).
+    volume = Array{Float64,3}(undef, kept_width, kept_height, adc_re)
+    ok2 = stream_stored_rows(loc.bytes, stored_width, adc_re) do y, row_u16
+        if y in keep_y_set
+            y_out = y_out_of[y]
+            @views volume[:, y_out, :] .= Float64.(transpose(row_u16[:, keep_x]))
+        end
+    end
+    if !ok2
+        @warn "Failed to decompress SDT image data (pass 2/2)" path=filepath
+        return nothing, nothing
+    end
+
+    image = dropdims(sum(volume; dims=3); dims=3)
+    return image, volume
 end
 
 """
@@ -641,9 +849,12 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     axis_layout = GridLayout(popup_figure[1, 1])
     buttons_layout = GridLayout(popup_figure[2, 1])
 
-    # yreversed: image row 0 (ImageJ/SdtFile's top-left pixel origin) is
-    # plotted at the top of the axis, matching both the heatmap and the ROI
-    # overlay's shared 0-based (x=column, y=row) pixel coordinates.
+    # yreversed=false: image row 0 (ImageJ/SdtFile's top-left pixel origin)
+    # is plotted at the BOTTOM of the axis — a display-only flip (Makie
+    # handles the screen<->data mapping transparently either way, so
+    # heatmap!/poly!/lines! coordinates, mouseposition(), and every ROI
+    # pixel-mask/boundary computation below all stay in the same 0-based
+    # (x=column, y=row) data space regardless of this setting).
     # aspect=DataAspect(): keeps pixels square regardless of the axis
     # widget's own on-screen dimensions, so a non-square image (e.g. after
     # collapse_padded_rows halves the height) doesn't get stretched to fill
@@ -894,14 +1105,14 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         filepath = pick_non_empty_path(() -> pick_file(filterlist="sdt"); error_msg="Image import file dialog failed")
         filepath === nothing && return
 
-        sdt = try
-            SdtFile.read_sdt(read(filepath), basename(filepath))
-        catch e
-            @warn "Failed to read SDT file" path=filepath error=string(e)
-            return
-        end
-
-        intensity, volume = extract_sdt_image_and_volume(sdt)
+        # extract_sdt_image_streamed does its own file I/O and decompresses
+        # in bounded chunks (see its docstring) rather than materializing
+        # the whole block at once like SdtFile.read_sdt — the difference
+        # that matters for a large image (e.g. a real 2048x2048x256 file
+        # needs on the order of 10GB through the old path just to load,
+        # before any padding this lab's setup can store around the true
+        # content is even trimmed off).
+        intensity, volume = extract_sdt_image_streamed(filepath)
         if intensity === nothing
             @info "SDT file is a histogram, not an image; nothing to display" path=filepath
             return

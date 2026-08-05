@@ -2,6 +2,7 @@ using Test
 using FLIMApp
 using FLIMApp: ChannelFrame, ChannelSeries, AcquisitionSample, ProtocolSettings,
                LayoutSettings, ControllerSettings, RoiSettings, ConsoleSettings
+using ZipFile
 
 # These tests cover the GUI-free logic: protocol schedule math, smoothing,
 # state persistence, spinner stepping, plot windowing, and the MLE lifetime
@@ -534,6 +535,187 @@ end
     @test size(image) == (3, 3)
     @test image == dropdims(sum(vol2; dims=3); dims=3)
     @test FLIMApp.extract_sdt_image(fake_sdt(flat_bad)) === nothing
+end
+
+@testset "active_bounding_box" begin
+    # Contiguous-block padding pattern (a smaller real scan stored inside a
+    # larger fixed buffer) -- distinct from padded_row_keep_range's
+    # interleaved-row one. Regression coverage for the real bug found on a
+    # genuine 2048x2048-stored file whose true content was only in
+    # columns 1:1062, rows 1:1048 (everything else exactly zero).
+    img = zeros(10, 10)
+    img[1:6, 1:4] .= 1.0   # (x, y): active x=1:6, y=1:4
+    x_range, y_range = FLIMApp.active_bounding_box(img)
+    @test x_range == 1:6
+    @test y_range == 1:4
+
+    # No padding at all -> full range back.
+    full = fill(1.0, 5, 5)
+    x2, y2 = FLIMApp.active_bounding_box(full)
+    @test x2 == 1:5 && y2 == 1:5
+
+    # All zero -> degrades to the full range (nothing to trim safely).
+    empty_img = zeros(4, 4)
+    x3, y3 = FLIMApp.active_bounding_box(empty_img)
+    @test x3 == 1:4 && y3 == 1:4
+
+    # A small amount of leakage into the "padding" region (dark counts /
+    # crosstalk, same rationale as PADDED_ROW_ENERGY_FRACTION) must not
+    # defeat the crop -- only a few percent of a typical active row/col.
+    noisy = zeros(10, 10)
+    noisy[1:6, 1:4] .= 100.0
+    noisy[8, 2] = 1.0   # tiny leakage well outside the active block
+    x4, y4 = FLIMApp.active_bounding_box(noisy)
+    @test x4 == 1:6 && y4 == 1:4
+end
+
+@testset "stream_stored_rows / locate_zip_deflate_payload" begin
+    # Build a small ZIP-wrapped raw pixel buffer the same way a real SDT
+    # "compressed" IMG block actually is (see locate_zip_deflate_payload's
+    # docstring) -- exercises the ZIP-unwrap step and the row-streaming
+    # step together, the same way they're chained in production.
+    stored_width, adc_re = 4, 3
+    pixels = [Float64((r-1)*stored_width*10 + (c-1)*10) .+ (1:adc_re)
+              for r in 1:stored_width, c in 1:stored_width]  # pixels[r,c]::Vector{Float64}, length adc_re
+
+    flat = UInt8[]
+    io = IOBuffer()
+    for r in 1:stored_width, c in 1:stored_width
+        for v in pixels[r, c]
+            write(io, UInt16(v))
+        end
+    end
+    flat = take!(io)
+
+    zip_io = IOBuffer()
+    w = ZipFile.Writer(zip_io)
+    f = ZipFile.addfile(w, "data"; method=ZipFile.Deflate)
+    write(f, flat)
+    close(w)
+    zip_bytes = take!(zip_io)
+
+    loc = FLIMApp.SdtFile.locate_zip_deflate_payload(zip_bytes)
+    @test loc !== nothing
+    @test loc.method == ZipFile.Deflate
+    @test loc.uncompressedsize == length(flat)
+
+    payload = view(zip_bytes, loc.datapos+1 : loc.datapos+loc.compressedsize)
+
+    collected = Dict{Int, Matrix{UInt16}}()
+    ok = FLIMApp.stream_stored_rows(payload, stored_width, adc_re) do y, row_u16
+        collected[y] = collect(row_u16)   # (adc_re, stored_width), copy -- view is only valid during this call
+    end
+    @test ok
+    @test length(collected) == stored_width
+    for r in 1:stored_width, c in 1:stored_width
+        @test collected[r][:, c] == UInt16.(pixels[r, c])
+    end
+end
+
+@testset "extract_sdt_image_streamed (synthetic .sdt file, end to end)" begin
+    # Byte-for-byte hand-built minimal SDT file matching SdtFile.jl's exact
+    # field offsets (FileHeader/MeasureInfo/BlockHeader), with BOTH real
+    # padding patterns this app has to handle simultaneously: a
+    # contiguous-block active region (rows 1:5, cols 1:6 out of an 8x8
+    # stored buffer) that itself has interleaved-row padding within it
+    # (only odd rows 1/3/5 are real, matching collapse_padded_rows' own
+    # pattern) -- regression coverage for both extract_sdt_image_streamed's
+    # new contiguous-block crop AND the pre-existing interleave detection,
+    # composed together, without needing the real multi-GB file this was
+    # written against.
+    stored_width, adc_re = 8, 4
+    active_rows = [1, 3, 5]
+    active_cols = 1:6
+
+    pixels = [zeros(Float64, adc_re) for _ in 1:stored_width, _ in 1:stored_width]  # [row, col]
+    val = 100.0
+    for r in active_rows, c in active_cols
+        pixels[r, c] = collect(val:(val+adc_re-1))
+        val += 10
+    end
+
+    io = IOBuffer()
+    for r in 1:stored_width, c in 1:stored_width
+        for v in pixels[r, c]
+            write(io, UInt16(v))
+        end
+    end
+    flat = take!(io)
+
+    zip_io = IOBuffer()
+    zw = ZipFile.Writer(zip_io)
+    zf = ZipFile.addfile(zw, "data"; method=ZipFile.Deflate)
+    write(zf, flat)
+    close(zw)
+    zip_bytes = take!(zip_io)
+
+    # FileHeader (42 bytes, exact field order/sizes from SdtFile.jl's FileHeader).
+    function write_file_header(io; info_offset, info_length, setup_offs, setup_length,
+                                    data_block_offset, no_of_data_blocks, data_block_length,
+                                    meas_desc_block_offset, no_of_meas_desc_blocks, meas_desc_block_length)
+        write(io, Int16(0))                        # revision (old block format)
+        write(io, Int32(info_offset), Int16(info_length))
+        write(io, Int32(setup_offs), UInt16(setup_length))
+        write(io, Int32(data_block_offset), Int16(no_of_data_blocks), UInt32(data_block_length))
+        write(io, Int32(meas_desc_block_offset), Int16(no_of_meas_desc_blocks), Int16(meas_desc_block_length))
+        write(io, UInt16(0x5555))                   # header_valid
+        write(io, UInt32(0), UInt16(0), UInt16(0))   # reserved1, reserved2, chksum
+    end
+
+    meas_len = 100
+    FILE_HEADER_SIZE = 42
+    meas_off = FILE_HEADER_SIZE
+    block_hdr_off = meas_off + meas_len
+    block_data_off = block_hdr_off + 22
+
+    sdt_io = IOBuffer()
+    write_file_header(sdt_io;
+        info_offset=0, info_length=0, setup_offs=0, setup_length=0,
+        data_block_offset=block_hdr_off, no_of_data_blocks=1, data_block_length=length(flat),
+        meas_desc_block_offset=meas_off, no_of_meas_desc_blocks=1, meas_desc_block_length=meas_len,
+    )
+    @test position(sdt_io) == FILE_HEADER_SIZE
+
+    # MeasureInfo: all zero except adc_re at its documented offset (82,
+    # Int16) -- scan_x/scan_y (173/177) stay 0, matching this lab's real files.
+    meas_buf = zeros(UInt8, meas_len)
+    meas_buf[83:84] = reinterpret(UInt8, [Int16(adc_re)])  # offset 82 is 0-based -> 1-based index 83
+    write(sdt_io, meas_buf)
+    @test position(sdt_io) == block_hdr_off
+
+    # BlockHeader (old format, 22 bytes): block_no(i2) data_offs(i4)
+    # next_block_offs(i4) block_type(u2) meas_desc_block_no(i2) lblock_no(u4) block_length(u4).
+    # block_type = mode(1, MEAS_DATA) | IMG_BLOCK(0x60) | compressed(0x1000).
+    write(sdt_io, Int16(0))
+    write(sdt_io, Int32(block_data_off), Int32(block_data_off + length(zip_bytes)))
+    write(sdt_io, UInt16(0x1061), Int16(0))
+    write(sdt_io, UInt32(0), UInt32(length(flat)))   # block_length = TRUE uncompressed size
+    @test position(sdt_io) == block_data_off
+
+    write(sdt_io, zip_bytes)
+
+    sdt_path = tempname() * ".sdt"
+    write(sdt_path, take!(sdt_io))
+
+    try
+        # Sanity: the existing, unmodified read path parses this fixture
+        # too (confirms the fixture itself is a valid, realistic SDT file,
+        # not just something extract_sdt_image_streamed happens to accept).
+        old_sdt = FLIMApp.SdtFile.read_sdt(read(sdt_path), "tiny.sdt")
+        @test size(old_sdt.data[1]) == (stored_width*stored_width, adc_re)
+
+        image, volume = FLIMApp.extract_sdt_image_streamed(sdt_path)
+        @test image !== nothing
+        @test size(image) == (length(active_cols), length(active_rows))
+        @test size(volume) == (length(active_cols), length(active_rows), adc_re)
+
+        for (yi, r) in enumerate(active_rows), (xi, c) in enumerate(active_cols)
+            @test volume[xi, yi, :] == pixels[r, c]
+        end
+        @test image == dropdims(sum(volume; dims=3); dims=3)
+    finally
+        rm(sdt_path; force=true)
+    end
 end
 
 end # @testset FLIMApp

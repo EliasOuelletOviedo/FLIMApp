@@ -44,10 +44,10 @@ using Statistics
 roi_voltage_calibration_size = 1024
 
 # Galvo output voltage range for each axis.
-trigger_box_v_min_x = -1000
-trigger_box_v_max_x = 1000
-trigger_box_v_min_y = -1000
-trigger_box_v_max_y = 1000
+trigger_box_v_min_x = -1100
+trigger_box_v_max_x = 1400
+trigger_box_v_min_y = -900
+trigger_box_v_max_y = 1100
 
 # Delay between writing a command and reading the trigger box's response
 # (send_roi_trigger_command), giving the device time to process and reply

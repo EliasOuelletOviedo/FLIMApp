@@ -435,6 +435,73 @@ function raw_inflate!(dest::AbstractVector{UInt8}, compressed::AbstractVector{UI
 end
 
 """
+Variante en flux (streaming) de `raw_inflate!` : décompresse `compressed`
+en appelant `on_chunk(chunk::AbstractVector{UInt8})` pour chaque fenêtre
+d'au plus `chunk_bytes` octets décompressés, sans jamais matérialiser la
+sortie complète en mémoire — au contraire de `raw_inflate!`/
+`decompress_zip_typed`, qui ont besoin d'un tampon pré-dimensionné à la
+taille totale décompressée (des centaines de Mo à plusieurs Go pour une
+image FLIM complète, hors de portée sur une machine à mémoire limitée).
+`compressed` (l'entrée, quelques dizaines de Mo typiquement) reste entier
+en mémoire ; seule la SORTIE est bornée.
+
+`on_chunk` reçoit une vue sur un tampon RÉUTILISÉ à chaque appel — copier
+les octets utiles avant de retourner si l'appelant doit les conserver
+au-delà de l'appel courant.
+
+Renvoie `true` en cas de décompression complète et réussie (flux terminé
+par Z_STREAM_END), `false` si le chemin rapide est indisponible ou si le
+flux est tronqué/corrompu — dans les deux cas, `on_chunk` peut déjà avoir
+été appelé pour une partie de la sortie ; l'appelant ne doit utiliser le
+résultat accumulé que si cette fonction renvoie `true`.
+"""
+function raw_inflate_stream(on_chunk::Function, compressed::AbstractVector{UInt8}, chunk_bytes::Int)::Bool
+    (!_RAW_INFLATE_AVAILABLE || length(compressed) > typemax(Cuint) || chunk_bytes <= 0) && return false
+
+    strm = ZStream()
+    ver = ccall(_Z_VERSION, Ptr{UInt8}, ())
+    ccall(_Z_INFLATE_INIT2, Cint, (Ref{ZStream}, Cint, Ptr{UInt8}, Cint), strm, -15, ver, sizeof(ZStream)) == 0 || return false
+
+    chunk = Vector{UInt8}(undef, chunk_bytes)
+    ok = false
+    try
+        GC.@preserve compressed chunk begin
+            strm.next_in  = pointer(compressed)
+            strm.avail_in = length(compressed) % Cuint
+
+            while true
+                strm.next_out  = pointer(chunk)
+                strm.avail_out = chunk_bytes % Cuint
+
+                ret = ccall(_Z_INFLATE, Cint, (Ref{ZStream}, Cint), strm, Cint(0)) # Z_NO_FLUSH
+
+                produced = chunk_bytes - Int(strm.avail_out)
+                produced > 0 && on_chunk(view(chunk, 1:produced))
+
+                if ret == 1       # Z_STREAM_END : flux complet
+                    ok = true
+                    break
+                elseif ret != 0   # tout sauf Z_OK (0) est une erreur ici
+                    ok = false
+                    break
+                end
+                # ret == Z_OK : soit avail_out a été entièrement rempli (il
+                # reste probablement de la sortie à produire), soit l'entrée
+                # est épuisée sans que le flux soit terminé (flux tronqué) —
+                # dans ce second cas la prochaine itération produira 0 octet
+                # avec ret toujours 0, ce que zlib ne fait normalement pas
+                # sans avancer ; on boucle simplement jusqu'à Z_STREAM_END ou
+                # une erreur, conformément à l'usage standard de l'API.
+            end
+        end
+    finally
+        ccall(_Z_INFLATE_END, Cint, (Ref{ZStream},), strm)
+    end
+
+    return ok
+end
+
+"""
 Décompresse un bloc de données ZIP (bh.compressed == true) directement dans
 un `Vector{T}` de `n_elems` éléments — sans passer par un `Vector{UInt8}`
 intermédiaire. `ZipFile.jl` est utilisé pour localiser l'entrée dans
@@ -499,6 +566,59 @@ function decompress_zip_typed(::Type{T}, raw::Vector{UInt8}, n_elems::Int) where
         # tronqué d'un octet ; on l'ajoute et on réessaie (comme sdtfile.py,
         # cf. cgohlke/sdtfile issue #8).
         return try_read(vcat(raw, UInt8(0x00)))
+    end
+end
+
+"""
+    locate_zip_deflate_payload(bytes::Vector{UInt8})
+
+Locate the raw DEFLATE payload inside `bytes` — one SDT "compressed" data
+block's raw span, which is itself a complete ZIP archive containing exactly
+one entry (this is what every `bti.compressed == true` SDT block actually
+is; the SDT block's own `data_offset`/`block_length` bound the *ZIP
+container*, not the deflate stream directly).
+
+A standalone extraction of exactly the ZIP-local-header-parsing steps
+`decompress_zip_typed` above performs inline (including its EOCD-truncated-
+by-one-byte retry, cf. cgohlke/sdtfile issue #8) — kept as a *second copy*
+of that same short parsing logic rather than refactoring
+`decompress_zip_typed` to share it, since that function is exercised by
+every other SDT file this app reads today and touching it carries far more
+regression risk than duplicating ~15 lines. If you change one, check the
+other.
+
+Returns `(datapos, compressedsize, uncompressedsize, method)` — `datapos`
+is 0-based (matching `ZipFile.jl`'s own convention; add 1 for a Julia
+index), or `nothing` if `bytes` isn't parseable as a one-entry ZIP even
+after the EOCD workaround.
+"""
+function locate_zip_deflate_payload(bytes::Vector{UInt8})
+    function try_locate(b::Vector{UInt8})
+        io = IOBuffer(b)
+        r = ZipFile.Reader(io)
+        try
+            f = r.files[1]
+            seek(f._io, f._offset)
+            ZipFile.readle(f._io, UInt32)  # signature locale (déjà validée par ZipFile.Reader)
+            skip(f._io, 2+2+2+2+2+4+4+4)
+            filelen = ZipFile.readle(f._io, UInt16)
+            extralen = ZipFile.readle(f._io, UInt16)
+            skip(f._io, filelen + extralen)
+            datapos = position(f._io)
+            return (datapos=datapos, compressedsize=Int(f.compressedsize), uncompressedsize=Int(f.uncompressedsize), method=f.method)
+        finally
+            close(r)
+        end
+    end
+
+    try
+        return try_locate(bytes)
+    catch
+        try
+            return try_locate(vcat(bytes, UInt8(0x00)))
+        catch
+            return nothing
+        end
     end
 end
 
@@ -738,6 +858,103 @@ function read_sdt(b::Vector{UInt8}, filename::String="")::SdtData
         filename, Int(hdr.revision), file_id, info_str, setup_str, hdr,
         measure_infos, data_blocks, data_arrays, times_arrays,
     )
+end
+
+"""
+    locate_first_data_block(b::Vector{UInt8})
+
+Locate the first data block's raw bytes and shape metadata *without*
+decompressing it — for a large compressed IMG block (hundreds of MB to
+several GB decompressed), `read_sdt` above allocates the full decompressed
+buffer, which is what makes it unsuitable for memory-constrained reading of
+such a block; this instead lets the caller decompress incrementally (see
+`raw_inflate_stream`), never holding the full output at once.
+
+Only handles the *first* data block (matching `sdt.data[1]`'s existing
+usage throughout roi_popup.jl) — reuses the exact same header-parsing
+helpers (`parse_file_header`/`parse_block_header`/`decode_block_type`/
+`parse_measure_info`) and the exact same offset arithmetic `read_sdt`'s own
+block loop uses for its first iteration, so the two are kept in sync by
+construction rather than by two independently-written copies of delicate
+offset math.
+
+Returns `nothing` if the file has no data blocks, or if a compressed
+block's span isn't parseable as the ZIP container it's expected to be (see
+`locate_zip_deflate_payload`). Otherwise a named tuple:
+- `compressed::Bool`: whether `bytes` is a raw DEFLATE stream (decompress
+  via `raw_inflate_stream`) or already the literal element data.
+- `bytes::AbstractVector{UInt8}`: for a compressed block, the raw DEFLATE
+  payload *inside* the block's ZIP wrapper (not the block's own outer span
+  — see `locate_zip_deflate_payload`), as a view into a small owned copy;
+  for an uncompressed block, a view straight into `b`, no copy.
+- `dsize::Int`: total element count (of `dtype`) once decompressed — the
+  block's own declared count, capped to the ZIP entry's own declared
+  uncompressed size when compressed (mirrors `decompress_zip_typed`'s same
+  defensive `min`, for the same reason: the two are normally redundant,
+  but the ZIP entry's own size is authoritative if they ever disagree).
+- `dtype::DataType`: `UInt16`, `UInt32`, or `Float64` (see `decode_block_type`).
+- `adc_re::Int`: time bins per pixel from this block's `MeasureInfo`, or 0
+  if it has none.
+"""
+function locate_first_data_block(b::Vector{UInt8})
+    length(b) >= FILE_HEADER_SIZE || return nothing
+    hdr = parse_file_header(b)
+    new_block_format = (Int(hdr.revision) & 0xF) >= 15
+
+    meas_desc_off = Int(hdr.meas_desc_block_offset)
+    n_meas   = Int(hdr.no_of_meas_desc_blocks)
+    meas_len = Int(hdr.meas_desc_block_length)
+    measure_infos = MeasureInfo[]
+    for i in 0:(n_meas - 1)
+        off = meas_desc_off + i * meas_len
+        if off + meas_len <= length(b)
+            push!(measure_infos, parse_measure_info(b, off, meas_len))
+        end
+    end
+
+    current_off = Int(hdr.data_block_offset)  # 0-based
+    current_off + BLOCK_HEADER_BYTES > length(b) && return nothing
+
+    bh = parse_block_header(b, current_off, new_block_format)
+    bti = decode_block_type(bh.block_type)
+
+    mi_idx = max(Int(bh.meas_desc_block_no), 0) + 1
+    mi_idx = min(mi_idx, length(measure_infos))
+    mi = mi_idx > 0 && !isempty(measure_infos) ? measure_infos[mi_idx] : nothing
+
+    itemsize = sizeof(bti.dtype)
+    dsize = itemsize > 0 ? Int(bh.block_length) ÷ itemsize : 0
+    data_start_1b = Int(bh.data_offset) + 1   # 0-based -> 1-based
+
+    adc_re = mi === nothing ? 0 : (Int(mi.adc_re) == 0 ? 65536 : Int(mi.adc_re))
+    # scan_x/scan_y populated is compute_shape's own signal (above) that a
+    # block should take the 3D (scan_y, scan_x, adc_re) shape, not the flat
+    # 2D pixel-list one — exposed here so a caller doing its own 2D-only
+    # extraction (see extract_sdt_image_streamed, roi_popup.jl) can detect
+    # that case and fall back instead of silently mis-shaping it.
+    scan_x = mi === nothing ? 0 : Int(mi.scan_x)
+    scan_y = mi === nothing ? 0 : Int(mi.scan_y)
+
+    if bti.compressed
+        span_end = min(Int(bh.next_block_offset), length(b))  # 0-based next_offset == 1-based index just past the end
+        span_end >= data_start_1b || return nothing
+        zip_bytes = b[data_start_1b:span_end]   # small owned copy (a few tens of MB) -- ZipFile.Reader needs Vector{UInt8}
+
+        loc = locate_zip_deflate_payload(zip_bytes)
+        loc === nothing && return nothing
+        loc.method == ZipFile.Deflate || return nothing
+
+        payload_start = loc.datapos + 1   # 0-based -> 1-based
+        payload_end = loc.datapos + loc.compressedsize
+        (payload_start >= 1 && payload_end <= length(zip_bytes)) || return nothing
+
+        capped_dsize = itemsize > 0 ? min(dsize, loc.uncompressedsize ÷ itemsize) : dsize
+        return (compressed=true, bytes=view(zip_bytes, payload_start:payload_end), dsize=capped_dsize, dtype=bti.dtype, adc_re=adc_re, scan_x=scan_x, scan_y=scan_y)
+    else
+        span_end = min(data_start_1b + dsize * itemsize - 1, length(b))
+        span = span_end >= data_start_1b ? view(b, data_start_1b:span_end) : view(b, 1:0)
+        return (compressed=false, bytes=span, dsize=dsize, dtype=bti.dtype, adc_re=adc_re, scan_x=scan_x, scan_y=scan_y)
+    end
 end
 
 # ─── Helpers internes ─────────────────────────────────────────────────────────
