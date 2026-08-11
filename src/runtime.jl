@@ -20,8 +20,8 @@ using Base.Threads
 Append one frame's scalar results (photons, lifetime, concentration and
 their smoothed values) plus its own timestamp onto one ROI's per-channel
 time-series observables. Which `RoiChannelSeries` a frame is routed to is
-decided by the caller (`consumer_loop`'s round-robin `mod1(frame_index, N)`
-over `app_run.ch1_rois`/`ch2_rois`), not by this function.
+decided by the caller (`consumer_loop`'s round-robin `mod1(slot, N)` over
+`app_run.ch1_rois`/`ch2_rois`), not by this function.
 """
 function accumulate_roi_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
     push!(series.timestamps[], timestamp)
@@ -64,9 +64,26 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
     last_sample = nothing
     is_realtime_mode = acquisition_mode == "Realtime"
     warned_missing_file_sequence_number = Ref(false)
+
+    # Real-time missed-file repair. The source acquisition sometimes writes
+    # no file at all for a ROI's scan, and because it numbers files as they
+    # are written that hole leaves no trace in the numbering — so every
+    # later file lands one ROI off, permanently. `RoiSlotTracker`
+    # (acquisition.jl) recovers the real scan slot from the delay between
+    # files instead, seeded with the period the trigger box itself was
+    # programmed with (`app.protocol.scan_time + .shift_time`, read once
+    # here: that's the value uploaded at START, which a later edit to the
+    # textbox does not re-upload).
+    #
+    # Real-time only. Playback paces files on its own synthetic schedule and
+    # Save runs them as fast as it can, so in neither mode does the delay
+    # between reads carry any information about the acquisition's cadence.
+    roi_slot_tracker = RoiSlotTracker(roi_scan_period_s(app.protocol))
+    warned_ambiguous_roi_gap = Ref(false)
     realtime_frame_df = DataFrame(
         frame_idx=UInt32[],
         source_file=String[],
+        roi_index=Int[],
         timestamp=Float64[],
         photons_ch1=Float64[],
         command1=Float64[],
@@ -95,10 +112,58 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
 
             last_sample = sample
 
+            # Round-robin file->ROI assignment: file 1 -> ROI 1, file 2 ->
+            # ROI 2, ..., file N+1 -> ROI 1 again. n_rois is fixed for the
+            # whole run by rebuild_roi_series! (start_pressed) and
+            # is always >= 1 (a run with zero ROIs drawn keeps today's
+            # single-series behavior via that one-element vector).
+            #
+            # Keyed on the file's OWN embedded sequence number
+            # (file_sequence_number, parsed from its filename), not this
+            # app's read-count (frame_index) — see AcquisitionSample's
+            # docstring (data_types.jl): a file that never reaches this app
+            # is invisible to frame_index, which would then silently
+            # misassign every later file to the wrong ROI for the rest of
+            # the run. Keying on the filename's own number instead just
+            # leaves that one ROI's turn empty for that cycle. Falls back to
+            # frame_index (with a one-time warning) only if the filename has
+            # no parseable trailing number at all.
+            #
+            # In Real-time mode that number is then corrected against the
+            # measured delay between files (next_roi_slot!), which is the
+            # only thing that can see a scan the source never wrote a file
+            # for — that hole consumes no sequence number, so the numbering
+            # alone reports business as usual right through it.
+            n_rois = length(app_run.ch1_rois)
+            sequence_number = sample.file_sequence_number
+            if sequence_number === nothing
+                if !warned_missing_file_sequence_number[]
+                    @warn "File name has no parseable sequence number; falling back to read-count for ROI assignment (this can drift out of sync after a skipped file)" source_file=sample.source_file
+                    warned_missing_file_sequence_number[] = true
+                end
+                sequence_number = Int(sample.frame_index)
+            end
+
+            if is_realtime_mode && n_rois > 1
+                slot, skipped, ambiguous = next_roi_slot!(roi_slot_tracker, sample.file_time, sequence_number)
+
+                if skipped > 0
+                    @warn "Gap between acquisition files spans more than one ROI scan; assuming the source wrote no file for it and advancing ROI assignment to stay aligned" source_file=sample.source_file skipped_scans=skipped file_period_s=round(roi_slot_tracker.period_est_s, digits=3) roi_index=mod1(slot, n_rois)
+                elseif ambiguous && !warned_ambiguous_roi_gap[]
+                    @warn "Delay between acquisition files doesn't line up with the expected scan period; ROI assignment may drift — check Scan time / Shift time against the actual acquisition" source_file=sample.source_file expected_period_s=round(roi_slot_tracker.period_est_s, digits=3)
+                    warned_ambiguous_roi_gap[] = true
+                end
+
+                sequence_number = slot
+            end
+
+            roi_idx = mod1(sequence_number, n_rois)
+
             if is_realtime_mode
                 push!(realtime_frame_df, (
                     frame_idx=sample.frame_index,
                     source_file=String(sample.source_file),
+                    roi_index=roi_idx,
                     timestamp=Float64(sample.timestamps),
                     photons_ch1=Float64(sample.ch1.photons),
                     command1=Float64(sample.command1),
@@ -116,32 +181,6 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                 ))
             end
 
-            # Round-robin file->ROI assignment: file 1 -> ROI 1, file 2 ->
-            # ROI 2, ..., file N+1 -> ROI 1 again. n_rois is fixed for the
-            # whole run by rebuild_roi_series! (start_pressed) and
-            # is always >= 1 (a run with zero ROIs drawn keeps today's
-            # single-series behavior via that one-element vector).
-            #
-            # Keyed on the file's OWN embedded sequence number
-            # (file_sequence_number, parsed from its filename), not this
-            # app's read-count (frame_index) — see AcquisitionSample's
-            # docstring (data_types.jl): a file the source acquisition never
-            # wrote (e.g. a lag spike upstream) is invisible to frame_index,
-            # which would then silently misassign every later file to the
-            # wrong ROI for the rest of the run. Keying on the filename's own
-            # number instead just leaves that one ROI's turn empty for that
-            # cycle. Falls back to frame_index (with a one-time warning) only
-            # if the filename has no parseable trailing number at all.
-            n_rois = length(app_run.ch1_rois)
-            sequence_number = sample.file_sequence_number
-            if sequence_number === nothing
-                if !warned_missing_file_sequence_number[]
-                    @warn "File name has no parseable sequence number; falling back to read-count for ROI assignment (this can drift out of sync after a skipped file)" source_file=sample.source_file
-                    warned_missing_file_sequence_number[] = true
-                end
-                sequence_number = Int(sample.frame_index)
-            end
-            roi_idx = mod1(sequence_number, n_rois)
             accumulate_roi_sample!(app, app_run.ch1_rois[roi_idx], sample.ch1, sample.timestamps)
             accumulate_roi_sample!(app, app_run.ch2_rois[roi_idx], sample.ch2, sample.timestamps)
             push!(app_run.protocol_setpoint[], sample.protocol_setpoint)
@@ -282,7 +321,7 @@ Discards all previously accumulated per-ROI data. Called ahead of a fresh
 acquisition run (`start_pressed`) and by the CLEAR button
 (`clear_runtime_plots!`, handlers.jl) — either could follow a change to the
 drawn ROI set or the toggle, and the round-robin routing in
-`consumer_loop` (`mod1(frame_index, length(app_run.ch1_rois))`) needs the
+`consumer_loop` (`mod1(slot, length(app_run.ch1_rois))`) needs the
 two vectors to always be the same, non-zero length. Callers must re-render
 both plot slots (`render_plot!`, plotting.jl) afterward: this
 replaces the `Observable`s themselves (not just their contents), so any

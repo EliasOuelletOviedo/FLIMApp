@@ -16,6 +16,7 @@ emitted:
 """
 
 using Base.Threads
+using Statistics: median
 
 # =============================================================================
 # SHARED CORE LOOP
@@ -29,13 +30,246 @@ extension) as this file's sequence number in the acquisition — e.g.
 `"sample_00042.sdt"` -> `42`. Returns `nothing` if the filename has no
 trailing digits to parse. See `AcquisitionSample`'s docstring
 (data_types.jl) for why this — not the app's own read-count — is what
-round-robin ROI assignment (`consumer_loop`, runtime.jl) is keyed on.
+round-robin ROI assignment (`consumer_loop`, runtime.jl) is keyed on, and
+for the one failure mode it does *not* cover (which `RoiSlotTracker` below
+handles).
 """
 function parse_file_sequence_number(filepath::AbstractString)::Union{Int, Nothing}
     name = splitext(basename(filepath))[1]
     m = match(r"(\d+)$", name)
     m === nothing && return nothing
     return tryparse(Int, m.captures[1])
+end
+
+"""
+    source_file_time(filepath)::Float64
+
+`filepath`'s modification time in unix seconds — when the source acquisition
+finished writing it, which is the timing signal `next_roi_slot!` needs (see
+`AcquisitionSample`'s `file_time`, data_types.jl). `NaN` if the file can't
+be stat'ed, which every caller downstream treats as "no timing information
+for this file" rather than as a real timestamp.
+"""
+function source_file_time(filepath::AbstractString)::Float64
+    return try
+        Float64(stat(filepath).mtime)
+    catch
+        NaN
+    end
+end
+
+# =============================================================================
+# ROI SLOT TRACKING (missed-file repair)
+# =============================================================================
+
+"""
+    roi_scan_period_s(protocol::ProtocolSettings)::Float64
+
+Nominal wall-clock delay between two consecutive acquisition files, in
+seconds: one ROI's scan (`protocol.scan_time`) plus the galvo settle/shift
+onto the next one (`protocol.shift_time`), both in ms. These are the very
+numbers `build_and_send_roi_trigger_buffer!` (roi.jl) programs the trigger
+box's playback timing from, so this is the cadence the hardware is actually
+running at rather than a guess — good enough to seed `RoiSlotTracker`, which
+then refines it against what the files really do. `NaN` if they don't add up
+to a usable period.
+"""
+function roi_scan_period_s(protocol::ProtocolSettings)::Float64
+    period_ms = Float64(protocol.scan_time) + Float64(protocol.shift_time)
+    return (isfinite(period_ms) && period_ms > 0.0) ? period_ms / 1000.0 : NaN
+end
+
+# Gap-history window `next_roi_slot!` re-estimates the file period from. A
+# median over this many recent gaps: robust to the occasional doubled gap a
+# missed file produces (that's the whole point — those must not drag the
+# estimate up toward 1.5x and start hiding further misses), while short
+# enough to follow a genuine cadence change within a run.
+const ROI_SLOT_GAP_WINDOW = 25
+
+# Gaps to observe before trusting the measured period over the nominal one.
+# The nominal period is what the trigger box was programmed with, so it's
+# right about the hardware; the measured one also absorbs whatever per-file
+# overhead the source acquisition adds on top, which is what actually sets
+# the spacing on disk.
+const ROI_SLOT_WARMUP_GAPS = 5
+
+# How far the measured period is allowed to drift from the nominal one
+# before it's treated as nonsense (wrong protocol values, files copied in
+# bulk, clock skew) and clamped. Wide on purpose: the point is to reject
+# absurdity, not to second-guess a real cadence.
+const ROI_SLOT_PERIOD_SANITY_FACTOR = 4.0
+
+# |gap/period - round(gap/period)| above this and the gap sits too close to
+# halfway between two slot counts for the rounding to mean much — the file
+# is still assigned (rounding is the maximum-likelihood call either way),
+# but the caller is told so it can surface it.
+const ROI_SLOT_AMBIGUITY_TOLERANCE = 0.35
+
+# Upper bound on a single advance, purely to keep a garbage timestamp (mtime
+# of 1970, a file dated next century) from reaching `round(Int, ...)` with a
+# value it can't represent. Far above any real gap.
+const ROI_SLOT_MAX_STEP = 10_000
+
+"""
+    RoiSlotTracker(nominal_period_s)
+
+Rolling state for `next_roi_slot!`: maps the stream of files an acquisition
+reads onto the physical ROI-scan *slots* that produced them, so round-robin
+ROI assignment survives a scan that wrote no file at all.
+
+Holds the nominal file period (`roi_scan_period_s`, from the protocol
+settings the trigger box was programmed with), a running estimate refined
+from the last `ROI_SLOT_GAP_WINDOW` observed gaps, the previous file's
+timestamp and sequence number, and the current slot.
+
+One instance per acquisition run, owned by `consumer_loop` (runtime.jl) —
+its state is a rolling history, so it must not be shared across runs.
+"""
+mutable struct RoiSlotTracker
+    nominal_period_s::Float64
+    period_est_s::Float64
+    recent_gaps_s::Vector{Float64}
+    last_time_s::Float64
+    last_sequence::Union{Int, Nothing}
+    slot::Int
+    skipped_total::Int
+end
+
+function RoiSlotTracker(nominal_period_s::Real)
+    period = Float64(nominal_period_s)
+    usable = (isfinite(period) && period > 0.0) ? period : NaN
+    return RoiSlotTracker(usable, usable, Float64[], NaN, nothing, 0, 0)
+end
+
+"""
+    update_roi_slot_period!(tracker)
+
+Refresh `tracker.period_est_s` from its gap history: the median of the
+recent gaps once there are `ROI_SLOT_WARMUP_GAPS` of them, clamped to within
+`ROI_SLOT_PERIOD_SANITY_FACTOR` of the nominal period when one is known.
+
+Median rather than mean specifically because missed files are what this
+whole mechanism exists for: they only ever make gaps *longer*, so a mean
+would be dragged upward by exactly the events being detected, and a period
+estimate biased high is what turns a real 2x gap back into "1" and lets the
+misalignment through. The median is unmoved as long as missed files stay a
+minority of the window.
+"""
+function update_roi_slot_period!(tracker::RoiSlotTracker)
+    if length(tracker.recent_gaps_s) < ROI_SLOT_WARMUP_GAPS
+        return nothing
+    end
+
+    observed = median(tracker.recent_gaps_s)
+    if !(isfinite(observed) && observed > 0.0)
+        return nothing
+    end
+
+    nominal = tracker.nominal_period_s
+    tracker.period_est_s = if isfinite(nominal) && nominal > 0.0
+        clamp(observed, nominal / ROI_SLOT_PERIOD_SANITY_FACTOR, nominal * ROI_SLOT_PERIOD_SANITY_FACTOR)
+    else
+        observed
+    end
+
+    return nothing
+end
+
+"""
+    next_roi_slot!(tracker, file_time_s, sequence_number)
+        -> (slot::Int, skipped::Int, ambiguous::Bool)
+
+Advance `tracker` by one file and return the ROI-scan slot that file belongs
+to — the number `consumer_loop` (runtime.jl) takes `mod1(slot, n_rois)` of.
+`skipped` is how many slots were passed over (0 in the normal case),
+`ambiguous` flags a gap that didn't land convincingly on any whole number of
+periods.
+
+The advance is `max` of two independent estimates of how many scans happened
+since the previous file, because each catches a hole the other is blind to:
+
+* **the sequence numbers** — `sequence_number - previous` covers a file that
+  exists (or existed) in the source's own numbering but never reached this
+  app;
+* **the elapsed time** — `round(gap / period)` covers the case those numbers
+  cannot express at all, a scan that produced no file and therefore consumed
+  no number, leaving the numbering consecutive across the hole (see
+  `AcquisitionSample`'s docstring, data_types.jl).
+
+`max`, not a choice between them: each is a lower bound on the true advance
+(neither mechanism can invent scans that didn't happen), so the larger one
+is the better estimate and agreement is the normal case.
+
+Rounding to the nearest whole period is deliberate rather than
+tolerance-gated. Both errors here are equally bad — a missed detection and a
+phantom one each shift every subsequent file by one ROI for the rest of the
+run — so there's no safe side to bias toward, and nearest-integer is simply
+the likeliest slot count for the gap. Gaps that fall too near halfway come
+back with `ambiguous = true` instead of being silently resolved.
+
+The one exception is the warmup, before there are enough gaps to have
+checked the nominal period against reality: there, an ambiguous gap is
+declined rather than rounded. Early on, a gap that sits nowhere near a whole
+number of periods is far more likely to mean the period itself is off (the
+source adds per-file overhead the protocol values don't account for) than to
+mean scans went missing — and rounding 1.5x-nominal gaps up to "2" would
+manufacture a phantom skip on *every* file until the measured period takes
+over. Once the estimate is backed by `ROI_SLOT_WARMUP_GAPS` real
+observations that reading no longer applies and nearest-integer wins again.
+
+The first file establishes the origin: its slot *is* its sequence number, so
+a run with no missed files reproduces the plain `mod1(sequence_number,
+n_rois)` assignment this replaced, exactly.
+"""
+function next_roi_slot!(tracker::RoiSlotTracker, file_time_s::Float64, sequence_number::Int)
+    if tracker.last_sequence === nothing
+        tracker.slot = sequence_number
+        tracker.last_sequence = sequence_number
+        tracker.last_time_s = file_time_s
+        return (tracker.slot, 0, false)
+    end
+
+    # Never negative: files can arrive out of order (a sorted backlog after
+    # a numbering wrap), and going backwards would corrupt the alignment far
+    # worse than treating it as one plain step.
+    sequence_step = max(1, sequence_number - tracker.last_sequence)
+
+    time_step = 1
+    ambiguous = false
+    gap = file_time_s - tracker.last_time_s
+
+    if isfinite(gap) && gap > 0.0
+        push!(tracker.recent_gaps_s, gap)
+        if length(tracker.recent_gaps_s) > ROI_SLOT_GAP_WINDOW
+            popfirst!(tracker.recent_gaps_s)
+        end
+        update_roi_slot_period!(tracker)
+
+        period = tracker.period_est_s
+        if isfinite(period) && period > 0.0
+            ratio = gap / period
+            if ratio >= ROI_SLOT_MAX_STEP
+                time_step = ROI_SLOT_MAX_STEP
+                ambiguous = true
+            else
+                rounded = max(1, round(Int, ratio))
+                ambiguous = abs(ratio - rounded) > ROI_SLOT_AMBIGUITY_TOLERANCE
+                warming_up = length(tracker.recent_gaps_s) < ROI_SLOT_WARMUP_GAPS
+                time_step = (ambiguous && warming_up) ? 1 : rounded
+            end
+        end
+    end
+
+    step = max(sequence_step, time_step)
+    tracker.slot += step
+    tracker.skipped_total += step - 1
+    # Assigned even when non-finite: that resets the time reference so the
+    # *next* gap is measured from a known point rather than spanning two
+    # files and being misread as a skip.
+    tracker.last_time_s = file_time_s
+    tracker.last_sequence = sequence_number
+
+    return (tracker.slot, step - 1, ambiguous)
 end
 
 """
@@ -332,7 +566,7 @@ function run_acquisition_loop!(
         sample = AcquisitionSample(
             frame1, frame2,
             command1, command2, timestamps, plot_setpoint_ns, n, String(filepath),
-            parse_file_sequence_number(filepath)
+            parse_file_sequence_number(filepath), source_file_time(filepath)
         )
         if !emit!(sample, n)
             break

@@ -215,6 +215,129 @@ end
     @test FLIMApp.resolve_protocol_config(nothing) === nothing
     p = ProtocolSettings()
     @test FLIMApp.resolve_protocol_config(p) === p
+
+    @test FLIMApp.parse_file_sequence_number("/data/sample_00042.sdt") == 42
+    @test FLIMApp.parse_file_sequence_number("/data/sample.sdt") === nothing
+
+    # scan_time + shift_time, ms -> s
+    @test FLIMApp.roi_scan_period_s(ProtocolSettings(scan_time=950, shift_time=50)) == 1.0
+    @test isnan(FLIMApp.roi_scan_period_s(ProtocolSettings(scan_time=0, shift_time=0)))
+end
+
+@testset "ROI slot tracking (missed-file repair)" begin
+    # Helper: feed a whole run of (time, sequence_number) pairs through one
+    # tracker and collect the ROI index each file would be assigned to.
+    function roi_indices(period_s, n_rois, files)
+        tracker = FLIMApp.RoiSlotTracker(period_s)
+        return map(files) do (t, seq)
+            slot, _, _ = FLIMApp.next_roi_slot!(tracker, Float64(t), seq)
+            mod1(slot, n_rois)
+        end
+    end
+
+    # Nothing missing: the first file's own sequence number is the origin,
+    # so a clean run reproduces plain mod1(sequence_number, n_rois) exactly.
+    clean = [(Float64(k - 1), k) for k in 1:8]
+    @test roi_indices(1.0, 2, clean) == [1, 2, 1, 2, 1, 2, 1, 2]
+    @test roi_indices(1.0, 3, clean) == [1, 2, 3, 1, 2, 3, 1, 2]
+
+    # The reported failure: the source writes no file for ROI 2's fourth
+    # scan, and because it numbers files as they are written, the numbering
+    # stays consecutive right across the hole. Only the doubled delay
+    # betrays it — file 4 (seq 4, which mod1 alone would send to ROI 2) is
+    # really ROI 1's.
+    missed = [(0.0, 1), (1.0, 2), (2.0, 3), (4.0, 4), (5.0, 5), (6.0, 6)]
+    @test roi_indices(1.0, 2, missed) == [1, 2, 1, 1, 2, 1]
+    # Same input keyed on the sequence number alone: ROI 1 scanned twice in
+    # a row but both files land on different ROIs — the misalignment.
+    @test [mod1(seq, 2) for (_, seq) in missed] == [1, 2, 1, 2, 1, 2]
+
+    # Skips are reported, and only when they happen.
+    tracker = FLIMApp.RoiSlotTracker(1.0)
+    @test FLIMApp.next_roi_slot!(tracker, 0.0, 1) == (1, 0, false)
+    @test FLIMApp.next_roi_slot!(tracker, 1.0, 2) == (2, 0, false)
+    # Three periods of silence: two scans produced nothing.
+    slot, skipped, _ = FLIMApp.next_roi_slot!(tracker, 4.0, 3)
+    @test (slot, skipped) == (5, 2)
+    @test tracker.skipped_total == 2
+
+    # A gap in the numbering itself (file written, never seen by this app)
+    # is still honored — that's what the sequence number is good at.
+    tracker = FLIMApp.RoiSlotTracker(1.0)
+    FLIMApp.next_roi_slot!(tracker, 0.0, 1)
+    slot, skipped, _ = FLIMApp.next_roi_slot!(tracker, 2.0, 3)
+    @test (slot, skipped) == (3, 1)
+
+    # The two estimates disagreeing takes the larger: neither mechanism can
+    # invent scans that never happened, so each is a lower bound.
+    tracker = FLIMApp.RoiSlotTracker(1.0)
+    FLIMApp.next_roi_slot!(tracker, 0.0, 1)
+    @test FLIMApp.next_roi_slot!(tracker, 1.0, 4)[1] == 4      # numbering wins
+    @test FLIMApp.next_roi_slot!(tracker, 4.0, 5)[1] == 7      # timing wins
+
+    # Timing jitter well inside half a period must not read as a skip.
+    jittery = [(0.0, 1), (0.78, 2), (1.85, 3), (2.75, 4), (4.05, 5), (5.2, 6)]
+    @test roi_indices(1.0, 2, jittery) == [1, 2, 1, 2, 1, 2]
+
+    # No usable timestamp (mtime unreadable): falls back to the numbering
+    # rather than treating NaN as a gap, and the *next* gap is measured from
+    # the new reference instead of spanning two files (which would read as a
+    # phantom skip).
+    tracker = FLIMApp.RoiSlotTracker(1.0)
+    FLIMApp.next_roi_slot!(tracker, 0.0, 1)
+    @test FLIMApp.next_roi_slot!(tracker, NaN, 2) == (2, 0, false)
+    @test FLIMApp.next_roi_slot!(tracker, 5.0, 3) == (3, 0, false)
+    @test FLIMApp.next_roi_slot!(tracker, 6.0, 4) == (4, 0, false)
+
+    # The real period being consistently longer than the protocol's nominal
+    # one (per-file overhead at the source) must not manufacture a skip on
+    # every single file: ambiguous gaps are declined until the measured
+    # period has been established, and then it takes over.
+    stretched = [(1.6 * (k - 1), k) for k in 1:12]
+    @test roi_indices(1.0, 2, stretched) == [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2]
+    tracker = FLIMApp.RoiSlotTracker(1.0)
+    for (t, seq) in stretched
+        FLIMApp.next_roi_slot!(tracker, t, seq)
+    end
+    @test tracker.skipped_total == 0
+    @test tracker.period_est_s ≈ 1.6
+
+    # ... and a genuine miss is still caught once that longer period is the
+    # one being measured against. The 12th file sits at t = 17.6; nothing is
+    # written for the scan after it, so the 13th arrives two periods later.
+    long_run = vcat(stretched, [(17.6 + 3.2, 13), (17.6 + 4.8, 14)])
+    long_indices = roi_indices(1.0, 2, long_run)
+    @test long_indices[13] == 2    # ... which mod1(13, 2) alone would call ROI 1
+    @test long_indices[14] == 1
+
+    # A doubled gap must not drag the period estimate up toward 1.5x and
+    # start hiding further misses — that's why the estimator is a median.
+    with_misses = [(0.0, 1), (1.0, 2), (2.0, 3), (3.0, 4), (4.0, 5),
+                   (6.0, 6), (7.0, 7), (9.0, 8), (10.0, 9)]
+    tracker = FLIMApp.RoiSlotTracker(1.0)
+    for (t, seq) in with_misses
+        FLIMApp.next_roi_slot!(tracker, t, seq)
+    end
+    @test tracker.period_est_s ≈ 1.0
+    @test tracker.skipped_total == 2
+
+    # No nominal period available at all (unusable protocol values): the
+    # tracker still bootstraps one from what it observes.
+    tracker = FLIMApp.RoiSlotTracker(NaN)
+    for k in 1:6
+        FLIMApp.next_roi_slot!(tracker, 2.0 * (k - 1), k)
+    end
+    @test tracker.period_est_s ≈ 2.0
+    @test tracker.skipped_total == 0
+    # Sixth file sat at t = 10; a 4s gap is two periods, so one missed scan.
+    @test FLIMApp.next_roi_slot!(tracker, 14.0, 7)[2] == 1
+
+    # An absurd timestamp (garbage mtime) is bounded rather than thrown on.
+    tracker = FLIMApp.RoiSlotTracker(1.0)
+    FLIMApp.next_roi_slot!(tracker, 0.0, 1)
+    slot, skipped, ambiguous = FLIMApp.next_roi_slot!(tracker, 1.0e30, 2)
+    @test skipped == FLIMApp.ROI_SLOT_MAX_STEP - 1
+    @test ambiguous
 end
 
 @testset "MLE lifetime fit recovers a known lifetime" begin

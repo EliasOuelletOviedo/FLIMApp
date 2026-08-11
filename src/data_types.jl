@@ -54,17 +54,35 @@ channel by `run_acquisition_loop!` (acquisition.jl) and consumed by
 too many fields to destructure positionally without risking a
 silently-mismatched order.
 
+Three fields together identify *which* ROI scan produced this file — the
+whole point being that none of them is reliable alone:
+
 `frame_index` is this app's own count of files it has read so far this run
 — it advances by exactly 1 per file regardless of what the source acquisition
 actually produced, so a file the upstream hardware/software never wrote
 (e.g. a lag spike at the source) is invisible to it and it silently drifts
 out of sync with the real physical sequence from that point on.
+
 `file_sequence_number` (parsed from `source_file`'s name, see
 `parse_file_sequence_number` in acquisition.jl) is this file's own
-embedded position in that sequence instead, so a missing file just leaves a
-gap rather than shifting everything after it — used by `consumer_loop`
-(runtime.jl) for round-robin ROI assignment specifically because of this.
-`nothing` when the filename has no parseable trailing number.
+embedded position in that sequence instead, so a file that exists on disk
+but never reaches this app just leaves a gap rather than shifting everything
+after it. `nothing` when the filename has no parseable trailing number. It
+does *not* catch the more common failure, though: the source numbers its
+files consecutively as they are **written**, so a scan that produced no file
+at all never consumes a number and the numbering stays perfectly consecutive
+across the hole (ROI 1 -> 1, ROI 2 -> 2, ROI 1 -> 3, ROI 2 -> *nothing*,
+ROI 1 -> 4) — every later file then lands on the wrong ROI, permanently.
+
+`file_time` is `source_file`'s modification time (unix seconds, `NaN` if it
+couldn't be stat'ed) — when the source actually wrote it, not when this app
+got around to reading it, so it stays meaningful even when the reader is
+backlogged. It's what makes the hole above detectable: consecutive ROI scans
+are `scan_time + shift_time` ms apart by construction (the trigger box is
+programmed with exactly those numbers, roi.jl), so a gap of ~2x that period
+means one scan produced no file. See `RoiSlotTracker`/`next_roi_slot!`
+(acquisition.jl), which `consumer_loop` (runtime.jl) drives to keep
+round-robin ROI assignment aligned through such holes.
 """
 struct AcquisitionSample
     ch1::ChannelFrame
@@ -76,6 +94,7 @@ struct AcquisitionSample
     frame_index::UInt32
     source_file::String
     file_sequence_number::Union{Int, Nothing}
+    file_time::Float64
 end
 
 # =============================================================================

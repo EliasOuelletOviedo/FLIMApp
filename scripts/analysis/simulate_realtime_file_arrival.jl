@@ -42,6 +42,14 @@ function simulate_realtime_file_arrival(
         dst_path = joinpath(destination_dir, filename)
 
         mv(src_path, dst_path; force=true)
+        # `mv` carries the source file's own modification time across, which
+        # would leave every simulated arrival timestamped whenever the
+        # original was recorded. The app reads that mtime as "when the
+        # source wrote this file" and derives the delay between ROI scans
+        # from it (`source_file_time`/`next_roi_slot!`, src/acquisition.jl),
+        # so stamping it with now() is what makes the simulated cadence the
+        # one this loop is actually producing.
+        touch(dst_path)
         @info "Transferred file" index=i total=length(files) file=filename
 
         if i < length(files)

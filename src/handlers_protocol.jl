@@ -38,7 +38,7 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
         Label(panel_grid[3, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "PWM frequency :"))...)
         Label(panel_grid[6, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Points per ROI :"))...)
         Label(panel_grid[7, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Spiral turns :"))...)
-        Label(panel_grid[8, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Scan time  [ms] :"))...)
+        Label(panel_grid[8, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Scan time [ms] :"))...)
         Label(panel_grid[9, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Shift time [ms] :"))...)
 
         Box(panel_grid[3, 4:6]; SPINNER_BOX_ATTRS...)
