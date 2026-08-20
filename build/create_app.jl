@@ -1,7 +1,7 @@
 """
 build/create_app.jl
 
-Build a standalone, double-clickable FLIMApp executable with PackageCompiler.
+Build a standalone, double-clickable TIFFApp executable with PackageCompiler.
 
 Usage (from the repository root; -t auto speeds up compilation):
 
@@ -10,16 +10,16 @@ Usage (from the repository root; -t auto speeds up compilation):
 The build is native-only — PackageCompiler cannot cross-compile — so run
 this script on each platform you want a binary for:
 
-- **macOS**: produces `dist/FLIMApp.app`, a real Finder app bundle
+- **macOS**: produces `dist/TIFFApp.app`, a real Finder app bundle
   (Contents/Info.plist + launcher). Double-click it like any app. The first
   launch on a machine may need right-click -> Open because the bundle is
   unsigned (Gatekeeper).
-- **Windows**: produces `dist/FLIMApp/`, with `FLIMApp.bat` at its root.
+- **Windows**: produces `dist/TIFFApp/`, with `TIFFApp.bat` at its root.
   Double-click the .bat (or make a shortcut to it). It sets the thread
-  count and starts `bin\\FLIMApp.exe`.
+  count and starts `bin\\TIFFApp.exe`.
 
 Either way the raw PackageCompiler output also remains directly runnable
-from a terminal (`.../bin/FLIMApp`).
+from a terminal (`.../bin/TIFFApp`).
 
 The launcher on both platforms sets `JULIA_NUM_THREADS=auto`: the
 acquisition worker runs on its own thread (see runtime.jl) and needs a
@@ -41,16 +41,16 @@ using PackageCompiler
 
 const ROOT = dirname(@__DIR__)
 const DIST = joinpath(ROOT, "dist")
-const APP_COMPILE_DIR = joinpath(DIST, "FLIMApp")
+const APP_COMPILE_DIR = joinpath(DIST, "TIFFApp")
 
-println("=== FLIMApp standalone build ===")
+println("=== TIFFApp standalone build ===")
 println("Package dir : $ROOT")
 println("Output dir  : $APP_COMPILE_DIR")
 
 create_app(
     ROOT,
     APP_COMPILE_DIR;
-    executables=["FLIMApp" => "julia_main"],
+    executables=["TIFFApp" => "julia_main"],
     force=true,
     include_lazy_artifacts=true,
     # incremental=true bases the app sysimage on the stock Julia sysimage
@@ -65,10 +65,10 @@ create_app(
 if Sys.isapple()
     # Wrap the PackageCompiler output into a real macOS .app bundle so it is
     # double-clickable in Finder. Structure:
-    #   FLIMApp.app/Contents/Info.plist
-    #   FLIMApp.app/Contents/MacOS/FLIMApp          (launcher script)
-    #   FLIMApp.app/Contents/Resources/app/...      (PackageCompiler output)
-    bundle = joinpath(DIST, "FLIMApp.app")
+    #   TIFFApp.app/Contents/Info.plist
+    #   TIFFApp.app/Contents/MacOS/TIFFApp          (launcher script)
+    #   TIFFApp.app/Contents/Resources/app/...      (PackageCompiler output)
+    bundle = joinpath(DIST, "TIFFApp.app")
     rm(bundle; force=true, recursive=true)
 
     contents = joinpath(bundle, "Contents")
@@ -86,11 +86,11 @@ if Sys.isapple()
         <plist version="1.0">
         <dict>
             <key>CFBundleName</key>
-            <string>FLIMApp</string>
+            <string>TIFFApp</string>
             <key>CFBundleDisplayName</key>
-            <string>FLIMApp</string>
+            <string>TIFFApp</string>
             <key>CFBundleIdentifier</key>
-            <string>org.flimapp.FLIMApp</string>
+            <string>org.flimapp.TIFFApp</string>
             <key>CFBundleVersion</key>
             <string>0.1.0</string>
             <key>CFBundleShortVersionString</key>
@@ -98,18 +98,18 @@ if Sys.isapple()
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleExecutable</key>
-            <string>FLIMApp</string>
+            <string>TIFFApp</string>
             <key>NSHighResolutionCapable</key>
             <true/>
         </dict>
         </plist>
         """)
 
-    launcher = joinpath(macos_dir, "FLIMApp")
+    launcher = joinpath(macos_dir, "TIFFApp")
     write(launcher,
         """
         #!/bin/bash
-        # FLIMApp launcher: locate the bundled app and run it with threads
+        # TIFFApp launcher: locate the bundled app and run it with threads
         # enabled (the acquisition worker needs its own thread, runtime.jl)
         # and GC mark/sweep parallelism maxed out (see create_app.jl's
         # docstring for why -- reduces GC-pause tail latency in the
@@ -117,7 +117,7 @@ if Sys.isapple()
         DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
         export JULIA_NUM_THREADS=auto
         NCORES="\$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-        exec "\$DIR/../Resources/app/bin/FLIMApp" --gcthreads="\$NCORES",1
+        exec "\$DIR/../Resources/app/bin/TIFFApp" --gcthreads="\$NCORES",1
         """)
     chmod(launcher, 0o755)
 
@@ -128,20 +128,20 @@ if Sys.isapple()
 elseif Sys.iswindows()
     # The .exe is already double-clickable; add a .bat launcher at the
     # bundle root that also enables threading.
-    bat = joinpath(APP_COMPILE_DIR, "FLIMApp.bat")
+    bat = joinpath(APP_COMPILE_DIR, "TIFFApp.bat")
     write(bat,
         """
         @echo off
         set JULIA_NUM_THREADS=auto
-        start "" "%~dp0bin\\FLIMApp.exe" --gcthreads=%NUMBER_OF_PROCESSORS%,1
+        start "" "%~dp0bin\\TIFFApp.exe" --gcthreads=%NUMBER_OF_PROCESSORS%,1
         """)
 
     println()
     println("=== Build complete ===")
     println("Windows build: $APP_COMPILE_DIR")
-    println("Double-click FLIMApp.bat inside it (or make a desktop shortcut to it).")
+    println("Double-click TIFFApp.bat inside it (or make a desktop shortcut to it).")
 else
     println()
     println("=== Build complete ===")
-    println("Executable: $(joinpath(APP_COMPILE_DIR, "bin", "FLIMApp"))")
+    println("Executable: $(joinpath(APP_COMPILE_DIR, "bin", "TIFFApp"))")
 end

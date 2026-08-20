@@ -32,15 +32,13 @@ Base.@kwdef struct GuiBlocks
     # Widgets
     start_button::Button
     stop_button::Button
-    irf_path_textbox::Textbox
-    irf_button::Button
     folder_path_textbox::Textbox
     folder_button::Button
     port_menu::Menu
     connect_button::Button
     target_freq_textbox::Textbox
     mode_menu::Menu
-    lifetimes_menu::Menu
+    ratio_menu::Menu
     panel_buttons::Dict{Symbol, Button}
     info_label::Label
     # Axes

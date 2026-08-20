@@ -1,17 +1,26 @@
 """
-FLIMApp.jl
+TIFFApp.jl
 
-FLIM Application - Fluorescence Lifetime Imaging Microscopy
+Ratiometric TIFF imaging application — multi-channel intensity ratios of the
+FRET type, with PI feedback control.
 
-Defines the `FLIMApp` module: package imports, application initialization,
+Derived from FLIMApp (branch `FLIMApp`), which fitted fluorescence lifetimes
+from Becker & Hickl `.sdt` TCSPC files. Everything downstream of the
+measurement — the protocol scheduler, ROI trigger box, PI controller, Kalman
+smoothing, plots, session saving and state persistence — is shared with it;
+what changed is that a frame is now a group of TIFF images (one per channel)
+reduced to an intensity ratio, rather than a decay histogram fitted to a
+lifetime.
+
+Defines the `TIFFApp` module: package imports, application initialization,
 state management (persistence and runtime), GUI creation and event binding,
 and application lifecycle (start/stop).
 
 Usage:
-    julia> using FLIMApp
+    julia> using TIFFApp
     julia> run_app()
 """
-module FLIMApp
+module TIFFApp
 
 # =============================================================================
 # DEPENDENCIES
@@ -19,7 +28,6 @@ module FLIMApp
 
 using Serialization
 using Observables
-using ZipFile
 
 # =============================================================================
 # MODULE INITIALIZATION - LOAD IN DEPENDENCY ORDER
@@ -52,16 +60,21 @@ include("protocol.jl")
 # Plot-axis autoscaling and plot-series lookup (needed by runtime.jl and GUI.jl)
 include("plotting.jl")
 
-# Becker & Hickl .sdt file parser (used by lifetime_analysis.jl's read_sdt_frame)
-include("io/SdtFile.jl")
+
+# TIFF/BigTIFF reader (used by tiff_source.jl and roi_popup.jl)
+include("io/BigTiffFile.jl")
+using .BigTiffFile
 
 # ImageJ .roi/.zip ROI parser (used by roi_popup.jl)
 include("io/ImageJROI.jl")
 
-# Analysis algorithms (lifetime fitting)
-include("lifetime_analysis.jl")
+# Acquisition folder resolution and per-channel file grouping
+include("tiff_source.jl")
 
-# Acquisition worker tasks (depends on lifetime_analysis, protocol.jl, smoothing.jl)
+# Ratio reduction, ROI rasterization, and the Hill calibration
+include("ratio_analysis.jl")
+
+# Acquisition worker tasks (depends on tiff_source, ratio_analysis, protocol.jl, smoothing.jl)
 include("acquisition.jl")
 
 # Realtime-capture session saving (depends on data_types.jl, path_utils.jl)
@@ -254,37 +267,6 @@ function load_or_create_state()::AppState
     return app_state
 end
 
-"""
-    init_irf_runtime!()
-
-Load the IRF into `RUNTIME[]`, used by lifetime fitting and FFT-based
-operations. Falls back to `nothing` fields when loading fails.
-
-Doesn't touch `RUNTIME[].fft_plan`/`ifft_plan` — those already have a valid
-256-point default from `RUNTIME`'s initialization, and `ensure_fft_plans`
-(called from `ensure_runtime_state!` on every fit) replans on demand for
-whatever size is actually needed, so redoing the same 256-point plan here
-on every call would just be wasted work.
-"""
-function init_irf_runtime!()
-    ctx = RUNTIME[]
-    try
-        new_irf = get_irf()
-        ctx.irf = new_irf
-        ctx.irf_bin_size = get_irf_bin_size()
-        ctx.tcspc_window_size = round(new_irf[end, 1] + new_irf[2, 1], sigdigits=4)
-
-        @info "IRF loaded successfully" size=size(ctx.irf) bin_size=ctx.irf_bin_size window_size=ctx.tcspc_window_size
-    catch e
-        @error "Failed to load IRF; lifetime fitting will not work" error=string(e)
-        ctx.irf = nothing
-        ctx.irf_bin_size = nothing
-        ctx.tcspc_window_size = nothing
-    end
-
-    return nothing
-end
-
 # =============================================================================
 # APPLICATION INITIALIZATION & EXECUTION
 # =============================================================================
@@ -301,17 +283,17 @@ Main application entry point.
 """
 function run_app()
     @info "="^60
-    @info "FLIM Application Starting"
+    @info "TIFF Ratiometry Application Starting"
     @info "="^60
 
     if Threads.nthreads() == 1
         @warn """
         Julia is running with only 1 thread (Threads.nthreads() == 1).
-        The acquisition worker (lifetime fitting) is spawned on its own
-        thread via Threads.@spawn to keep the GUI responsive during a fit,
-        but that only works when a second thread is actually available —
-        with one thread it falls back to sharing the GUI thread, and the
-        window may stutter/freeze while fitting.
+        The acquisition worker (image reading and reduction) is spawned on
+        its own thread via Threads.@spawn to keep the GUI responsive while
+        frames are processed, but that only works when a second thread is
+        actually available — with one thread it falls back to sharing the
+        GUI thread, and the window may stutter under a fast acquisition.
         Fix: start Julia with more threads, e.g.
             julia -t auto --project=.
         (or set the environment variable JULIA_NUM_THREADS=auto before
@@ -328,17 +310,9 @@ function run_app()
     # Initialize runtime state
     runtime_state = AppRun()
 
-    # Load IRF for lifetime analysis
-    init_irf_runtime!()
-
-    # One-time JIT warmup of the fitting code path, done here (before the
-    # GUI appears) rather than left to the user's first Start click — see
-    # warmup_lifetime_fitting!'s docstring for why this matters and why a
-    # background thread doesn't sidestep it.
-    @info "Warming up lifetime-fitting code paths (one-time JIT compilation)..."
-    t_warmup = time()
-    warmup_lifetime_fitting!()
-    @info "Warmup complete" seconds = round(time() - t_warmup, digits=1)
+    # No IRF to load and no fitting warmup to run: the ratiometric reduction
+    # is a masked sum and a division, so there is no iterative solver whose
+    # first-call JIT cost would otherwise land on the user's first START.
 
     # Create GUI
     @info "Creating GUI..."
@@ -381,7 +355,7 @@ function julia_main()::Cint
             wait(screen)
         end
     catch e
-        @error "FLIMApp terminated with an unhandled error" exception=(e, catch_backtrace())
+        @error "TIFFApp terminated with an unhandled error" exception=(e, catch_backtrace())
         return 1
     end
 
@@ -391,6 +365,6 @@ end
 # Export public API
 export AppState, AppRun, run_app, save_state, load_state
 
-@info "FLIM Application module loaded. Call run_app() to start."
+@info "TIFF Ratiometry module loaded. Call run_app() to start."
 
 end # module

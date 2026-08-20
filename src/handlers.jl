@@ -46,18 +46,12 @@ function update_stop_button_label!(app_run, blocks)
 end
 
 function clear_runtime_plots!(app, app_run, blocks)
-    n_hist = length(app_run.hist_time[])
+    app_run.preview[] = nothing
 
-    for series in channel_series(app_run)
-        reset_channel_series!(series)
-        series.histogram[] = fill(NaN, n_hist)
-        series.fit[] = fill(NaN, n_hist)
-    end
-
-    # Replaces app_run.ch1_rois/ch2_rois wholesale (e.g. the ROI count or the
-    # ROI toggle may have changed since the last run) — render_plot!
-    # below rebuilds the axes to match, same as after
-    # rebuild_roi_series! in start_pressed (runtime.jl).
+    # Replaces app_run.rois_series wholesale (e.g. the ROI count or the ROI
+    # toggle may have changed since the last run) — render_plot! below rebuilds
+    # the axes to match, same as after rebuild_roi_series! in start_pressed
+    # (runtime.jl).
     rebuild_roi_series!(app, app_run)
 
     empty!(app_run.protocol_setpoint[])
@@ -67,8 +61,7 @@ function clear_runtime_plots!(app, app_run, blocks)
     app_run.i[] = 0
     app_run.save_progress[] = NaN
 
-    foreach(notify_channel_series!, channel_series(app_run))
-    foreach(notify_roi_series!, roi_channel_series(app_run))
+    foreach(notify_roi_series!, app_run.rois_series)
     notify(app_run.protocol_setpoint)
     notify(app_run.command1)
     notify(app_run.command2)
@@ -145,19 +138,13 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
         app_run.target_frequency[] = parsed
     end
 
-    on(blocks.irf_button.clicks) do _
-        filepath = open_irf_dialog()
-        if filepath === nothing
-            return
-        end
-
-        try
-            set_path_cache!(irf_filepath_cache(), filepath)
-            update_path_textbox!(blocks.irf_path_textbox, filepath)
-            @info "IRF filepath updated" path=filepath
-        catch e
-            @warn "Failed to update IRF filepath" error=string(e)
-        end
+    # The ratio combination round-trips through app.layout (unlike the mode
+    # menu, which is read fresh at START and never persisted), so it survives a
+    # restart the same way the Layout panel's own menus do.
+    on(blocks.ratio_menu.selection) do selection
+        selection isa AbstractString || return
+        app.layout.ratio_combination = selection
+        save_state(app)
     end
 
     on(blocks.folder_button.clicks) do _

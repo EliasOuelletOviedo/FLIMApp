@@ -1,130 +1,128 @@
 """
 plotting.jl
 
-Plot-axis autoscaling and plot-series lookup for the FLIM GUI: computing
-axis limits from the current data window, mapping a plot-selection label to
-its underlying observables, and the protocol-setpoint highlight overlay.
+Plot-axis autoscaling and plot-series lookup for the GUI: computing axis
+limits from the current data window, mapping a plot-selection label to its
+underlying observables, and the protocol-setpoint highlight overlay.
 """
 
 using GLMakie
 using Observables
 
 # -----------------------------------------------------------------------------
-# Histogram plot normalization
+# plot selection labels
 # -----------------------------------------------------------------------------
-#
-# On the Histogram plot, fit and IRF are each normalized to their own peak
-# (max -> 1), so their shapes are comparable regardless of photon counts or
-# IRF units. Counts use the SAME divisor as the fit (not their own max), so
-# they stay on a scale comparable to the fit curve rather than also peaking
-# at 1 — the whole point is showing how far the raw counts sit from the fit,
-# which a self-normalized counts curve would hide.
-
-# Normalize a curve to its own peak (max -> 1).
-function normalize_to_own_max(y::AbstractVector{<:Real})
-    out = zeros(Float64, length(y))
-    isempty(y) && return out
-
-    ymax = maximum(Float64.(y))
-    if !isfinite(ymax) || ymax == 0.0
-        return out
-    end
-
-    out .= Float64.(y) ./ ymax
-    return out
-end
-
-# Normalize counts by the fit's peak, not counts' own peak.
-function normalize_counts_to_fit(counts::AbstractVector{<:Real}, fit::AbstractVector{<:Real})
-    out = zeros(Float64, length(counts))
-    isempty(fit) && return out
-
-    fit_max = maximum(Float64.(fit))
-    if !isfinite(fit_max) || fit_max == 0.0
-        return out
-    end
-
-    out .= Float64.(counts) ./ fit_max
-    return out
-end
 
 """
-    shown_channel_series(app_run, show_ch1, show_ch2)
+Labels the Plot 1 / Plot 2 menus offer, and the values persisted in
+`LayoutSettings.plot1`/`.plot2`.
 
-The standard "for each shown channel" iteration used by the ROI-split
-draw_*_plot! functions below (Photon counts/Lifetime/Ion concentration):
-`(roi_series_vector, color)` pairs for whichever of the two channels its
-toggle currently shows (channel 1 in `PLOT_COLOR_CH1`, channel 2 in
-`PLOT_COLOR_CH2`) — `roi_series_vector` is that channel's
-`Vector{RoiChannelSeries}` (`app_run.ch1_rois`/`ch2_rois`), one entry per
-drawn ROI (or a single entry when none are drawn).
+Named constants rather than bare strings because the same label has to match
+in four places — the menu options, `render_plot!`'s dispatch,
+`lookup_plot_series`'s dispatch, and the persisted state — and a typo in any
+one of them silently renders an empty plot.
+
+`PLOT_IMAGE` replaces FLIM's Histogram plot: a TCSPC decay curve has no
+ratiometric counterpart, whereas seeing the field being imaged does.
 """
-function shown_channel_series(app_run, show_ch1::Bool, show_ch2::Bool)
-    pairs = Tuple{Vector{RoiChannelSeries}, typeof(PLOT_COLOR_CH1)}[]
-    show_ch1 && push!(pairs, (app_run.ch1_rois, PLOT_COLOR_CH1))
-    show_ch2 && push!(pairs, (app_run.ch2_rois, PLOT_COLOR_CH2))
-    return pairs
+const PLOT_IMAGE         = "Image"
+const PLOT_INTENSITY     = "Mean intensity"
+const PLOT_RATIO         = "Ratio"
+const PLOT_CONCENTRATION = "Concentration"
+const PLOT_COMMAND       = "Command"
+
+"""
+    PLOT_OPTIONS
+
+Every plot selection, in menu order.
+"""
+const PLOT_OPTIONS = [PLOT_IMAGE, PLOT_INTENSITY, PLOT_RATIO, PLOT_CONCENTRATION, PLOT_COMMAND]
+
+"""
+    MAX_PLOT_CHANNELS
+
+How many per-channel visibility toggles each plot slot carries. Three because
+that is the most channels the acquisition writes; toggles beyond a run's
+actual channel count are simply inert.
+"""
+const MAX_PLOT_CHANNELS = 3
+
+"""
+    plot_channel_toggles(layout, slot) -> NTuple{MAX_PLOT_CHANNELS, Bool}
+
+The per-channel visibility toggles for plot slot 1 or 2.
+
+Gathered into a tuple so every drawing and autoscaling function takes one
+argument that scales with channel count, instead of the `show_ch1, show_ch2`
+pair that would have to grow a third positional argument (and be updated at
+every call site) each time a channel is added.
+"""
+function plot_channel_toggles(layout::LayoutSettings, slot::Integer)
+    return slot == 1 ?
+        (layout.plot1_ch1, layout.plot1_ch2, layout.plot1_ch3) :
+        (layout.plot2_ch1, layout.plot2_ch2, layout.plot2_ch3)
 end
 
 """
-    shown_snapshot_series(app_run, show_ch1, show_ch2)
+    shown_channel_positions(toggles, channel_count) -> Vector{Int}
 
-Like `shown_channel_series`, but for the Histogram plot's "latest frame"
-snapshot (`ChannelSeries`, not ROI-split — see its docstring in
-data_types.jl for why): `(series, color)` pairs for whichever of the two
-channels its toggle currently shows.
+Which channel positions a plot should draw: those whose toggle is on and
+which the current acquisition actually provides.
+
+An acquisition writing two channels leaves the third toggle inert rather than
+drawing an empty trace for it.
 """
-function shown_snapshot_series(app_run, show_ch1::Bool, show_ch2::Bool)
-    pairs = Tuple{ChannelSeries, typeof(PLOT_COLOR_CH1)}[]
-    show_ch1 && push!(pairs, (app_run.ch1, PLOT_COLOR_CH1))
-    show_ch2 && push!(pairs, (app_run.ch2, PLOT_COLOR_CH2))
-    return pairs
+function shown_channel_positions(toggles, channel_count::Integer)
+    return [c for c in 1:min(length(toggles), Int(channel_count)) if toggles[c]]
 end
 
-# IRF curve for the Histogram plot overlay, truncated/padded to `fit`'s
-# length and normalized to its own peak (max -> 1).
-function normalized_irf_from_fit(fit::AbstractVector{<:Real})
-    nfit = length(fit)
-    out = zeros(Float64, nfit)
+# -----------------------------------------------------------------------------
+# image plot
+# -----------------------------------------------------------------------------
 
-    irf = RUNTIME[].irf
-    if nfit == 0 || irf === nothing || size(irf, 2) < 2
-        return out
+"""
+    preview_matrix(preview, source) -> Matrix{Float32}
+
+Pull one displayable image out of a `FramePreview`: `source` is either a
+channel position or `:ratio` for the per-pixel ratio map.
+
+Returns a 1x1 `NaN` matrix when there is nothing to show (no preview built
+yet, or a channel the acquisition does not provide). Makie renders `NaN` as
+empty space, so the plot stays blank rather than erroring or showing stale
+data at the wrong size.
+"""
+function preview_matrix(preview::Union{Nothing, FramePreview}, source)::Matrix{Float32}
+    preview === nothing && return fill(NaN32, 1, 1)
+
+    if source === :ratio
+        return preview.ratio_map
     end
 
-    irf_y = Float64.(irf[:, 2])
-    if isempty(irf_y)
-        return out
-    end
-
-    n = min(nfit, length(irf_y))
-    out[1:n] .= normalize_to_own_max(irf_y[1:n])
-    return out
+    position = Int(source)
+    (1 <= position <= length(preview.channel_images)) || return fill(NaN32, 1, 1)
+    return preview.channel_images[position]
 end
 
 """
-    draw_histogram_plot!(axis, app_run, show_ch1, show_ch2)
+    draw_image_plot!(axis, app, app_run, toggles)
 
-Draw the Histogram plot's series onto `axis`: each shown channel's counts
-as semi-transparent bars plus its fit as a line on top (channel 1 in
-`PLOT_COLOR_CH1`, channel 2 in `PLOT_COLOR_CH2`), all normalized (see the
-functions above) so shapes are comparable regardless of photon counts. IRF
-is drawn once regardless of the toggles — one instrument response, not
-per-channel. Shared by the Menu-selection handler (handlers_layout.jl) and
-the initial-selection draw at GUI construction time (GUI.jl) via
-`render_plot!` — both need the exact same rendering, so it lives
-here once instead of as two copies that can drift out of sync.
+Draw the most recent frame snapshot onto `axis` as a heatmap.
+
+Which image is shown follows the channel toggles: the *first* enabled channel
+is displayed, or the per-pixel ratio map when no channel toggle is on. An
+axis can only show one heatmap meaningfully — overlaying two would hide the
+lower one entirely — so unlike the line plots the toggles select here rather
+than accumulate.
+
+The heatmap is `lift`ed from `app_run.preview`, so it refreshes whenever the
+consumer publishes a new snapshot without the axis being rebuilt.
 """
-function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
-    for (series, color) in shown_snapshot_series(app_run, show_ch1, show_ch2)
-        counts_normalized = lift(normalize_counts_to_fit, series.histogram, series.fit)
-        fit_normalized = lift(normalize_to_own_max, series.fit)
-        barplot!(axis, app_run.hist_time, counts_normalized, color=(color, 0.1), gap=0.0)
-        lines!(axis, app_run.hist_time, fit_normalized, color=color, linewidth=PLOT_LINEWIDTH)
-    end
+function draw_image_plot!(axis, app, app_run, toggles)
+    shown = shown_channel_positions(toggles, app_run.channel_count)
+    source = isempty(shown) ? :ratio : first(shown)
 
-    irf_normalized = lift(normalized_irf_from_fit, app_run.ch1.fit)
-    lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
+    image_data = lift(p -> preview_matrix(p, source), app_run.preview)
+    heatmap!(axis, image_data; colormap=:viridis)
 
     return nothing
 end
@@ -187,81 +185,90 @@ function add_setpoint_highlight!(ax, app_run)
 end
 
 """
-    draw_lifetime_plot!(axis, app, app_run, show_ch1, show_ch2)
+    draw_region_series!(axis, app, app_run, values_of, smooth_of, color_of)
 
-Draw the Lifetime plot's series onto `axis`: the protocol-setpoint
-highlight and trace (channel-agnostic — it's the PID target, not measured
-data, so it's drawn regardless of the toggles), plus each shown channel's
-raw/smoothed lifetime, one line pair per ROI (`app_run.rois`) — all of one
-channel's ROI lines share that channel's color (channel 1
-`PLOT_COLOR_CH1`, channel 2 `PLOT_COLOR_CH2`), superimposed with no legend,
-so a single-ROI (or no-ROI) run looks exactly as it did before this
-existed. Shared by the Menu-selection handler (handlers_layout.jl) and the
-initial-selection draw at GUI construction time (GUI.jl) via
-`render_plot!` — see `draw_histogram_plot!` above for why this
-needs to be one function, not two copies.
+Shared body of the three line plots: for each region, draw its raw trace
+faintly and its smoothed trace solid on top.
+
+`values_of`/`smooth_of` pull the raw and smoothed observables out of a
+`RoiSeries`, and `color_of` picks that trace's color. Factored out because
+the Ratio, Concentration and Mean-intensity plots differ *only* in those three
+choices — the FLIM version carried three near-identical copies, and a fix
+applied to one of them (the per-ROI superposition) had to be repeated in all
+three.
+
+Every region's lines share a color with no legend, so a single-region run
+looks exactly as it did before per-ROI splitting existed.
 """
-function draw_lifetime_plot!(axis, app, app_run, show_ch1::Bool, show_ch2::Bool)
+function draw_region_series!(axis, app, app_run, values_of, smooth_of, color)
+    for series in app_run.rois_series
+        raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, values_of(series))
+        smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, smooth_of(series))
+        lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
+        lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
+    end
+    return nothing
+end
+
+"""
+    draw_ratio_plot!(axis, app, app_run)
+
+Draw the Ratio plot: the protocol-setpoint trace and highlight, plus each
+region's raw and smoothed intensity ratio.
+
+Not gated by the channel toggles — a ratio is formed *across* channels and
+belongs to a region, so "show channel 2's ratio" has no meaning. This is the
+direct replacement for FLIM's Lifetime plot, and like it, it is the series the
+PI controller regulates on.
+"""
+function draw_ratio_plot!(axis, app, app_run)
     add_setpoint_highlight!(axis, app_run)
     protocol_x, protocol_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.protocol_setpoint)
     lines!(axis, protocol_x, protocol_y, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
 
-    for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
-        for series in roi_series
-            raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, series.lifetime)
-            smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, series.lifetime_smooth)
-            lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
-            lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
-        end
-    end
+    draw_region_series!(axis, app, app_run, s -> s.ratio, s -> s.ratio_smooth, PLOT_COLOR_CH1)
 
     return nothing
 end
 
 """
-    draw_ion_concentration_plot!(axis, app, app_run, show_ch1, show_ch2)
+    draw_concentration_plot!(axis, app, app_run)
 
-Draw the Ion concentration plot's series onto `axis`: each shown channel's
-raw concentration and its smoothed trace, one line pair per ROI — same
-per-ROI superimposed-same-color-no-legend treatment as
-`draw_lifetime_plot!` (see its docstring), using the exact same smoothing
-(kalman_update!, see smoothing.jl). Shared by the Menu-selection
-handler and the initial-selection draw for the same reason as
-`draw_lifetime_plot!`.
+Draw the Concentration plot: each region's raw and smoothed concentration,
+obtained by inverting the Hill calibration on that region's ratio (see
+`hill_ratio_to_concentration`, ratio_analysis.jl).
+
+Like the Ratio plot, not gated by the channel toggles — the concentration is a
+function of the ratio, so it is per-region rather than per-channel.
 """
-function draw_ion_concentration_plot!(axis, app, app_run, show_ch1::Bool, show_ch2::Bool)
+function draw_concentration_plot!(axis, app, app_run)
     add_setpoint_highlight!(axis, app_run)
 
-    for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
-        for series in roi_series
-            raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, series.concentration)
-            smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, series.concentration_smooth)
-            lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
-            lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
-        end
-    end
+    draw_region_series!(axis, app, app_run, s -> s.concentration, s -> s.concentration_smooth, PLOT_COLOR_CH1)
 
     return nothing
 end
 
 """
-    draw_photon_counts_plot!(axis, app, app_run, show_ch1, show_ch2)
+    draw_intensity_plot!(axis, app, app_run, toggles)
 
-Draw the Photon counts plot's series onto `axis`: each shown channel's raw
-photon-count trace and its smoothed trace, one line pair per ROI — same
-per-ROI superimposed-same-color-no-legend treatment as
-`draw_lifetime_plot!` (see its docstring), using the exact same smoothing
-(kalman_update!, see smoothing.jl). Shared by the Menu-selection
-handler and the initial-selection draw for the same reason as
-`draw_lifetime_plot!`.
+Draw the Mean intensity plot: for each shown channel, that channel's raw and
+smoothed mean intensity, one line pair per region, in the channel's own color.
+
+This is the one line plot the channel toggles genuinely apply to — mean
+intensity is the only quantity that remains per-channel after ratiometry, and
+watching it is how photobleaching and saturation become visible.
 """
-function draw_photon_counts_plot!(axis, app, app_run, show_ch1::Bool, show_ch2::Bool)
+function draw_intensity_plot!(axis, app, app_run, toggles)
     add_setpoint_highlight!(axis, app_run)
 
-    for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
-        for series in roi_series
-            raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, series.photons)
-            smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, series.photons_smooth)
+    for position in shown_channel_positions(toggles, app_run.channel_count)
+        color = plot_channel_color(position)
+        for series in app_run.rois_series
+            position > length(series.channels) && continue
+            channel = series.channels[position]
+            raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, channel.values)
+            smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, channel.smooth)
             lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
             lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
         end
@@ -274,50 +281,50 @@ end
     render_plot!(app, app_run, blocks, plot_slot::Symbol)
 
 Render whichever series `app.layout.plot1`/`.plot2` currently selects onto
-`plot_slot`'s axis (`:plot1` or `:plot2`), gated by that slot's own
-`plot1_ch1`/`plot1_ch2`/`plot2_ch1`/`plot2_ch2` toggles. This is the single
-place that knows how to render a plot slot — the Menu `on(selection)`
-handler and the channel-toggle `on(active)` handler (both in
-handlers_layout.jl) and the initial render at GUI construction time
-(GUI.jl's `draw_initial_plots!`) all call this instead of each
-keeping its own copy, for the same reason `draw_histogram_plot!` etc. are
-shared functions above.
+`plot_slot`'s axis (`:plot1` or `:plot2`), gated by that slot's own channel
+toggles. This is the single place that knows how to render a plot slot — the
+Menu `on(selection)` handler and the channel-toggle `on(active)` handler (both
+in handlers_layout.jl) and the initial render at GUI construction time
+(GUI.jl's `draw_initial_plots!`) all call this instead of each keeping its own
+copy.
 """
 function render_plot!(app, app_run, blocks, plot_slot::Symbol)
     if plot_slot == :plot1
         axis = blocks.plot_1_axis
         selection = app.layout.plot1
-        show_ch1 = app.layout.plot1_ch1
-        show_ch2 = app.layout.plot1_ch2
+        toggles = plot_channel_toggles(app.layout, 1)
         axis.title[] = "Plot 1\n($(selection))"
     else
         axis = blocks.plot_2_axis
         selection = app.layout.plot2
-        show_ch1 = app.layout.plot2_ch1
-        show_ch2 = app.layout.plot2_ch2
+        toggles = plot_channel_toggles(app.layout, 2)
         axis.title[] = "Plot 2\n($(selection))"
     end
 
     empty!(axis)
 
-    if selection == "Command"
+    if selection == PLOT_COMMAND
         add_setpoint_highlight!(axis, app_run)
 
         cmd1_x, cmd1_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.command1)
         cmd2_x, cmd2_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.command2)
         lines!(axis, cmd1_x, cmd1_y, color=PLOT_COLOR_CH1, linewidth=PLOT_LINEWIDTH)
         lines!(axis, cmd2_x, cmd2_y, color=PLOT_COLOR_CH2, linewidth=PLOT_LINEWIDTH)
-    elseif selection == "Lifetime"
-        draw_lifetime_plot!(axis, app, app_run, show_ch1, show_ch2)
-    elseif selection == "Histogram"
-        draw_histogram_plot!(axis, app_run, show_ch1, show_ch2)
-    elseif selection == "Ion concentration"
-        draw_ion_concentration_plot!(axis, app, app_run, show_ch1, show_ch2)
-    elseif selection == "Photon counts"
-        draw_photon_counts_plot!(axis, app, app_run, show_ch1, show_ch2)
+    elseif selection == PLOT_RATIO
+        draw_ratio_plot!(axis, app, app_run)
+    elseif selection == PLOT_IMAGE
+        draw_image_plot!(axis, app, app_run, toggles)
+    elseif selection == PLOT_CONCENTRATION
+        draw_concentration_plot!(axis, app, app_run)
+    elseif selection == PLOT_INTENSITY
+        draw_intensity_plot!(axis, app, app_run, toggles)
     end
 
-    if !app_run.running[]
+    if selection == PLOT_IMAGE
+        # A heatmap has no time axis to pin, and the rolling-window logic below
+        # would squash it. Makie's own limits already fit the image.
+        autolimits!(axis)
+    elseif !app_run.running[]
         autolimits!(axis)
         lim = axis.finallimits[]
         xmax = lim.origin[1] + lim.widths[1]
@@ -331,7 +338,7 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol)
         # whatever autolimits makes of the just-drawn data. While running this
         # self-heals within one publish tick (~100ms); while paused,
         # consumer_loop is blocked and nothing else would ever re-pin it.
-        autoscale_plot!(app, app_run, axis, selection, show_ch1, show_ch2)
+        autoscale_plot!(app, app_run, axis, selection, toggles)
     end
 
     return nothing
@@ -347,7 +354,7 @@ end
 """
     autoscale_values!(ax)
 
-Reset an axis to Makie's automatic limits (used for the Histogram plot).
+Reset an axis to Makie's automatic limits (used for the Image plot).
 """
 function autoscale_values!(ax)
     autolimits!(ax)
@@ -502,9 +509,9 @@ end
     accumulate_windowed!(xs_acc, ys_acc, timestamps, values, time_range)
 
 Append `windowed_slice(timestamps, values, time_range)` onto `xs_acc`/
-`ys_acc` in place. Small helper for `lookup_plot_series` below, so
-gating a series on `show_ch1`/`show_ch2` is a one-line `show_chN && ...`
-instead of a branch per plot label.
+`ys_acc` in place. Small helper for `lookup_plot_series` below, so gating a
+series on its channel toggle stays a one-liner instead of a branch per plot
+label.
 """
 function accumulate_windowed!(xs_acc::Vector{Float64}, ys_acc::Vector{Float64}, timestamps::AbstractVector{Float64}, values::AbstractVector{Float64}, time_range)
     ts_w, val_w = windowed_slice(timestamps, values, time_range)
@@ -514,50 +521,54 @@ function accumulate_windowed!(xs_acc::Vector{Float64}, ys_acc::Vector{Float64}, 
 end
 
 """
-    lookup_plot_series(app_run, plot_label, time_range, show_ch1, show_ch2)
+    lookup_plot_series(app_run, plot_label, time_range, toggles)
 
 Return x/y vectors for one plot label, restricted to the last `time_range`
-seconds (see `windowed_slice`) and to whichever channel(s)/ROIs are shown
-(each ROI's own `timestamps`, per `RoiChannelSeries`, is used to window its
-own series — they aren't aligned to a single shared x-axis any more).
-Labels supported: `Histogram`, `Photon counts`, `Lifetime`, `Ion concentration`, `Command`.
-`Histogram` and `Command` ignore `show_ch1`/`show_ch2` — Histogram returns
-the raw (un-windowed) channel-1 series regardless (autoscaling only, not
-used for drawing), and Command always shows both controller outputs (see
-`RoiChannelSeries`'s docstring in data_types.jl for why Command isn't
-ROI-split like the other three: it drives real hardware output, not just
-this plot).
+units (see `windowed_slice`) and to whichever channels/regions are shown.
+
+Each region's own `timestamps` windows its own series — per `RoiSeries`, they
+are not aligned to a single shared x-axis.
+
+Used for autoscaling only, never for drawing, so it flattens every shown trace
+into one x/y pair: the axis limits depend on the union of the data, not on
+which trace a point came from.
+
+`PLOT_IMAGE` returns empty vectors — a heatmap's extent comes from the image
+itself, not from a time window. `PLOT_COMMAND` ignores the toggles and always
+reports both controller outputs; see `AppRun`'s docstring (data_types.jl) for
+why the command series are not region-split like the others.
 """
-function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, show_ch2::Bool)
-    if plot_label == "Histogram"
-        return (app_run.hist_time[], app_run.ch1.histogram[])
-    end
+function lookup_plot_series(app_run, plot_label, time_range, toggles)
+    plot_label == PLOT_IMAGE && return (Float64[], Float64[])
 
     xs = Float64[]
     ys = Float64[]
-    shown = shown_channel_series(app_run, show_ch1, show_ch2)
 
-    if plot_label == "Photon counts"
-        for (roi_series, _) in shown, series in roi_series
-            ts = series.timestamps[]
-            accumulate_windowed!(xs, ys, ts, series.photons[], time_range)
-            accumulate_windowed!(xs, ys, ts, series.photons_smooth[], time_range)
+    if plot_label == PLOT_INTENSITY
+        for position in shown_channel_positions(toggles, app_run.channel_count)
+            for series in app_run.rois_series
+                position > length(series.channels) && continue
+                channel = series.channels[position]
+                ts = series.timestamps[]
+                accumulate_windowed!(xs, ys, ts, channel.values[], time_range)
+                accumulate_windowed!(xs, ys, ts, channel.smooth[], time_range)
+            end
         end
         return (xs, ys)
     end
 
-    if plot_label == "Lifetime"
-        for (roi_series, _) in shown, series in roi_series
+    if plot_label == PLOT_RATIO
+        for series in app_run.rois_series
             ts = series.timestamps[]
-            accumulate_windowed!(xs, ys, ts, series.lifetime[], time_range)
-            accumulate_windowed!(xs, ys, ts, series.lifetime_smooth[], time_range)
+            accumulate_windowed!(xs, ys, ts, series.ratio[], time_range)
+            accumulate_windowed!(xs, ys, ts, series.ratio_smooth[], time_range)
         end
         accumulate_windowed!(xs, ys, app_run.timestamps[], app_run.protocol_setpoint[], time_range)
         return (xs, ys)
     end
 
-    if plot_label == "Ion concentration"
-        for (roi_series, _) in shown, series in roi_series
+    if plot_label == PLOT_CONCENTRATION
+        for series in app_run.rois_series
             ts = series.timestamps[]
             accumulate_windowed!(xs, ys, ts, series.concentration[], time_range)
             accumulate_windowed!(xs, ys, ts, series.concentration_smooth[], time_range)
@@ -565,7 +576,7 @@ function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, sho
         return (xs, ys)
     end
 
-    if plot_label == "Command"
+    if plot_label == PLOT_COMMAND
         ts = app_run.timestamps[]
         accumulate_windowed!(xs, ys, ts, app_run.command1[], time_range)
         accumulate_windowed!(xs, ys, ts, app_run.command2[], time_range)
@@ -576,36 +587,29 @@ function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, sho
 end
 
 """
-    notify_channel_series!(series::ChannelSeries)
+    notify_roi_series!(series::RoiSeries)
 
-Notify one channel's "latest frame" snapshot observables (histogram/fit/counts).
+Notify one region's time-series observables — timestamps, ratio,
+concentration, each channel's mean intensity, and their smoothed
+counterparts.
 """
-function notify_channel_series!(series::ChannelSeries)
-    notify(series.histogram)
-    notify(series.fit)
-    notify(series.counts)
-    return nothing
-end
-
-"""
-    notify_roi_series!(series::RoiChannelSeries)
-
-Notify one ROI's per-channel time-series observables (timestamps, photons,
-lifetime, concentration, and their smoothed counterparts).
-"""
-function notify_roi_series!(series::RoiChannelSeries)
+function notify_roi_series!(series::RoiSeries)
     notify(series.timestamps)
-    notify(series.photons)
-    notify(series.photons_smooth)
-    notify(series.lifetime)
-    notify(series.lifetime_smooth)
+    notify(series.ratio)
+    notify(series.ratio_smooth)
     notify(series.concentration)
     notify(series.concentration_smooth)
+
+    for channel in series.channels
+        notify(channel.values)
+        notify(channel.smooth)
+    end
+
     return nothing
 end
 
 function notify_runtime_observables!(app_run)
-    foreach(notify_roi_series!, roi_channel_series(app_run))
+    foreach(notify_roi_series!, app_run.rois_series)
     notify(app_run.protocol_setpoint)
     notify(app_run.command1)
     notify(app_run.command2)
@@ -614,15 +618,15 @@ function notify_runtime_observables!(app_run)
     return nothing
 end
 
-function autoscale_plot!(app, app_run, axis, plot_label, show_ch1::Bool, show_ch2::Bool)
-    if plot_label == "Histogram"
+function autoscale_plot!(app, app_run, axis, plot_label, toggles)
+    if plot_label == PLOT_IMAGE
         autoscale_values!(axis)
         return nothing
     end
 
-    xs, ys = lookup_plot_series(app_run, plot_label, app.layout.time_range, show_ch1, show_ch2)
+    xs, ys = lookup_plot_series(app_run, plot_label, app.layout.time_range, toggles)
 
-    if plot_label == "Command"
+    if plot_label == PLOT_COMMAND
         autoscale_values!(app, axis, xs)
     else
         autoscale_values!(app, axis, xs, ys)

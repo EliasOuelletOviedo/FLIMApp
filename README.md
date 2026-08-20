@@ -1,14 +1,42 @@
-# FLIM Application
+# TIFF Ratiometry Application
 
-**Fluorescence Lifetime Imaging Microscopy** - A Julia-based analysis and visualization platform for FLIM data.
+**Multi-channel intensity ratiometry** — a Julia-based analysis and visualization
+platform for FRET-type ratio imaging, with PI feedback control.
+
+Derived from [TIFFApp](../../tree/TIFFApp) (branch `TIFFApp`), which fitted
+fluorescence lifetimes from Becker & Hickl `.sdt` TCSPC files. Everything
+downstream of the measurement is shared with it; what changed is that a frame
+is now a group of TIFF images — one per channel — reduced to an intensity
+ratio, rather than a decay histogram fitted to a lifetime.
 
 ## Overview
 
 This application provides:
-- **GUI-based interface** for real-time FLIM data visualization
-- **Lifetime fitting** using Maximum Likelihood Estimation (MLE) with multi-exponential decay models
-- **Hardware control** integration for photon detectors and signal processing
+- **GUI-based interface** for real-time ratio visualization
+- **Ratiometric reduction** of 2–3 channel TIFF acquisitions, with a Hill
+  calibration mapping the ratio to a concentration
+- **Hardware control** integration for the galvo trigger box and PI outputs
 - **Data persistence** for experimental protocols and configurations
+
+## Input data
+
+The app reads the folder layout the Bliq VMS acquisition software writes:
+
+```
+<selected folder>/
+  <session folder, created when acquisition starts>/
+    Bliq VMS/
+      C1/  Name-C1-T001.tif
+      C2/  Name-C2-T002.tif
+      C3/  (optional)
+```
+
+Images are uncompressed TIFF/BigTIFF, 8- or 16-bit, read by a dependency-free
+reader (`src/io/BigTiffFile.jl`). Files are grouped into *frame instances* —
+one image per channel — from their `T###` counters. Two numbering conventions
+occur in practice and are detected from the data rather than assumed; see
+`src/tiff_source.jl` and `TIFFApp_SPEC.md` for the details and for why guessing
+wrong is silent rather than loud.
 
 ## Prerequisites
 
@@ -28,24 +56,25 @@ Pkg.instantiate()   # installs the exact locked dependency versions
 ## Directory Structure
 
 ```
-FLIMApp/
+TIFFApp/
 ├── src/
-│   ├── FLIMApp.jl               # Module definition, entry point, application lifecycle
+│   ├── TIFFApp.jl              # Module definition, entry point, application lifecycle
 │   ├── config.jl               # Configuration, constants, defaults
-│   ├── data_types.jl           # Data structures (AppState, AppRun, ChannelSeries)
+│   ├── data_types.jl           # Data structures (AppState, AppRun, RoiSeries)
 │   ├── gui_themes.jl           # UI theme definitions and styling
 │   ├── gui_blocks.jl           # GuiBlocks: typed container of GUI elements
 │   ├── path_utils.jl           # Shared path-picker/cache helpers
-│   ├── smoothing.jl            # Lifetime smoothing/Kalman helpers
+│   ├── smoothing.jl            # Series smoothing/Kalman helpers
 │   ├── serial.jl               # Serial port discovery + PID/PWM command I/O
 │   ├── protocol.jl             # Protocol schedule math
 │   ├── plotting.jl             # Plot-axis autoscaling and plot-series lookup
-│   ├── lifetime_analysis.jl   # Lifetime fitting algorithms (MLE), IRF loading
+│   ├── tiff_source.jl          # Acquisition folder resolution, channel grouping
+│   ├── ratio_analysis.jl       # Ratio reduction, ROI rasterization, Hill calibration
 │   ├── acquisition.jl          # Playback/Realtime/Save acquisition worker tasks
 │   ├── session_save.jl         # Realtime-capture session saving (.jls + CSV)
 │   ├── runtime.jl              # Background task lifecycle (start/pause/stop)
 │   ├── protocol_popup.jl       # Protocol popup UI
-│   ├── roi_popup.jl            # ROI popup UI (shell; ROI reading not wired in yet)
+│   ├── roi_popup.jl            # ROI popup UI (TIFF/live-frame reference image, ROI drawing)
 │   ├── handlers_layout.jl      # Layout panel controls
 │   ├── handlers_controller.jl  # Controller panel controls
 │   ├── handlers_protocol.jl    # Protocol panel controls
@@ -53,11 +82,11 @@ FLIMApp/
 │   ├── handlers.jl             # Event handler orchestrator
 │   ├── GUI.jl                  # Makie GUI construction
 │   └── io/
-│       ├── SdtFile.jl          # SDT block parser; used by lifetime_analysis.jl's read_sdt_frame
-│       └── ImageJROI.jl        # WIP: ImageJ ROI reader (not yet wired in)
+│       ├── BigTiffFile.jl      # TIFF/BigTIFF reader (8/16-bit, uncompressed)
+│       └── ImageJROI.jl        # ImageJ .roi/.zip ROI reader
 ├── test/
 │   └── runtests.jl             # Test suite (run with `Pkg.test()`)
-├── scripts/analysis/           # Ad-hoc profiling/benchmark/spike scripts (not run by CI)
+├── TIFFApp_SPEC.md             # Conversion spec: decisions, data-format findings
 ├── build/
 │   ├── create_app.jl           # Standalone executable build (PackageCompiler)
 │   └── precompile_app.jl       # Precompile workload for the app build
@@ -66,7 +95,7 @@ FLIMApp/
 └── README.md                   # This file
 ```
 
-Runtime state (saved settings, IRF/data-folder path caches) lives outside
+Runtime state (saved settings, data-folder path cache) lives outside
 the repository in `~/.flimapp/`, so running the app never dirties the git
 working tree.
 
@@ -82,7 +111,7 @@ julia -t auto --project=.
 ```
 
 ```julia
-julia> using FLIMApp
+julia> using TIFFApp
 julia> run_app()
 ```
 
@@ -91,14 +120,14 @@ julia> run_app()
 
 The `-t auto` flag (or `julia -t 4`, or setting the `JULIA_NUM_THREADS`
 environment variable before starting Julia) is identical on macOS and
-Windows. It matters here: the acquisition worker (file read + lifetime fit)
+Windows. It matters here: the acquisition worker (image read + reduction)
 runs on its own thread via `Threads.@spawn` so the GUI stays responsive
 while fitting, but that only has a second thread to run on if Julia was
 started with one. With the default single thread, `run_app()` logs a
 warning and acquisition falls back to sharing the GUI thread, which can
 stutter during a fit.
 
-For a hot-reloading dev workflow, `using Revise` before `using FLIMApp` —
+For a hot-reloading dev workflow, `using Revise` before `using TIFFApp` —
 edits to any `src/*.jl` file take effect without restarting Julia.
 (Install Revise in your global environment: `julia -e 'using Pkg; Pkg.add("Revise")'` —
 it is a dev tool, not a dependency of the package.)
@@ -111,52 +140,64 @@ To build a standalone app that launches without installing Julia:
 julia -t auto --project=build build/create_app.jl
 ```
 
-- On **macOS** this produces `dist/FLIMApp.app` — double-click it in Finder
+- On **macOS** this produces `dist/TIFFApp.app` — double-click it in Finder
   (first launch: right-click → Open, since the bundle is unsigned).
 - On **Windows** (run the same command on a Windows machine — the build is
-  native-only) this produces `dist/FLIMApp/` with a double-clickable
-  `FLIMApp.bat`.
+  native-only) this produces `dist/TIFFApp/` with a double-clickable
+  `TIFFApp.bat`.
 
 The build takes tens of minutes and bundles Julia + all libraries
 (~1 GB). See `build/create_app.jl` for details.
 
 ### Initial Setup
 
-1. **Load IRF**: On first run, you'll be prompted to select a .sdt file containing the Instrument Response Function. This is cached for future sessions.
+1. **Select Data**: Use the "Folder path" button to point at the acquisition
+   output. Any of three shapes resolves: a `Bliq VMS` directory, a session
+   folder containing one, or the parent folder holding session folders. In
+   Realtime mode the session folder need not exist yet — the app waits for the
+   acquisition software to create it.
 
-2. **Select Data**: Use the "Folder path" button to specify where measurement .sdt files are located.
+2. **Pick the ratio**: The menu beside the mode selector offers all six ordered
+   channel pairs (`C1/C2`, `C1/C3`, `C2/C1`, …). A pair naming a channel the
+   acquisition does not write yields a `NaN` ratio rather than blocking the
+   run; the per-channel intensity series stay usable.
 
 3. **Configure Layout**: Use the Layout panel to adjust:
-   - **Time range**: Duration of display window (seconds)
-   - **Binning**: Number of frames to sum together
-   - **Plot selection**: Choose what quantities to display
+   - **Time range**: Duration of the display window (seconds in Realtime,
+     frames in Playback)
+   - **Binning**: Number of frames to sum together, capped by the image buffer
+     depth
+   - **Plot selection**: Image, Mean intensity, Ratio, Concentration, Command
+   - **Channel toggles**: Per plot, which channels the Mean intensity plot
+     draws (and which channel the Image plot shows)
 
-## File Format
+## File format
 
-### .sdt Files (Becker & Hickl)
+Uncompressed TIFF or BigTIFF, 8- or 16-bit, one sample per pixel, read by
+`src/io/BigTiffFile.jl`. Compressed or multi-sample files are rejected with a
+specific error rather than decoded incorrectly — a wrong image silently
+feeding the ratio is worse than a failed read.
 
-Binary format for time-correlated single photon counting (TCSPC) data. The application reads:
-- Raw photon count histograms
-- Time resolution information
-- Multi-channel recording data
-
-The reader (`read_sdt_frame` in `lifetime_analysis.jl`) delegates header/block
-parsing to the `SdtFile` module (`src/io/SdtFile.jl`), which handles both
-compressed (ZIP) and uncompressed formats.
+The reader is deliberately narrow rather than general: the pixel data is a
+contiguous block at a fixed offset, so a frame read is a `seek` plus one bulk
+read into a caller-owned buffer. That measures 0.081 ms for a 1 MB frame,
+against an 8.33 ms budget at 60 Hz across two channels.
 
 ## Architecture
 
 ### Module Dependencies
 
 ```
-module FLIMApp
+module TIFFApp
     config.jl
         ↓
     data_types.jl   gui_themes.jl   path_utils.jl   smoothing.jl   serial.jl   protocol.jl
         ↓
     plotting.jl
         ↓
-    lifetime_analysis.jl
+    io/BigTiffFile.jl   io/ImageJROI.jl
+        ↓
+    tiff_source.jl   ratio_analysis.jl
         ↓
     acquisition.jl   session_save.jl
         ↓
@@ -172,14 +213,14 @@ module FLIMApp
 end
 ```
 
-See `src/FLIMApp.jl`'s `include(...)` list for the exact, authoritative order.
+See `src/TIFFApp.jl`'s `include(...)` list for the exact, authoritative order.
 
 ### Key Components
 
 #### `config.jl`
 Centralized configuration:
 - File paths and directory constants
-- Physics parameters (laser period, histogram resolution)
+- Acquisition parameters (image buffer depth, preview size and throttle)
 - Theme definitions (dark/light modes)
 - Default state values
 
@@ -188,12 +229,21 @@ Core data structures:
 - **AppState**: Persistent user settings (serialized to AppState.jls)
 - **AppRun**: Runtime state with observables for reactive GUI updates
 
-#### `lifetime_analysis.jl`
-Maximum Likelihood Estimation fitting for fluorescence decay, plus IRF/.sdt loading:
-- Single to 4-exponential decay models
-- IRF shift/delay compensation
-- Convolution with photon transport
-- Iterative optimization using BFGS/L-BFGS-B
+#### `tiff_source.jl`
+Acquisition folder resolution and per-channel file grouping:
+- Locating the `Bliq VMS` directory from any of the accepted folder shapes
+- Grouping per-channel files into frame instances from their `T###` counters,
+  under either numbering convention (detected, not assumed)
+- The Realtime instance collector, which holds a partially arrived instance
+  until every channel has contributed and abandons it once overdue by a
+  multiple of the observed cadence
+
+#### `ratio_analysis.jl`
+The ratiometric measurement itself:
+- Ratio-of-means reduction over a region, for a chosen ordered channel pair
+- ROI polygon rasterization to pixel masks
+- The Hill calibration mapping a ratio to a concentration (**provisional
+  constants** — see the file header)
 
 #### `serial.jl`
 Serial hardware I/O:
@@ -209,10 +259,11 @@ Plot-axis autoscaling and plot-series lookup, shared by `runtime.jl` and `GUI.jl
 
 #### `acquisition.jl`
 Playback/Realtime/Save acquisition worker tasks:
-- Sliding-window histogram binning
-- Lifetime fitting dispatch (full vs. partial fit)
-- PID command computation
-- Each mode is a thin wrapper around the shared `run_acquisition_loop!` core
+- Sliding-window image binning over whole frames, in their native sample type
+- Per-region reduction to ratios and concentrations
+- PI command computation
+- Each mode is a thin wrapper around the shared `run_acquisition_loop!` core,
+  differing in how the next instance is chosen and which time base it uses
 
 #### `session_save.jl`
 Saves a completed Realtime capture session (serialized `.jls` + companion CSV exports).
@@ -226,7 +277,7 @@ Background task lifecycle:
 
 #### `GUI.jl` & `gui_themes.jl`
 Makie-based user interface:
-- Real-time histogram and fitted curve plots
+- Live image preview and ratio/intensity/concentration traces
 - Control panels (Layout, Controller, Protocol, Console) — see `handlers_*.jl`
   for each panel's own controls
 - Button handlers for START/CLEAR operations
@@ -239,8 +290,6 @@ Startup
   ↓
 Load/create AppState
   ↓
-Load IRF (user selects .sdt file)
-  ↓
 Create GUI ← AppState determines panel/theme
   ↓
 Attach handlers ← Channel + Observables connect tasks to GUI
@@ -251,7 +300,7 @@ On button press → start_pressed()
   ↓
 Launch worker (acquisition.jl) + consumer + serial + infos tasks
   ↓
-Worker reads .sdt iteratively, fits lifetimes, sends to channel
+Worker groups TIFFs into instances, reduces them to ratios, sends to channel
   ↓
 Consumer updates Observables → Plots update reactively
   ↓
@@ -264,10 +313,10 @@ Save AppState on exit
 
 The data folder is normally picked in the GUI ("Folder path" button) and
 remembered across sessions. Before a folder has been picked, the fallback
-is the `FLIM_DATA_PATH` environment variable when set, otherwise
-`~/FLIMApp_data`.
+is the `TIFF_DATA_PATH` environment variable when set, otherwise
+`~/TIFFApp_data`.
 
-Physics constants and themes live in `src/config.jl`:
+Acquisition constants and themes live in `src/config.jl`:
 
 ```julia
 # Physics
@@ -310,25 +359,30 @@ AppRun
     channel::Channel                # Worker→Consumer communication
     running::Atomic{Bool}           # Task control flag
     *_task::Task                    # Background tasks
-    ch1::ChannelSeries              # Channel 1 runtime observables
-    ch2::ChannelSeries              # Channel 2 runtime observables
-    timestamps, command1, ...       # Channel-agnostic observables
+    preview::Observable             # Latest downsampled frame (image plot)
+    rois_series::Vector{RoiSeries}  # Per-region time series (ratio, conc, per-channel means)
+    channel_count::Int              # Channels this run writes
+    timestamps, command1, ...       # Region-agnostic observables
 ```
 
 ### Key Analysis Functions
 
 ```julia
-get_irf()::Matrix{Float64}
-    Load Instrument Response Function from cached .sdt file.
+resolve_channel_layout(path)::Union{ChannelLayout, Nothing}
+    Locate the Bliq VMS folder and its channel directories, detecting the
+    file-numbering convention.
 
-vec_to_lifetime(x::Vector; kwargs)::Tuple{Vector, Vector{Vector}}
-    Fit lifetime parameters to photon histogram.
+group_instances(layout)::Vector{FrameInstance}
+    Group per-channel files into complete frame instances.
 
-mle_reconvolution_fit(irf, data; params, gating_function, ...)::Vector
-    Maximum Likelihood Estimation fitting with multi-exponential models.
+ratio_from_means(means, combination, channel_numbers)::Float64
+    Ratio for one region, resolving the combination by channel name.
 
-conv_irf_data(x_data, params, irf; ...)::Vector
-    Convolve IRF with decay model.
+hill_ratio_to_concentration(ratio)::Float64
+    Invert the (provisional) Hill calibration, clamped to its valid range.
+
+region_mean(image, mask, frames_summed)::Float64
+    Masked mean of a binned image, undoing the temporal binning.
 
 list_ports()::Vector{String}
     Enumerate available serial devices.
@@ -336,17 +390,22 @@ list_ports()::Vector{String}
 
 ## Troubleshooting
 
-### "IRF filepath does not exist"
-The cached IRF path is invalid. Select a new .sdt file when prompted.
+### "No Bliq VMS channel folders found"
+The selected folder holds no acquisition. Pick a `Bliq VMS` directory, a
+session folder containing one, or the parent folder holding sessions (or set
+the `TIFF_DATA_PATH` environment variable before launching).
 
-### "No .sdt files found"
-Pick the folder containing your .sdt files with the "Folder path" button
-(or set the `FLIM_DATA_PATH` environment variable before launching).
+### Ratio is NaN
+- The selected combination names a channel this acquisition does not write —
+  check the channel folders (`C1`, `C2`, `C3`); note that some acquisitions
+  write `C1` and `C3` with no `C2`
+- The denominator channel is dark over the region (mean of zero)
 
-### Fitting returns NaN values
-- Photon count too low (< 100 counts)
-- Data gating window excludes all data
-- Optimizer failed to converge (try different initial guess)
+### Concentration is flat at one end of its range
+The Hill calibration constants in `src/ratio_analysis.jl` are **provisional**.
+Ratios outside `[HILL_RMIN, HILL_RMAX]` are clamped, so a measured ratio range
+that does not overlap the calibrated one saturates. Replace the four constants
+with a real calibration.
 
 ### Plots not updating
 - Check that the "START" button was clicked

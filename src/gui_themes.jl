@@ -27,7 +27,7 @@ const COLOR_4 = parse(RGB{Float64}, DARK_MODE_THEME[:color_4])
 const COLOR_5 = parse(RGB{Float64}, DARK_MODE_THEME[:color_5])
 const TEXT    = parse(RGB{Float64}, DARK_MODE_THEME[:text])
 
-# Plot series colors (channel 1, channel 2, reference/setpoint traces).
+# Plot series colors (channels 1-3, reference/setpoint traces).
 # Single source of truth for plot line/bar colors — change these to
 # recolor every plot at once instead of editing Makie.wong_colors()[n]
 # calls scattered across GUI.jl / handlers_layout.jl / plotting.jl /
@@ -35,6 +35,25 @@ const TEXT    = parse(RGB{Float64}, DARK_MODE_THEME[:text])
 const PLOT_COLOR_CH1 = Makie.wong_colors()[1]
 const PLOT_COLOR_CH2 = Makie.wong_colors()[2]
 const PLOT_COLOR_REF = Makie.wong_colors()[3]
+const PLOT_COLOR_CH3 = Makie.wong_colors()[4]
+
+"""
+    PLOT_CHANNEL_COLORS
+
+Per-channel trace colors indexed by channel position, for the mean-intensity
+plot. A ratiometric acquisition can write up to three channels, where FLIM
+only ever had two — the reference color is kept out of this list so the
+protocol-setpoint trace stays visually distinct from any data channel.
+"""
+const PLOT_CHANNEL_COLORS = (PLOT_COLOR_CH1, PLOT_COLOR_CH2, PLOT_COLOR_CH3)
+
+"""
+    plot_channel_color(position)
+
+Trace color for the channel at `position`, wrapping if an acquisition ever
+reports more channels than there are distinct colors.
+"""
+plot_channel_color(position::Integer) = PLOT_CHANNEL_COLORS[mod1(Int(position), length(PLOT_CHANNEL_COLORS))]
 
 # Line width for every plotted trace (data lines, ROI outlines, protocol
 # preview lines) — single source of truth so line thickness changes

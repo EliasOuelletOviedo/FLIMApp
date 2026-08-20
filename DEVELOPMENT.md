@@ -3,7 +3,7 @@ This file documents system architecture and development guidelines.
 It should be read as a Julia docstring for reference.
 """
 
-# FLIM Application - Development & Architecture Guide
+# TIFF Ratiometry Application - Development & Architecture Guide
 
 ## Design Principles
 
@@ -25,13 +25,13 @@ It should be read as a Julia docstring for reference.
 
 ## Include Order (CRITICAL)
 
-`src/FLIMApp.jl` defines `module FLIMApp` and its `include(...)` list is the
+`src/TIFFApp.jl` defines `module TIFFApp` and its `include(...)` list is the
 single source of truth for include order — read it there rather than
 trusting this doc to stay perfectly in sync. As of the 2026-07 cleanup it
 is, in order:
 
 ```julia
-module FLIMApp
+module TIFFApp
 
 include("config.jl")              # 1. Constants and configuration
 include("data_types.jl")          # 2. Data structures (AppState, AppRun, ChannelSeries)
@@ -42,8 +42,10 @@ include("smoothing.jl")           # 5. Lifetime smoothing/Kalman helpers
 include("serial.jl")              # 6. Serial port discovery + PID/PWM I/O
 include("protocol.jl")            # 7. Protocol schedule math
 include("plotting.jl")            # 8. Axis autoscaling + plot-series lookup
-include("io/SdtFile.jl")          # 9. .sdt block parser (used by read_sdt_frame below)
-include("lifetime_analysis.jl")  # 10. Analysis algorithms, IRF/.sdt loading
+include("io/BigTiffFile.jl")     # 9. TIFF/BigTIFF reader
+include("io/ImageJROI.jl")       # 10. ImageJ .roi/.zip reader
+include("tiff_source.jl")        # 11. Folder resolution, channel grouping
+include("ratio_analysis.jl")     # 12. Ratio reduction, ROI masks, Hill calibration
 include("acquisition.jl")         # 11. Playback/Realtime/Save worker tasks
 include("session_save.jl")        # 12. Realtime-capture session saving
 include("runtime.jl")             # 13. Background task lifecycle
@@ -56,14 +58,14 @@ include("handlers_console.jl")    #     ...
 include("handlers.jl")            # 17. Event handler orchestrator
 include("GUI.jl")                 # 18. Main UI (depends on plotting.jl, handlers.jl)
 
-end # module FLIMApp
+end # module TIFFApp
 ```
 
-Loading: `using FLIMApp` (from the repo root with `--project=.` active) —
-**not** `include("src/FLIMApp.jl")` directly, since a bare `include` won't go
+Loading: `using TIFFApp` (from the repo root with `--project=.` active) —
+**not** `include("src/TIFFApp.jl")` directly, since a bare `include` won't go
 through Julia's package/precompilation machinery and `Revise` won't track it.
 `run_app()` is exported; it is no longer called automatically on load — call
-it yourself after `using FLIMApp`.
+it yourself after `using TIFFApp`.
 
 **Violation of this order will cause MethodError or undefined reference errors!**
 
@@ -71,7 +73,7 @@ it yourself after `using FLIMApp`.
 
 Global variables are minimized but necessary for:
 - **FFT plans**: `fft_plan`, `ifft_plan` (performance: planned once)
-- **IRF data**: `irf`, `irf_bin_size` (shared by all lifetime functions)
+- **Acquisition geometry**: resolved per run from the first frame read, not held globally
 - **Theme colors**: `COLOR_1`, `COLOR_2`, etc. (set by config)
 
 All globals should be:
@@ -134,8 +136,8 @@ All globals should be:
 
 ### New Analysis Algorithm
 
-1. Add to `src/lifetime_analysis.jl` (or create `src/new_analysis.jl`)
-2. Include in `FLIMApp.jl` after `lifetime_analysis.jl`
+1. Add to `src/ratio_analysis.jl` (or create `src/new_analysis.jl`)
+2. Include in `TIFFApp.jl` after `ratio_analysis.jl`
 3. Export public functions:
    ```julia
    export my_analysis_function
@@ -145,7 +147,8 @@ All globals should be:
 
 Tests live in `test/runtests.jl` and cover the GUI-free logic: protocol
 schedule math, smoothing, state persistence round-trips, spinner stepping,
-plot windowing, and the MLE fit on a synthetic decay with a known lifetime.
+plot windowing, the TIFF reader, channel grouping, the image binning buffer,
+and the ratio/Hill math.
 The GUI itself is exercised manually via `run_app()`.
 
 Run the suite:
@@ -189,7 +192,7 @@ end
 ### Channel Communication
 ```julia
 # GOOD: Simple tuple types (fast serialization)
-put!(ch, (histogram, fit, photons, lifetime, ...))
+put!(ch, AcquisitionSample(regions, preview, command1, ...))
 
 # BAD: Complex Dict/struct (slower, more allocations)
 put!(ch, Dict(:histogram=>h, :fit=>f, ...))
@@ -216,7 +219,7 @@ println(Threads.nthreads())  # Thread count
 ```julia
 # In task, add logging:
 @debug "Processing" file=filepath data_points=length(data)
-@info "State updated" lifetime=τ concentration=c
+@info "State updated" ratio=r concentration=c
 ```
 
 ### Channel Debugging
@@ -232,7 +235,7 @@ println(length(ch))  # This is NOT safe; use try/catch instead
 
 ### MethodError: no method matching
 **Cause**: Called a function before its module was included
-**Fix**: Check include order in `FLIMApp.jl`
+**Fix**: Check include order in `TIFFApp.jl`
 
 ### UndefVarError: `irf` not defined
 **Cause**: `get_irf()` not called before using `irf` global

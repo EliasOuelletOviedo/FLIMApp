@@ -120,9 +120,9 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         Label(panel_grid[3, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Smoothing :"))...)
 
         Label(panel_grid[4, 1:4]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 1"))...)
-        Label(panel_grid[4, 5:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
+        Label(panel_grid[4, 5:7]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
         Label(panel_grid[6, 1:4]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 2"))...)
-        Label(panel_grid[6, 5:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
+        Label(panel_grid[6, 5:7]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
 
         Box(panel_grid[1, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[2, 4:6]; SPINNER_BOX_ATTRS...)
@@ -131,11 +131,13 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         Box(panel_grid[5, 1:4]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[5, 5]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
         Box(panel_grid[5, 6]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
+        Box(panel_grid[5, 7]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
         Box(panel_grid[7, 1:4]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[7, 5]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
         Box(panel_grid[7, 6]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
+        Box(panel_grid[7, 7]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
 
-        options = ["Histogram", "Photon counts", "Lifetime", "Ion concentration", "Command"]
+        options = PLOT_OPTIONS
 
         smoothing_value = clamp(app.layout.smoothing, 0, 10)
         app.layout.smoothing = smoothing_value
@@ -148,7 +150,11 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
             :binning    => (Textbox(panel_grid[2, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.layout.binning), :stored_string => string(app.layout.binning)))...),
                             Button(panel_grid[2, 4:6];  SPINNER_UP_ATTRS...),
                             Button(panel_grid[2, 4:6];  SPINNER_DOWN_ATTRS...),
-                            (1, 100, Int)),
+                            # Ceiling is the image-buffer depth, not an
+                            # arbitrary 100: binning holds whole frames now, so
+                            # a window the buffer cannot hold is not merely
+                            # unhelpful but unrepresentable.
+                            (1, MAX_FRAME_BUFFER_DEPTH, Int)),
             :smoothing  => (Textbox(panel_grid[3, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(smoothing_value), :stored_string => string(smoothing_value)))...),
                             Button(panel_grid[3, 4:6];  SPINNER_UP_ATTRS...),
                             Button(panel_grid[3, 4:6];  SPINNER_DOWN_ATTRS...),
@@ -159,17 +165,24 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
             :plot1_ch2  =>  Toggle(panel_grid[5, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH2))...),
             :plot2_ch1  =>  Toggle(panel_grid[7, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH1))...),
             :plot2_ch2  =>  Toggle(panel_grid[7, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH2))...),
+            # Third channel: inert when the acquisition writes only two, but
+            # always present so the panel does not have to be rebuilt when a
+            # run's channel count changes.
+            :plot1_ch3  =>  Toggle(panel_grid[5, 7];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch3, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH3))...),
+            :plot2_ch3  =>  Toggle(panel_grid[7, 7];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch3, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH3))...),
         )
 
         Label(panel_grid[5, 5]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "1"))...)
         Label(panel_grid[5, 6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "2"))...)
+        Label(panel_grid[5, 7]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "3"))...)
         Label(panel_grid[7, 5]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "1"))...)
         Label(panel_grid[7, 6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "2"))...)
+        Label(panel_grid[7, 7]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "3"))...)
 
         function commit_layout_value!(key::Symbol, value)
             setfield!(app.layout, key, value)
             if key == :smoothing
-                for series in roi_channel_series(app_run)
+                for series in app_run.rois_series
                     recompute_roi_smooth!(app, series)
                 end
             end
@@ -222,13 +235,13 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
             elseif block isa Toggle
                 on(block.active) do state
                     commit_layout_value!(symbol, state)
-                    plot_slot = symbol in (:plot1_ch1, :plot1_ch2) ? :plot1 : :plot2
+                    plot_slot = symbol in (:plot1_ch1, :plot1_ch2, :plot1_ch3) ? :plot1 : :plot2
                     render_plot!(app, app_run, blocks, plot_slot)
                 end
             end
         end
 
-        foreach(n -> colsize!(panel_grid, n, 28), 1:6)
+        foreach(n -> colsize!(panel_grid, n, 28), 1:7)
         colgap!(panel_grid, 8)
         rowgap!(panel_grid, 3, 32)
         rowgap!(panel_grid, 4, 8)

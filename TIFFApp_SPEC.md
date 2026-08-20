@@ -180,11 +180,17 @@ profondeur **maximale 50 frames**, avec réduction agressive de l'allocation :
 
 - allocation dynamique à la première image lue (taille variable selon
   l'expérience) ;
-- stockage en `UInt16` plutôt qu'en `Float64` (÷4) ;
-- tampon circulaire préalloué, réutilisé — aucune allocation par frame ;
+- stockage dans le **type natif** de l'échantillon (`UInt8` aujourd'hui,
+  `UInt16` si la caméra change) plutôt qu'en `Float64` — un facteur 4 à 8 ;
+- tampon circulaire préalloué, réutilisé : `push_frame!` mesure ~48 octets par
+  frame en régime permanent, et `read_frame!` n'alloue aucun pixel ;
 - somme glissante entretenue de façon incrémentale (ajout du nouveau, retrait
-  du plus ancien), comme le fait déjà `process_frame!` ;
-- lecture TIFF dans un tampon réutilisé quand la bibliothèque le permet.
+  du plus ancien), en `UInt32` ;
+- **une case de rab** : le tampon alloue `profondeur + 1` frames. Sans elle, à
+  la fenêtre maximale, la frame entrante écrase la frame sortante avant qu'on
+  puisse la soustraire — la somme reste plausible et fausse pour le reste de
+  l'acquisition. Trouvé en comparant à une re-sommation naïve, pas en relisant
+  le code.
 
 ---
 

@@ -1,7 +1,7 @@
 """
 runtime.jl
 
-Background task lifecycle for the FLIM application: the consumer/info tasks
+Background task lifecycle: the consumer/info tasks
 started on acquisition, and the START/PAUSE/RESUME/STOP button handlers that
 launch and tear them down together with the acquisition worker task
 (acquisition.jl), autoscaling (plotting.jl), and serial signaling (serial.jl).
@@ -15,47 +15,101 @@ using DataFrames
 using Base.Threads
 
 """
-    accumulate_roi_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
+    accumulate_roi_sample!(app, series::RoiSeries, frame::RegionFrame, timestamp::Float64)
 
-Append one frame's scalar results (photons, lifetime, concentration and
-their smoothed values) plus its own timestamp onto one ROI's per-channel
-time-series observables. Which `RoiChannelSeries` a frame is routed to is
-decided by the caller (`consumer_loop`'s round-robin `mod1(slot, N)` over
-`app_run.ch1_rois`/`ch2_rois`), not by this function.
+Append one instance's results for one region — the ratio, the concentration,
+each channel's mean intensity, and their smoothed companions — plus that
+region's own timestamp onto its time-series observables.
+
+Which `RoiSeries` a `RegionFrame` is routed to is decided by the caller
+(`consumer_loop`), not here: in spatial-mask mode region `i` goes to series
+`i`, while in round-robin mode the single region goes to whichever series the
+scan slot points at.
 """
-function accumulate_roi_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
+function accumulate_roi_sample!(app, series::RoiSeries, frame::RegionFrame, timestamp::Float64)
     push!(series.timestamps[], timestamp)
-    push!(series.photons[], frame.photons)
-    append_smooth_value!(app, series.photons, series.photons_smooth, series.timestamps, series.photons_kalman)
-    push!(series.lifetime[], frame.lifetime)
-    append_smooth_value!(app, series.lifetime, series.lifetime_smooth, series.timestamps, series.lifetime_kalman)
+
+    push!(series.ratio[], frame.ratio)
+    append_smooth_value!(app, series.ratio, series.ratio_smooth, series.timestamps, series.ratio_kalman)
+
     push!(series.concentration[], frame.concentration)
     append_smooth_value!(app, series.concentration, series.concentration_smooth, series.timestamps, series.concentration_kalman)
+
+    for (c, channel) in enumerate(series.channels)
+        value = c <= length(frame.channel_means) ? frame.channel_means[c] : NaN
+        push!(channel.values[], value)
+        append_smooth_value!(app, channel.values, channel.smooth, series.timestamps, channel.kalman)
+    end
+
     return nothing
 end
 
 """
-    publish_frame!(series::ChannelSeries, frame::ChannelFrame)
+    publish_preview!(app_run, sample)
 
-Publish one frame's histogram/fit/counts onto one channel's "latest value"
-observables (the throttled GUI-facing update, as opposed to the per-frame
-time-series accumulation above).
+Publish one instance's downsampled snapshot onto the GUI-facing observable the
+image plot renders. A no-op when the sample carries no preview, which is the
+normal case between throttled builds — leaving the previous frame on screen
+rather than blanking the plot.
 """
-function publish_frame!(series::ChannelSeries, frame::ChannelFrame)
-    series.histogram[] = frame.histogram
-    series.fit[] = frame.fit
-    series.counts[] = frame.photons
+function publish_preview!(app_run, sample::AcquisitionSample)
+    sample.preview === nothing && return nothing
+    app_run.preview[] = sample.preview
     return nothing
 end
 
 """
-    consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback")
+    realtime_capture_dataframe(channel_count) -> DataFrame
 
-Consumes data from the channel and updates the app_run observables.
-Notifications are throttled to approximately `rate` Hz to avoid overwhelming
-the GUI with too frequent updates.
+Empty per-instance capture table for Realtime mode, with one mean-intensity
+column per channel.
+
+Built for a specific channel count rather than declared once as a constant:
+the column set depends on what the acquisition writes, and the FLIM version's
+fixed `_ch1`/`_ch2` columns have no equivalent when a run may have one, two or
+three channels — nor when the useful per-channel quantity is a mean intensity
+rather than a histogram and a fit.
 """
-function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback")
+function realtime_capture_dataframe(channel_count::Integer)
+    df = DataFrame(
+        frame_idx=UInt32[],
+        instance_index=Int[],
+        source_files=String[],
+        roi_index=Int[],
+        timestamp=Float64[],
+        ratio=Float64[],
+        concentration=Float64[],
+        command1=Float64[],
+        command2=Float64[],
+        protocol_setpoint=Float64[]
+    )
+
+    for c in 1:max(Int(channel_count), 1)
+        df[!, Symbol("mean_c", c)] = Float64[]
+    end
+
+    return df
+end
+
+"""
+    consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback", use_spatial_masks=true)
+
+Consumes acquisition samples from the channel and updates the `app_run`
+observables. Notifications are throttled to approximately `rate` Hz to avoid
+overwhelming the GUI.
+
+# Region routing
+
+`use_spatial_masks` decides how a sample's regions map onto the series, and
+must match what the worker was started with (both come from the same test in
+`start_pressed`):
+
+- **spatial** — the sample carries one `RegionFrame` per drawn ROI, all
+  measured from this instance, so region `i` appends to series `i`;
+- **round-robin** — the sample carries a single `RegionFrame` covering the
+  whole frame, and the scan slot decides which series it belongs to.
+"""
+function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback", use_spatial_masks::Bool=true)
     last_publish_time = time()
     publish_interval_s = 1.0 / rate
     plot_1_axis = blocks.plot_1_axis
@@ -63,42 +117,25 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
     publish_live_updates = acquisition_mode != "Save"
     last_sample = nothing
     is_realtime_mode = acquisition_mode == "Realtime"
-    warned_missing_file_sequence_number = Ref(false)
 
-    # Real-time missed-file repair. The source acquisition sometimes writes
-    # no file at all for a ROI's scan, and because it numbers files as they
-    # are written that hole leaves no trace in the numbering — so every
-    # later file lands one ROI off, permanently. `RoiSlotTracker`
+    # Real-time missed-scan repair. The source acquisition sometimes writes no
+    # files at all for a ROI's scan, and because it numbers files as they are
+    # written that hole leaves no trace in the numbering — so every later
+    # instance lands one ROI off, permanently. `RoiSlotTracker`
     # (acquisition.jl) recovers the real scan slot from the delay between
-    # files instead, seeded with the period the trigger box itself was
-    # programmed with (`app.protocol.scan_time + .shift_time`, read once
-    # here: that's the value uploaded at START, which a later edit to the
-    # textbox does not re-upload).
+    # instances instead, seeded with the period the trigger box itself was
+    # programmed with (`app.protocol.scan_time + .shift_time`, read once here:
+    # that's the value uploaded at START, which a later edit to the textbox
+    # does not re-upload).
     #
-    # Real-time only. Playback paces files on its own synthetic schedule and
-    # Save runs them as fast as it can, so in neither mode does the delay
-    # between reads carry any information about the acquisition's cadence.
+    # Real-time only, and only in round-robin mode. Playback paces instances
+    # on its own synthetic schedule and Save runs them as fast as it can, so in
+    # neither mode does the delay between reads carry any information about the
+    # acquisition's cadence. In spatial-mask mode there is no round-robin to
+    # keep aligned in the first place.
     roi_slot_tracker = RoiSlotTracker(roi_scan_period_s(app.protocol))
     warned_ambiguous_roi_gap = Ref(false)
-    realtime_frame_df = DataFrame(
-        frame_idx=UInt32[],
-        source_file=String[],
-        roi_index=Int[],
-        timestamp=Float64[],
-        photons_ch1=Float64[],
-        command1=Float64[],
-        command2=Float64[],
-        lifetime_ch1=Float64[],
-        concentration_ch1=Float64[],
-        protocol_setpoint=Float64[],
-        histogram_ch1=Vector{Float64}[],
-        fit_ch1=Vector{Float64}[],
-        photons_ch2=Float64[],
-        lifetime_ch2=Float64[],
-        concentration_ch2=Float64[],
-        histogram_ch2=Vector{Float64}[],
-        fit_ch2=Vector{Float64}[]
-    )
+    realtime_frame_df = realtime_capture_dataframe(app_run.channel_count)
 
     try
         for sample in app_run.channel
@@ -112,77 +149,73 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
 
             last_sample = sample
 
-            # Round-robin file->ROI assignment: file 1 -> ROI 1, file 2 ->
-            # ROI 2, ..., file N+1 -> ROI 1 again. n_rois is fixed for the
-            # whole run by rebuild_roi_series! (start_pressed) and
-            # is always >= 1 (a run with zero ROIs drawn keeps today's
-            # single-series behavior via that one-element vector).
-            #
-            # Keyed on the file's OWN embedded sequence number
-            # (file_sequence_number, parsed from its filename), not this
-            # app's read-count (frame_index) — see AcquisitionSample's
-            # docstring (data_types.jl): a file that never reaches this app
-            # is invisible to frame_index, which would then silently
-            # misassign every later file to the wrong ROI for the rest of
-            # the run. Keying on the filename's own number instead just
-            # leaves that one ROI's turn empty for that cycle. Falls back to
-            # frame_index (with a one-time warning) only if the filename has
-            # no parseable trailing number at all.
-            #
-            # In Real-time mode that number is then corrected against the
-            # measured delay between files (next_roi_slot!), which is the
-            # only thing that can see a scan the source never wrote a file
-            # for — that hole consumes no sequence number, so the numbering
-            # alone reports business as usual right through it.
-            n_rois = length(app_run.ch1_rois)
-            sequence_number = sample.file_sequence_number
-            if sequence_number === nothing
-                if !warned_missing_file_sequence_number[]
-                    @warn "File name has no parseable sequence number; falling back to read-count for ROI assignment (this can drift out of sync after a skipped file)" source_file=sample.source_file
-                    warned_missing_file_sequence_number[] = true
+            n_rois = length(app_run.rois_series)
+            roi_idx = 1
+
+            if use_spatial_masks
+                # Every region measured from this same instance. Extra regions
+                # (the ROI set changed mid-run, which rebuild_roi_series! does
+                # not track) are dropped rather than written past the end.
+                for (i, region) in enumerate(sample.regions)
+                    i > n_rois && break
+                    accumulate_roi_sample!(app, app_run.rois_series[i], region, sample.timestamps)
                 end
-                sequence_number = Int(sample.frame_index)
-            end
+            else
+                # Round-robin: instance 1 -> ROI 1, instance 2 -> ROI 2, ...,
+                # instance N+1 -> ROI 1 again. Keyed on the instance's OWN
+                # index (recovered from the acquisition's T counter), not this
+                # app's read-count — see AcquisitionSample's docstring
+                # (data_types.jl): an instance that never reaches this app is
+                # invisible to frame_index, which would then silently misassign
+                # every later instance for the rest of the run.
+                #
+                # In Real-time that index is then corrected against the measured
+                # delay between instances (next_roi_slot!), the only thing that
+                # can see a scan the source wrote no file for — such a hole
+                # consumes no counter values, so the numbering alone reports
+                # business as usual right through it.
+                slot_key = sample.instance_index
 
-            if is_realtime_mode && n_rois > 1
-                slot, skipped, ambiguous = next_roi_slot!(roi_slot_tracker, sample.file_time, sequence_number)
+                if is_realtime_mode && n_rois > 1
+                    slot, skipped, ambiguous = next_roi_slot!(roi_slot_tracker, sample.file_time, slot_key)
 
-                if skipped > 0
-                    @warn "Gap between acquisition files spans more than one ROI scan; assuming the source wrote no file for it and advancing ROI assignment to stay aligned" source_file=sample.source_file skipped_scans=skipped file_period_s=round(roi_slot_tracker.period_est_s, digits=3) roi_index=mod1(slot, n_rois)
-                elseif ambiguous && !warned_ambiguous_roi_gap[]
-                    @warn "Delay between acquisition files doesn't line up with the expected scan period; ROI assignment may drift — check Scan time / Shift time against the actual acquisition" source_file=sample.source_file expected_period_s=round(roi_slot_tracker.period_est_s, digits=3)
-                    warned_ambiguous_roi_gap[] = true
+                    if skipped > 0
+                        @warn "Gap between acquisition instances spans more than one ROI scan; assuming the source wrote nothing for it and advancing ROI assignment to stay aligned" instance=sample.instance_index skipped_scans=skipped period_s=round(roi_slot_tracker.period_est_s, digits=3) roi_index=mod1(slot, n_rois)
+                    elseif ambiguous && !warned_ambiguous_roi_gap[]
+                        @warn "Delay between acquisition instances doesn't line up with the expected scan period; ROI assignment may drift — check Scan time / Shift time against the actual acquisition" instance=sample.instance_index expected_period_s=round(roi_slot_tracker.period_est_s, digits=3)
+                        warned_ambiguous_roi_gap[] = true
+                    end
+
+                    slot_key = slot
                 end
 
-                sequence_number = slot
+                roi_idx = mod1(slot_key, n_rois)
+
+                if !isempty(sample.regions)
+                    accumulate_roi_sample!(app, app_run.rois_series[roi_idx], sample.regions[1], sample.timestamps)
+                end
             end
 
-            roi_idx = mod1(sequence_number, n_rois)
-
-            if is_realtime_mode
-                push!(realtime_frame_df, (
-                    frame_idx=sample.frame_index,
-                    source_file=String(sample.source_file),
-                    roi_index=roi_idx,
-                    timestamp=Float64(sample.timestamps),
-                    photons_ch1=Float64(sample.ch1.photons),
-                    command1=Float64(sample.command1),
-                    command2=Float64(sample.command2),
-                    lifetime_ch1=Float64(sample.ch1.lifetime),
-                    concentration_ch1=Float64(sample.ch1.concentration),
-                    protocol_setpoint=Float64(sample.protocol_setpoint),
-                    histogram_ch1=copy(sample.ch1.histogram),
-                    fit_ch1=copy(sample.ch1.fit),
-                    photons_ch2=Float64(sample.ch2.photons),
-                    lifetime_ch2=Float64(sample.ch2.lifetime),
-                    concentration_ch2=Float64(sample.ch2.concentration),
-                    histogram_ch2=copy(sample.ch2.histogram),
-                    fit_ch2=copy(sample.ch2.fit)
-                ))
+            if is_realtime_mode && !isempty(sample.regions)
+                region = sample.regions[1]
+                row = Dict{Symbol, Any}(
+                    :frame_idx => sample.frame_index,
+                    :instance_index => sample.instance_index,
+                    :source_files => join(basename.(sample.source_files), "; "),
+                    :roi_index => roi_idx,
+                    :timestamp => Float64(sample.timestamps),
+                    :ratio => Float64(region.ratio),
+                    :concentration => Float64(region.concentration),
+                    :command1 => Float64(sample.command1),
+                    :command2 => Float64(sample.command2),
+                    :protocol_setpoint => Float64(sample.protocol_setpoint)
+                )
+                for c in 1:max(app_run.channel_count, 1)
+                    row[Symbol("mean_c", c)] = c <= length(region.channel_means) ? Float64(region.channel_means[c]) : NaN
+                end
+                push!(realtime_frame_df, row)
             end
 
-            accumulate_roi_sample!(app, app_run.ch1_rois[roi_idx], sample.ch1, sample.timestamps)
-            accumulate_roi_sample!(app, app_run.ch2_rois[roi_idx], sample.ch2, sample.timestamps)
             push!(app_run.protocol_setpoint[], sample.protocol_setpoint)
             push!(app_run.command1[], sample.command1)
             push!(app_run.command2[], sample.command2)
@@ -192,24 +225,20 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
             now_s = time()
 
             if publish_live_updates && now_s - last_publish_time >= publish_interval_s
-                publish_frame!(app_run.ch1, sample.ch1)
-                publish_frame!(app_run.ch2, sample.ch2)
-
+                publish_preview!(app_run, sample)
                 notify_runtime_observables!(app_run)
 
                 last_publish_time = now_s
 
-                autoscale_plot!(app, app_run, plot_1_axis, app.layout.plot1, app.layout.plot1_ch1, app.layout.plot1_ch2)
-                autoscale_plot!(app, app_run, plot_2_axis, app.layout.plot2, app.layout.plot2_ch1, app.layout.plot2_ch2)
+                autoscale_plot!(app, app_run, plot_1_axis, app.layout.plot1, plot_channel_toggles(app.layout, 1))
+                autoscale_plot!(app, app_run, plot_2_axis, app.layout.plot2, plot_channel_toggles(app.layout, 2))
             end
         end
 
-        # Publish the final frame once the loop ends, so the plots show the
+        # Publish the final instance once the loop ends, so the plots show the
         # last processed data even if it arrived between throttled updates.
         if last_sample !== nothing
-            publish_frame!(app_run.ch1, last_sample.ch1)
-            publish_frame!(app_run.ch2, last_sample.ch2)
-
+            publish_preview!(app_run, last_sample)
             notify_runtime_observables!(app_run)
 
             save_completed = isfinite(app_run.save_progress[]) && app_run.save_progress[] >= 100.0
@@ -223,8 +252,8 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                 xlims!(plot_1_axis, 0.0, max(Float64(xmax1), 0.0))
                 xlims!(plot_2_axis, 0.0, max(Float64(xmax2), 0.0))
             else
-                autoscale_plot!(app, app_run, plot_1_axis, app.layout.plot1, app.layout.plot1_ch1, app.layout.plot1_ch2)
-                autoscale_plot!(app, app_run, plot_2_axis, app.layout.plot2, app.layout.plot2_ch1, app.layout.plot2_ch2)
+                autoscale_plot!(app, app_run, plot_1_axis, app.layout.plot1, plot_channel_toggles(app.layout, 1))
+                autoscale_plot!(app, app_run, plot_2_axis, app.layout.plot2, plot_channel_toggles(app.layout, 2))
             end
         end
 
@@ -239,7 +268,7 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
         blocks.start_button.label[] = "START"
         blocks.stop_button.label[] = "CLEAR"
     catch e
-        @error "Consumer error" e
+        @error "Consumer error" exception=(e, catch_backtrace())
     end
 end
 
@@ -280,58 +309,70 @@ end
 # -----------------------------------------------------------------------------
 
 """
-    reset_channel_series!(series::ChannelSeries)
+    reset_roi_series!(series::RoiSeries)
 
-Clear one channel's "latest frame" counter ahead of a fresh acquisition
-run (histogram/fit are left as-is — callers that want them blanked, e.g.
-clear_runtime_plots! in handlers.jl, NaN-fill them separately). Does not
-notify — callers batch their own notifications.
+Clear one region's time-series observables ahead of a fresh acquisition run.
+Does not notify — callers batch their own notifications.
 """
-function reset_channel_series!(series::ChannelSeries)
-    series.counts[] = 0.0
-    return nothing
-end
-
-"""
-    reset_roi_series!(series::RoiChannelSeries)
-
-Clear one ROI's per-channel time-series observables ahead of a fresh
-acquisition run. Does not notify — callers batch their own notifications.
-"""
-function reset_roi_series!(series::RoiChannelSeries)
+function reset_roi_series!(series::RoiSeries)
     empty!(series.timestamps[])
-    empty!(series.photons[])
-    empty!(series.photons_smooth[])
-    empty!(series.lifetime[])
-    empty!(series.lifetime_smooth[])
+    empty!(series.ratio[])
+    empty!(series.ratio_smooth[])
     empty!(series.concentration[])
     empty!(series.concentration_smooth[])
+
+    for channel in series.channels
+        empty!(channel.values[])
+        empty!(channel.smooth[])
+    end
+
     return nothing
 end
 
 """
-    rebuild_roi_series!(app, app_run)
+    use_spatial_roi_masks(app)::Bool
 
-Resize `app_run.ch1_rois`/`ch2_rois` to match the current number of drawn
-ROIs (`app_run.rois[]`) — but only when the ROI toggle (`app.roi.active`,
-set in the Protocol panel, handlers_protocol.jl) is on; otherwise always
-resize to 1, so multi-ROI splitting only kicks in when the user has
-explicitly enabled it, regardless of how many ROIs happen to be drawn.
-Discards all previously accumulated per-ROI data. Called ahead of a fresh
+Which of the two ROI models a run should use.
+
+Round-robin applies only when the ROI toggle **and** the protocol are both on:
+that is the configuration where the trigger box is actually driving the galvo
+from ROI to ROI, so each instance covers one ROI and the frames must be dealt
+out in turn. In every other configuration the acquisition is imaging one fixed
+field that contains all the drawn ROIs at once, so each is measured from every
+instance through its own pixel mask.
+
+Read once at START and passed to both the worker (which builds the masks) and
+`consumer_loop` (which routes the resulting regions), so the two cannot
+disagree about what a sample's `regions` vector means.
+"""
+use_spatial_roi_masks(app)::Bool = !(app.roi.active && app.protocol.active)
+
+"""
+    rebuild_roi_series!(app, app_run; channel_count=app_run.channel_count)
+
+Resize `app_run.rois_series` to match the current number of drawn ROIs
+(`app_run.rois[]`) — but only when the ROI toggle (`app.roi.active`, set in
+the Protocol panel, handlers_protocol.jl) is on; otherwise always resize to 1,
+so multi-ROI splitting only kicks in when the user has explicitly enabled it,
+regardless of how many ROIs happen to be drawn.
+
+Each series is sized for `channel_count` channels, which is what makes
+`accumulate_roi_sample!`'s per-channel loop line up with the worker's
+`channel_means`.
+
+Discards all previously accumulated per-region data. Called ahead of a fresh
 acquisition run (`start_pressed`) and by the CLEAR button
 (`clear_runtime_plots!`, handlers.jl) — either could follow a change to the
-drawn ROI set or the toggle, and the round-robin routing in
-`consumer_loop` (`mod1(slot, length(app_run.ch1_rois))`) needs the
-two vectors to always be the same, non-zero length. Callers must re-render
-both plot slots (`render_plot!`, plotting.jl) afterward: this
-replaces the `Observable`s themselves (not just their contents), so any
-existing `lines!` plot objects on the axes are left pointing at
-now-orphaned data.
+drawn ROI set or the toggle, and the routing in `consumer_loop` needs the
+vector to always be a non-zero length. Callers must re-render both plot slots
+(`render_plot!`, plotting.jl) afterward: this replaces the `Observable`s
+themselves (not just their contents), so any existing `lines!` plot objects on
+the axes are left pointing at now-orphaned data.
 """
-function rebuild_roi_series!(app, app_run)
+function rebuild_roi_series!(app, app_run; channel_count::Integer=app_run.channel_count)
     n = app.roi.active ? max(1, length(app_run.rois[])) : 1
-    app_run.ch1_rois = [RoiChannelSeries() for _ in 1:n]
-    app_run.ch2_rois = [RoiChannelSeries() for _ in 1:n]
+    app_run.channel_count = max(Int(channel_count), 1)
+    app_run.rois_series = [RoiSeries(app_run.channel_count) for _ in 1:n]
     return nothing
 end
 
@@ -341,8 +382,8 @@ end
 Clear all time-series observables and counters ahead of a fresh acquisition run.
 """
 function reset_acquisition_state!(app, app_run)
-    foreach(reset_channel_series!, channel_series(app_run))
     rebuild_roi_series!(app, app_run)
+    app_run.preview[] = nothing
     empty!(app_run.protocol_setpoint[])
     empty!(app_run.command1[])
     empty!(app_run.command2[])
@@ -353,68 +394,50 @@ function reset_acquisition_state!(app, app_run)
 end
 
 """
-    initial_guess_for_lifetimes(selected_lifetimes::AbstractString)::Vector{Float64}
-
-Map the Lifetimes menu selection ("1 lifetime"/"2 lifetimes"/"3 lifetimes") to
-the corresponding initial parameter guess for the MLE fit.
-"""
-function initial_guess_for_lifetimes(selected_lifetimes::AbstractString)::Vector{Float64}
-    if selected_lifetimes == "1 lifetime"
-        return [3.0, 0.0, 5.0e-5]
-    elseif selected_lifetimes == "3 lifetimes"
-        return [3.0, 0.5, 0.5, 0.5, 0.5, 0.0, 5.0e-5]
-    else
-        return [3.0, 0.5, 0.5, 0.0, 5.0e-5]
-    end
-end
-
-"""
-    spawn_acquisition_worker!(app_run, selected_mode, layout, controller, initial_guess, protocol_config)
+    spawn_acquisition_worker!(app_run, selected_mode, layout, controller, protocol_config; rois, use_spatial_masks, preview_enabled, nominal_period_s)
 
 Launch the background worker task for the selected acquisition mode
 (Playback/Realtime/Save, defaulting to Playback for an unrecognized mode)
 and store it on `app_run.worker_task`.
 
-Launched with `Threads.@spawn`, not `@async`: the worker loop is CPU-bound
-(the MLE fit dominates its frame time, measured ~88% of a loop iteration),
-and `@async` tasks are sticky to the thread they were spawned from — with
-GLMakie's event loop and `consumer_task`/`serial_task`/`infos_task` all
-pinned to the main thread via `@async` (see `start_pressed` below), a
-CPU-bound `@async` worker would block GUI redraw/input for the duration of
-every fit. `Threads.@spawn` lets the scheduler run the worker on a
-different OS thread when one is available, so the GUI stays responsive
-even while a fit is in flight. This is pure Julia (`Base.Threads`) with no
-OS-specific code, so it behaves identically on macOS and Windows; it only
-*helps* when Julia is started with more than one thread (`julia -t auto`),
-which `start_pressed` checks for and warns about below. With a single
-thread it degrades gracefully to the same cooperative scheduling as
-`@async` — never worse, just not better.
+`rois` and `use_spatial_masks` are snapshotted by the caller and passed by
+value: the worker builds its pixel masks from them on its own thread, and
+reaching into `app_run.rois[]` from there would race the ROI popup.
 
-`consumer_task` (and `serial_task`/`infos_task`) must stay on `@async`:
-they touch `Observable`s and the GLMakie figure directly, which are not
-safe to mutate concurrently from multiple threads.
+Launched with `Threads.@spawn`, not `@async`: the worker loop reads and
+reduces whole images, and `@async` tasks are sticky to the thread they were
+spawned from — with GLMakie's event loop and
+`consumer_task`/`serial_task`/`infos_task` all pinned to the main thread via
+`@async` (see `start_pressed` below), a `@async` worker would compete with
+GUI redraw and input for every frame. `Threads.@spawn` lets the scheduler run
+the worker on a different OS thread when one is available. This is pure Julia
+(`Base.Threads`) with no OS-specific code, so it behaves identically on macOS
+and Windows; it only *helps* when Julia is started with more than one thread
+(`julia -t auto`), which `start_pressed` checks for and warns about below.
+With a single thread it degrades gracefully to the same cooperative
+scheduling as `@async` — never worse, just not better.
+
+`consumer_task` (and `serial_task`/`infos_task`) must stay on `@async`: they
+touch `Observable`s and the GLMakie figure directly, which are not safe to
+mutate concurrently from multiple threads.
 """
-function spawn_acquisition_worker!(app_run, selected_mode, layout, controller, initial_guess, protocol_config)
-    if selected_mode == "Playback"
-        app_run.worker_task = Threads.@spawn start_playback(
-            app_run.channel,
-            app_run.running,
-            layout,
-            controller;
-            initial_guess=initial_guess,
-            protocol=protocol_config,
-            paused=app_run.paused,
-            target_frequency=app_run.target_frequency
-        )
-    elseif selected_mode == "Realtime"
+function spawn_acquisition_worker!(app_run, selected_mode, layout, controller, protocol_config;
+                                   rois::Vector{RoiCoordinates}=RoiCoordinates[],
+                                   use_spatial_masks::Bool=true,
+                                   preview_enabled::Bool=true,
+                                   nominal_period_s::Float64=NaN)
+    shared = (
+        protocol = protocol_config,
+        paused = app_run.paused,
+        rois = rois,
+        use_spatial_masks = use_spatial_masks,
+        preview_enabled = preview_enabled
+    )
+
+    if selected_mode == "Realtime"
         app_run.worker_task = Threads.@spawn start_realtime(
-            app_run.channel,
-            app_run.running,
-            layout,
-            controller;
-            initial_guess=initial_guess,
-            protocol=protocol_config,
-            paused=app_run.paused
+            app_run.channel, app_run.running, layout, controller;
+            shared..., nominal_period_s=nominal_period_s
         )
     elseif selected_mode == "Save"
         app_run.save_progress[] = 0.0
@@ -425,26 +448,17 @@ function spawn_acquisition_worker!(app_run, selected_mode, layout, controller, i
         end
 
         app_run.worker_task = Threads.@spawn start_save(
-            app_run.channel,
-            app_run.running,
-            layout,
-            controller;
-            initial_guess=initial_guess,
-            protocol=protocol_config,
-            paused=app_run.paused,
-            progress_cb=save_progress_cb
+            app_run.channel, app_run.running, layout, controller;
+            shared..., preview_enabled=false, progress_cb=save_progress_cb
         )
     else
-        @warn "Unknown acquisition mode selected; falling back to Playback" selected_mode=selected_mode
+        if selected_mode != "Playback"
+            @warn "Unknown acquisition mode selected; falling back to Playback" selected_mode=selected_mode
+        end
+
         app_run.worker_task = Threads.@spawn start_playback(
-            app_run.channel,
-            app_run.running,
-            layout,
-            controller;
-            initial_guess=initial_guess,
-            protocol=protocol_config,
-            paused=app_run.paused,
-            target_frequency=app_run.target_frequency
+            app_run.channel, app_run.running, layout, controller;
+            shared..., target_frequency=app_run.target_frequency
         )
     end
 
@@ -504,13 +518,6 @@ function start_pressed(app, app_run, blocks)
     if tasks_still_running(app_run)
         @info "Previous run is still shutting down; ignoring START"
         show_status!(blocks, "Finishing previous run…")
-        return
-    end
-
-    # Check if IRF is loaded before starting
-    if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
-        @error "Cannot start acquisition: IRF not loaded. Please load an IRF file first."
-        show_status!(blocks, "Load an IRF file before starting")
         return
     end
 
@@ -575,44 +582,76 @@ function start_pressed(app, app_run, blocks)
             abort_start!(app_run, blocks)
             return nothing
         end
-        if selected_mode != "Realtime" && !any(f -> endswith(lowercase(f), ".sdt"), readdir(data_path))
-            show_status!(blocks, "No .sdt files in the data folder")
-            abort_start!(app_run, blocks)
-            return nothing
+        # Realtime waits for a session folder to appear, so it only needs the
+        # parent to exist. The other two modes need one already on disk, and
+        # resolving it here means "you picked a folder with no acquisition in
+        # it" shows up in the window rather than only in the worker's log.
+        channel_layout = nothing
+        if selected_mode != "Realtime"
+            channel_layout = resolve_channel_layout(data_path)
+            if channel_layout === nothing
+                show_status!(blocks, "No Bliq VMS channel folders found")
+                abort_start!(app_run, blocks)
+                return nothing
+            end
         end
 
-        selected_lifetimes = blocks.lifetimes_menu.selection[]
-        if !(selected_lifetimes isa AbstractString)
-            selected_lifetimes = "2 lifetimes"
+        # The ratio combination is persisted through app.layout (committed by
+        # the menu handler), so the worker reads it from there rather than from
+        # the widget — one source of truth, and it survives a restart.
+        selected_combination = blocks.ratio_menu.selection[]
+        if selected_combination isa AbstractString
+            app.layout.ratio_combination = selected_combination
         end
-        initial_guess = initial_guess_for_lifetimes(selected_lifetimes)
+
+        # Channel count comes from the folder layout when one is already
+        # resolvable; Realtime cannot know it until its session appears, so it
+        # keeps whatever the last run used and the series are rebuilt to match
+        # once the worker reports the real geometry.
+        channel_count = channel_layout === nothing ? app_run.channel_count : length(channel_layout.channel_dirs)
+
+        # Read once, and shared by the worker (which builds the masks) and the
+        # consumer (which routes the regions) so the two cannot disagree.
+        use_spatial_masks = use_spatial_roi_masks(app)
+        rois_snapshot = copy(app_run.rois[])
 
         # Capacity: the worker (its own thread since Threads.@spawn, see
         # spawn_acquisition_worker!) blocks on put! once this fills, so a
         # transient GUI-thread slowdown (a GC pause, a Makie redraw, a
-        # smoothing-slider recompute) directly stalls the fit loop too, not
-        # just the display. 32 gave the worker under 100ms of headroom at
-        # realistic frame rates; 512 costs a few hundred KB more (each sample
-        # holds two Vector{Float64} histograms) and absorbs multi-second GC/JIT
-        # pauses without back-pressuring the worker, while still bounding
-        # worst-case backlog if the consumer falls behind persistently rather
-        # than just transiently.
+        # smoothing-slider recompute) directly stalls the reduction loop too,
+        # not just the display. 512 absorbs multi-second GC pauses without
+        # back-pressuring the worker, while still bounding worst-case backlog
+        # if the consumer falls behind persistently rather than transiently.
+        #
+        # Samples are much smaller than the FLIM version's (a handful of
+        # scalars per region, and a preview only on throttled frames rather
+        # than two histogram vectors every frame), so the same depth costs
+        # less memory here than it did there.
         app_run.channel = Channel{AcquisitionSample}(512)
 
+        rebuild_roi_series!(app, app_run; channel_count=channel_count)
         reset_acquisition_state!(app, app_run)
-        # rebuild_roi_series! (inside reset_acquisition_state!)
-        # replaced app_run.ch1_rois/ch2_rois wholesale, so the plot axes must be
-        # rebuilt to draw one line pair per new RoiChannelSeries instance —
-        # see its docstring.
+        # rebuild_roi_series! replaced app_run.rois_series wholesale, so the
+        # plot axes must be rebuilt to draw one line set per new RoiSeries
+        # instance — see its docstring.
         render_plot!(app, app_run, blocks, :plot1)
         render_plot!(app, app_run, blocks, :plot2)
 
         sync_runtime_protocol!(app, app_run)
         protocol_config = app_run.protocol
 
-        spawn_acquisition_worker!(app_run, selected_mode, app.layout, app.controller, initial_guess, protocol_config)
+        # Only build previews when a plot is actually showing them.
+        preview_enabled = app.layout.plot1 == PLOT_IMAGE || app.layout.plot2 == PLOT_IMAGE
 
-        app_run.consumer_task = @async consumer_loop(app, app_run, blocks; rate=10, acquisition_mode=selected_mode)
+        spawn_acquisition_worker!(app_run, selected_mode, app.layout, app.controller, protocol_config;
+                                  rois=rois_snapshot,
+                                  use_spatial_masks=use_spatial_masks,
+                                  preview_enabled=preview_enabled,
+                                  nominal_period_s=roi_scan_period_s(app.protocol))
+
+        app_run.consumer_task = @async consumer_loop(app, app_run, blocks; rate=10,
+                                                     acquisition_mode=selected_mode,
+                                                     use_spatial_masks=use_spatial_masks)
         app_run.serial_task = @async serial_signal_loop(app, app_run; rate=20.0)
         app_run.infos_task = @async infos_loop(app_run, blocks.info_label; rate=1)
     end

@@ -5,7 +5,7 @@ Makie-based graphical user interface for the FLIM application.
 
 Implements:
 - Main figure layout with grid system
-- Plotting axes for histograms, lifetimes, and ion concentration
+- Plotting axes for the image preview, ratios, intensities and concentration
 - Control panels (Layout, Controller, Protocol, Console)
 - Interactive widgets (buttons, text boxes, menus, spinners)
 - Theme-aware styling and colors
@@ -166,48 +166,78 @@ function make_plot_axes!(left_grid, app, app_run)
     end
     vspan!(save_progress_axis, 0.0, save_fill_width, color=save_fill_color)
 
-    for (series, color) in ((app_run.ch1, PLOT_COLOR_CH1), (app_run.ch2, PLOT_COLOR_CH2))
-        hspan!(counts_axis, 1, series.counts, color = (color, 0.1))
-        hlines!(counts_axis, series.counts, color = color, linewidth = PLOT_LINEWIDTH)
+    # The side gauge shows each channel's most recent mean intensity. Lifted
+    # from the preview rather than from a dedicated "latest frame" observable:
+    # the preview already carries exactly this, and a ratiometric run has no
+    # per-channel scalar snapshot of its own the way a fitted photon count was.
+    for position in 1:MAX_PLOT_CHANNELS
+        color = plot_channel_color(position)
+        level = lift(app_run.preview) do preview
+            preview === nothing && return 0.0
+            position > length(preview.channel_images) && return 0.0
+            values = preview.channel_images[position]
+            isempty(values) && return 0.0
+            total = 0.0
+            count = 0
+            @inbounds for v in values
+                isfinite(v) || continue
+                total += Float64(v)
+                count += 1
+            end
+            return count == 0 ? 0.0 : total / count
+        end
+        hspan!(counts_axis, 1, level, color = (color, 0.1))
+        hlines!(counts_axis, level, color = color, linewidth = PLOT_LINEWIDTH)
     end
 
     return (counts_axis=counts_axis, plot_1=plot_1, plot_2=plot_2, save_progress_axis=save_progress_axis)
 end
 
 """
-    make_control_widgets!(button_grid, panelbtn_grid)
+    make_control_widgets!(button_grid, panelbtn_grid, initial_ratio_combination)
 
-Create the START/CLEAR buttons, IRF/data-folder path controls, serial port
-menu + CONNECT button, info label, mode/lifetimes menus, and the panel
-switch buttons. Returns a NamedTuple of the created widgets.
+Create the START/CLEAR buttons, the data-folder path control, serial port
+menu + CONNECT button, info label, mode/ratio menus, and the panel switch
+buttons. Returns a NamedTuple of the created widgets.
+
+The IRF path control the FLIM layout carried is gone — a ratiometric
+acquisition has no instrument response to load — and every row below it moves
+up one.
+
+`initial_ratio_combination` seeds the ratio menu from
+`app.layout.ratio_combination` (data_types.jl). Unlike `mode`, that selection
+round-trips through `AppState`, so its default must reflect whatever was last
+persisted rather than always starting from the menu's first option.
 """
-function make_control_widgets!(button_grid, panelbtn_grid)
+function make_control_widgets!(button_grid, panelbtn_grid, initial_ratio_combination::AbstractString)
     start = Button(button_grid[1, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "START"))...)
     stop  = Button(button_grid[1, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CLEAR"))...)
 
-    initial_irf_name = cached_basename(irf_filepath_cache())
     initial_folder_name = cached_basename(folderpath_cache(); fallback_path=get_data_root_path())
-    irf_path      = Textbox(button_grid[2, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "IRF path", :displayed_string => initial_irf_name, :stored_string => initial_irf_name))...)
-    folder_path   = Textbox(button_grid[3, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Folder path", :displayed_string => initial_folder_name, :stored_string => initial_folder_name))...)
-    irf_button    = Button(button_grid[2, 1:2];  PATH_BUTTON_ATTRS...)
-    folder_button = Button(button_grid[3, 1:2];  PATH_BUTTON_ATTRS...)
+    folder_path   = Textbox(button_grid[2, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Folder path", :displayed_string => initial_folder_name, :stored_string => initial_folder_name))...)
+    folder_button = Button(button_grid[2, 1:2];  PATH_BUTTON_ATTRS...)
 
     no_port_selected_label = "No port selected"
 
     initial_port_options = port_options(no_port_selected_label)
-    port = Menu(button_grid[4, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => initial_port_options, :default => 1))...)
+    port = Menu(button_grid[3, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => initial_port_options, :default => 1))...)
 
-    connect = Button(button_grid[4, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
+    connect = Button(button_grid[3, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
 
-    label = Label(button_grid[5, 1], "Frequency: -- Hz\nFile: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
+    label = Label(button_grid[4, 1], "Frequency: -- Hz\nFile: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
     default_target_freq_string = string(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ)
-    target_freq = Textbox(button_grid[5, 2]; merge(SPINNER_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Target frequency (Hz)", :displayed_string => default_target_freq_string, :stored_string => default_target_freq_string, :validator => make_float_range_validator(0.01, 1.0e6)))...)
+    target_freq = Textbox(button_grid[4, 2]; merge(SPINNER_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Target frequency (Hz)", :displayed_string => default_target_freq_string, :stored_string => default_target_freq_string, :validator => make_float_range_validator(0.01, 1.0e6)))...)
 
-    mode = Menu(button_grid[6, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime", "Save"]))...)
-    lifetimes = Menu(button_grid[6, 2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["1 lifetime", "2 lifetimes", "3 lifetimes"]))...)
+    mode = Menu(button_grid[5, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime", "Save"]))...)
+
+    # Occupies the slot the "1/2/3 lifetimes" menu used to. All six ordered
+    # channel pairs are always offered regardless of how many channels the
+    # acquisition writes: a combination naming an absent channel yields a NaN
+    # ratio rather than blocking the run, and the per-channel intensity series
+    # stay usable either way.
+    ratio = Menu(button_grid[5, 2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => RATIO_COMBINATION_OPTIONS, :default => initial_ratio_combination))...)
 
     Box(button_grid[2, 1:2]; PATH_BOX_ATTRS...)
-    Box(button_grid[3, 1:2]; PATH_BOX_ATTRS...)
 
     panel = Dict{Symbol, Button}(
         :layout     => Button(panelbtn_grid[1, 1]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "Layout"))...),
@@ -216,10 +246,10 @@ function make_control_widgets!(button_grid, panelbtn_grid)
         :console    => Button(panelbtn_grid[1, 4]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "Console"))...)
     )
 
-    return (start_button=start, stop_button=stop, irf_path_textbox=irf_path, irf_button=irf_button,
+    return (start_button=start, stop_button=stop,
             folder_path_textbox=folder_path, folder_button=folder_button, port_menu=port,
             connect_button=connect, info_label=label, target_freq_textbox=target_freq,
-            mode_menu=mode, lifetimes_menu=lifetimes,
+            mode_menu=mode, ratio_menu=ratio,
             panel_buttons=panel, no_port_selected_label=no_port_selected_label)
 end
 
@@ -283,7 +313,7 @@ function make_gui(app, app_run)
 
     grids = make_gui_grids(fig)
     axes = make_plot_axes!(grids.left_grid, app, app_run)
-    widgets = make_control_widgets!(grids.button_grid, grids.panelbtn_grid)
+    widgets = make_control_widgets!(grids.button_grid, grids.panelbtn_grid, app.layout.ratio_combination)
 
     apply_gui_layout_tweaks!(fig, grids)
 
@@ -297,15 +327,13 @@ function make_gui(app, app_run)
         panel_grid          = grids.panel_grid,
         start_button        = widgets.start_button,
         stop_button         = widgets.stop_button,
-        irf_path_textbox    = widgets.irf_path_textbox,
-        irf_button          = widgets.irf_button,
         folder_path_textbox = widgets.folder_path_textbox,
         folder_button       = widgets.folder_button,
         port_menu           = widgets.port_menu,
         connect_button      = widgets.connect_button,
         target_freq_textbox = widgets.target_freq_textbox,
         mode_menu           = widgets.mode_menu,
-        lifetimes_menu      = widgets.lifetimes_menu,
+        ratio_menu          = widgets.ratio_menu,
         panel_buttons       = widgets.panel_buttons,
         info_label          = widgets.info_label,
         counts_axis         = axes.counts_axis,

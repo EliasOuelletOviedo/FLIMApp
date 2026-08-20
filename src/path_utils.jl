@@ -27,12 +27,13 @@ function pick_non_empty_path(picker::Function; error_msg::AbstractString)::Union
 end
 
 """
-    open_irf_dialog()::Union{String, Nothing}
+    open_tiff_dialog()::Union{String, Nothing}
 
-Open a file picker for IRF selection.
+Open a file picker filtered to TIFF images, used by the ROI popup to choose a
+reference frame to draw ROIs on.
 """
-function open_irf_dialog()::Union{String, Nothing}
-    return pick_non_empty_path(pick_file; error_msg="IRF file dialog failed")
+function open_tiff_dialog()::Union{String, Nothing}
+    return pick_non_empty_path(() -> pick_file(filterlist="tif,tiff"); error_msg="Image file dialog failed")
 end
 
 """

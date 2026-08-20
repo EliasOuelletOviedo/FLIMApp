@@ -4,7 +4,7 @@ cellpose_segment.py
 Run Cellpose segmentation on a single grayscale image and write back a
 per-pixel integer label mask (0 = background, 1..N = one region each).
 
-Invoked as a subprocess by FLIMApp's Julia side (run_cellpose_segmentation!,
+Invoked as a subprocess by TIFFApp's Julia side (run_cellpose_segmentation!,
 src/roi_popup.jl) -- not meant to be imported or run interactively. Talking
 over two small binary files (not PNG/TIFF/npy) means neither language needs
 an image-format library: a (n_cols, n_rows) int64 header followed by the
@@ -67,7 +67,7 @@ def main():
         print(f"Cellpose is not installed in this Python environment: {e}", file=sys.stderr)
         return 3
 
-    image_xy = read_image(input_path)   # (n_cols, n_rows) -- FLIMApp's own (x, y) convention
+    image_xy = read_image(input_path)   # (n_cols, n_rows) -- TIFFApp's own (x, y) convention
     image_hw = image_xy.T               # Cellpose expects (height, width)
 
     try:

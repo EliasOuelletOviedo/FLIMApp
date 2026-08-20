@@ -5,10 +5,10 @@
 #
 # Deliberately headless: no GLMakie window is opened, because the build may
 # run on a machine/session without a display. GLMakie's own precompile
-# workload already covers its rendering paths; this file warms FLIMApp's
+# workload already covers its rendering paths; this file warms TIFFApp's
 # fitting/state code on top of that.
 
-using FLIMApp
+using TIFFApp
 
 # --- state persistence round-trip -------------------------------------------
 let tmp = joinpath(mktempdir(), "state.jls")
@@ -18,37 +18,38 @@ let tmp = joinpath(mktempdir(), "state.jls")
 end
 
 # --- lifetime fitting on a synthetic IRF/decay ------------------------------
-let ctx = FLIMApp.RUNTIME[]
-    n = FLIMApp.DEFAULT_HISTOGRAM_RESOLUTION
-    bin = FLIMApp.LASER_PULSE_PERIOD / n
-
-    irf = zeros(n, 2)
-    irf[:, 1] = (0:(n - 1)) .* bin
-    for i in 1:n
-        irf[i, 2] = exp(-((i - 10)^2) / 8)
-    end
-
-    ctx.irf = irf
-    ctx.irf_bin_size = bin
-    ctx.tcspc_window_size = round(irf[end, 1] + irf[2, 1], sigdigits=4)
-
-    # Warms the 1- and 2-lifetime fit paths (the same warmup run_app uses).
-    FLIMApp.warmup_lifetime_fitting!()
-
-    # Leave the runtime clean so the shipped app starts from "no IRF loaded".
-    ctx.irf = nothing
-    ctx.irf_bin_size = nothing
-    ctx.tcspc_window_size = nothing
+# Ratio reduction and the Hill calibration: cheap to run, and precompiling
+# them here keeps the first START from paying their JIT cost. There is no
+# equivalent of the FLIM build's fit warmup — the MLE reconvolution solver it
+# warmed up no longer exists.
+let means = [120.0, 60.0, 30.0]
+    TIFFApp.ratio_from_means(means, "C1/C2", [1, 2, 3])
+    TIFFApp.hill_ratio_to_concentration(1.2)
+    TIFFApp.hill_concentration_to_ratio(46.4)
 end
 
-# --- protocol schedule math ---------------------------------------------------
-let protocol = FLIMApp.ProtocolSettings(
+# Image binning and the masked reduction, on a frame small enough to stay fast.
+let buffer = TIFFApp.ImageFrameBuffer{UInt8}(8, 8, 4)
+    pixels = fill(UInt8(7), 64)
+    window = TIFFApp.push_frame!(buffer, pixels, 2)
+    mask = TIFFApp.whole_image_mask(8, 8)
+    TIFFApp.region_mean(vec(buffer.sum_image), mask, window)
+end
+
+# Channel grouping arithmetic, both numbering conventions.
+let
+    TIFFApp.instance_index_for(5, 2, :global)
+    TIFFApp.instance_index_for(5, 2, :per_channel)
+    TIFFApp.parse_tiff_sequence_number("sample-C1-T042.tif")
+end
+
+let protocol = TIFFApp.ProtocolSettings(
         active=true,
         repeats=2,
         delay=1,
-        times=vcat([10.0, 20.0], fill(NaN, FLIMApp.PROTOCOL_STEP_COUNT - 2)),
-        setpoints=vcat([3.5, 4.0], fill(NaN, FLIMApp.PROTOCOL_STEP_COUNT - 2))
+        times=vcat([10.0, 20.0], fill(NaN, TIFFApp.PROTOCOL_STEP_COUNT - 2)),
+        setpoints=vcat([3.5, 4.0], fill(NaN, TIFFApp.PROTOCOL_STEP_COUNT - 2))
     )
-    FLIMApp.protocol_setpoint_at(protocol, 15.0)
-    FLIMApp.normalize_protocol_config(protocol)
+    TIFFApp.protocol_setpoint_at(protocol, 15.0)
+    TIFFApp.normalize_protocol_config(protocol)
 end

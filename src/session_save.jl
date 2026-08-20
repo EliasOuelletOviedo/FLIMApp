@@ -64,51 +64,68 @@ function pad_to_length(vec::AbstractVector{T}, n::Int) where T
 end
 
 """
-    roi_channel_series_dataframe(app_run)::DataFrame
+    roi_series_dataframe(app_run)::DataFrame
 
-Long-format export of every (channel, ROI) time series: one row per sample,
-tagged with which channel/ROI it belongs to. Long format (rather than the
-padded-wide format `write_realtime_capture_csv!` uses for the global
-series below) because each ROI has its own independent length AND its own
-independent timestamps (see `RoiChannelSeries` in data_types.jl) — there's
-no single shared row index or time base to pad against once there's more
-than one ROI.
+Long-format export of every region's time series: one row per sample, tagged
+with which region it belongs to, carrying the ratio, the concentration, and
+each channel's mean intensity.
+
+Long format (rather than the padded-wide format `write_realtime_capture_csv!`
+uses for the global series below) because each region has its own independent
+length AND its own independent timestamps (see `RoiSeries` in data_types.jl) —
+there is no single shared row index or time base to pad against once there is
+more than one region.
+
+The per-channel columns are generated from the run's actual channel count, so
+a two-channel acquisition does not carry an all-`NaN` third column.
 """
-function roi_channel_series_dataframe(app_run)::DataFrame
+function roi_series_dataframe(app_run)::DataFrame
+    channel_count = max(app_run.channel_count, 1)
+
     df = DataFrame(
-        channel = Int[], roi_index = Int[], roi_name = String[],
-        timestamp = Float64[], photons = Float64[], photons_smooth = Float64[],
-        lifetime = Float64[], lifetime_smooth = Float64[],
+        roi_index = Int[], roi_name = String[], timestamp = Float64[],
+        ratio = Float64[], ratio_smooth = Float64[],
         concentration = Float64[], concentration_smooth = Float64[]
     )
 
+    for c in 1:channel_count
+        df[!, Symbol("mean_c", c)] = Float64[]
+        df[!, Symbol("mean_c", c, "_smooth")] = Float64[]
+    end
+
     roi_names = [r.name for r in app_run.rois[]]
 
-    for (channel_idx, rois_vec) in ((1, app_run.ch1_rois), (2, app_run.ch2_rois))
-        for (roi_idx, series) in enumerate(rois_vec)
-            name = roi_idx <= length(roi_names) ? roi_names[roi_idx] : "roi$roi_idx"
-            ts = series.timestamps[]
-            photons = series.photons[]
-            photons_smooth = series.photons_smooth[]
-            lifetime = series.lifetime[]
-            lifetime_smooth = series.lifetime_smooth[]
-            concentration = series.concentration[]
-            concentration_smooth = series.concentration_smooth[]
+    # `at` reads index k of a series that may be shorter than `timestamps`:
+    # the raw and smoothed vectors are appended in lockstep, but a run
+    # interrupted mid-append can leave one an element behind.
+    at(v, k) = k <= length(v) ? Float64(v[k]) : NaN
 
-            for k in eachindex(ts)
-                push!(df, (
-                    channel = channel_idx,
-                    roi_index = roi_idx,
-                    roi_name = name,
-                    timestamp = Float64(ts[k]),
-                    photons = k <= length(photons) ? Float64(photons[k]) : NaN,
-                    photons_smooth = k <= length(photons_smooth) ? Float64(photons_smooth[k]) : NaN,
-                    lifetime = k <= length(lifetime) ? Float64(lifetime[k]) : NaN,
-                    lifetime_smooth = k <= length(lifetime_smooth) ? Float64(lifetime_smooth[k]) : NaN,
-                    concentration = k <= length(concentration) ? Float64(concentration[k]) : NaN,
-                    concentration_smooth = k <= length(concentration_smooth) ? Float64(concentration_smooth[k]) : NaN
-                ))
+    for (roi_idx, series) in enumerate(app_run.rois_series)
+        name = roi_idx <= length(roi_names) ? roi_names[roi_idx] : "roi$roi_idx"
+        ts = series.timestamps[]
+
+        for k in eachindex(ts)
+            row = Dict{Symbol, Any}(
+                :roi_index => roi_idx,
+                :roi_name => name,
+                :timestamp => Float64(ts[k]),
+                :ratio => at(series.ratio[], k),
+                :ratio_smooth => at(series.ratio_smooth[], k),
+                :concentration => at(series.concentration[], k),
+                :concentration_smooth => at(series.concentration_smooth[], k)
+            )
+
+            for c in 1:channel_count
+                if c <= length(series.channels)
+                    row[Symbol("mean_c", c)] = at(series.channels[c].values[], k)
+                    row[Symbol("mean_c", c, "_smooth")] = at(series.channels[c].smooth[], k)
+                else
+                    row[Symbol("mean_c", c)] = NaN
+                    row[Symbol("mean_c", c, "_smooth")] = NaN
+                end
             end
+
+            push!(df, row)
         end
     end
 
@@ -123,10 +140,10 @@ function write_realtime_capture_csv!(csv_path::AbstractString, app_run, per_file
         @warn "Failed to write per-file CSV" path=csv_path error=string(e)
     end
 
-    # Global (not ROI-split) series: timestamps, protocol setpoint, and the
-    # PID command outputs — command1/command2 stay a single shared series
-    # regardless of ROI count (see RoiChannelSeries's docstring, data_types.jl,
-    # for why: they drive real hardware output, not just a plot).
+    # Global (not region-split) series: timestamps, protocol setpoint, and the
+    # PI command outputs — command1/command2 stay a single shared series
+    # regardless of region count (see AppRun's docstring, data_types.jl, for
+    # why: they drive real hardware output, not just a plot).
     try
         ts = app_run.timestamps[]
         protocol_setpoint = app_run.protocol_setpoint[]
@@ -148,12 +165,12 @@ function write_realtime_capture_csv!(csv_path::AbstractString, app_run, per_file
         @warn "Failed to write runtime vectors CSV" error=string(e)
     end
 
-    # Per-(channel, ROI) time series, long format.
+    # Per-region time series, long format.
     try
-        roi_csv_path = replace(String(csv_path), r"(?i)\.csv$" => "_roi_channel_series.csv")
-        CSV.write(roi_csv_path, roi_channel_series_dataframe(app_run))
+        roi_csv_path = replace(String(csv_path), r"(?i)\.csv$" => "_roi_series.csv")
+        CSV.write(roi_csv_path, roi_series_dataframe(app_run))
     catch e
-        @warn "Failed to write ROI channel series CSV" error=string(e)
+        @warn "Failed to write ROI series CSV" error=string(e)
     end
 
     return nothing
@@ -177,7 +194,7 @@ function save_realtime_capture!(app, app_run, per_file_df::DataFrame)
             :protocol_setpoint => copy(app_run.protocol_setpoint[]),
             :command1 => copy(app_run.command1[]),
             :command2 => copy(app_run.command2[]),
-            :roi_channel_series => roi_channel_series_dataframe(app_run),
+            :roi_series => roi_series_dataframe(app_run),
             :histogram_ch1_latest => copy(app_run.ch1.histogram[]),
             :fit_ch1_latest => copy(app_run.ch1.fit[]),
             :counts_ch1_latest => app_run.ch1.counts[],
