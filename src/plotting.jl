@@ -149,14 +149,29 @@ back to a line plot (`apply_axis_style!` below), so the two plot families can
 share an axis without the image's chrome-free look leaking into the traces.
 
 - **`aspect`** — `DataAspect` keeps pixels square, so a 1024x512 frame is not
-  stretched to fill a wide axis.
+  stretched to fill a wide axis. Measured not to affect the block's size or
+  position, the axis carrying a fixed `width`/`height`.
 - **`yreversed`** — TIFF row 0 is the top of the image, while a Makie axis puts
   y = 0 at the bottom. Without this the frame is displayed upside down
   relative to the ROI popup, where the ROIs were drawn.
-- **spines, grids, ticks, tick labels** — an image has no meaningful axes to
-  annotate, and the gridlines sit on top of the data.
 - **`backgroundcolor`** — black, so unlit pixels read as unlit rather than as
   the panel's grey.
+- **spines and grids** — hidden outright; neither participates in layout.
+- **ticks and tick labels** — turned *transparent* rather than hidden, for the
+  reason below.
+
+# Why ticks are made invisible rather than hidden
+
+Setting `xticksvisible`/`xticklabelsvisible` (and their y counterparts) to
+`false` does not merely stop them being drawn: it collapses the axis's
+**protrusions**, the space reserved outside the plotting box for decorations.
+The box keeps its 840x300 size, but its origin moves — measured at ~12 px in x
+and ~13 px in y — so every switch to or from the Image plot nudged the whole
+panel. Painting them transparent instead leaves them measured, and therefore
+leaves the protrusions and the layout byte-identical, while showing nothing.
+
+The other overrides were each measured against the axis's computed bounding box
+and protrusions; only these four moved anything.
 """
 const IMAGE_AXIS_OVERRIDES = (
     :aspect             => DataAspect(),
@@ -171,12 +186,12 @@ const IMAGE_AXIS_OVERRIDES = (
     :bottomspinevisible => false,
     :leftspinevisible   => false,
     :rightspinevisible  => false,
-    :xticksvisible      => false,
-    :yticksvisible      => false,
-    :xticklabelsvisible => false,
-    :yticklabelsvisible => false,
-    :xminorticksvisible => false,
-    :yminorticksvisible => false,
+    :xtickcolor         => RGBAf(0.0f0, 0.0f0, 0.0f0, 0.0f0),
+    :ytickcolor         => RGBAf(0.0f0, 0.0f0, 0.0f0, 0.0f0),
+    :xticklabelcolor    => RGBAf(0.0f0, 0.0f0, 0.0f0, 0.0f0),
+    :yticklabelcolor    => RGBAf(0.0f0, 0.0f0, 0.0f0, 0.0f0),
+    :xminortickcolor    => RGBAf(0.0f0, 0.0f0, 0.0f0, 0.0f0),
+    :yminortickcolor    => RGBAf(0.0f0, 0.0f0, 0.0f0, 0.0f0),
 )
 
 """

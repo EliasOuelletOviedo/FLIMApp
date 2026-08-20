@@ -336,8 +336,16 @@ end
     @test axis.xgridvisible[] == false
     @test axis.ygridvisible[] == false
     @test axis.leftspinevisible[] == false
-    @test axis.xticklabelsvisible[] == false
     @test RGBf(axis.backgroundcolor[]) == RGBf(0, 0, 0)
+
+    # Ticks and tick labels go transparent rather than hidden — see
+    # IMAGE_AXIS_OVERRIDES. Hiding them collapses the axis protrusions and
+    # shifts the whole panel; the layout test below is the real guard, this
+    # just pins the mechanism.
+    @test axis.xticklabelcolor[].alpha == 0
+    @test axis.yticklabelcolor[].alpha == 0
+    @test axis.xtickcolor[].alpha == 0
+    @test axis.xticklabelsvisible[] == true
 
     TIFFApp.apply_axis_style!(axis, TIFFApp.PLOT_RATIO)
     for (attribute, _) in TIFFApp.IMAGE_AXIS_OVERRIDES
@@ -360,6 +368,43 @@ end
     TIFFApp.apply_axis_style!(axis, TIFFApp.PLOT_IMAGE)
     TIFFApp.fit_image_axis!(axis, app_run)
     @test axis.limits[] == (0, W, 0, H)
+end
+
+@testset "plot switching preserves layout" begin
+    # Switching a slot to the Image plot and back must not move anything. The
+    # axis carries a fixed width/height, but its *protrusions* — the space
+    # reserved outside the box for ticks and tick labels — collapse if those
+    # are hidden outright, which shifts the box origin and nudges the panel.
+    GLMakie.activate!(visible = false)
+
+    figure = Figure(size = (1000, 500))
+    axis = Axis(figure[1, 1]; TIFFApp.AXIS_PLOTS_ATTRS...)
+    lines!(axis, 1:10, 1:10)
+    Makie.update_state_before_display!(figure)
+
+    reference_box = axis.layoutobservables.computedbbox[]
+    reference_protrusions = axis.layoutobservables.protrusions[]
+
+    TIFFApp.apply_axis_style!(axis, TIFFApp.PLOT_IMAGE)
+    Makie.update_state_before_display!(figure)
+    @test axis.layoutobservables.computedbbox[] == reference_box
+    @test axis.layoutobservables.protrusions[] == reference_protrusions
+
+    TIFFApp.apply_axis_style!(axis, TIFFApp.PLOT_RATIO)
+    Makie.update_state_before_display!(figure)
+    @test axis.layoutobservables.computedbbox[] == reference_box
+    @test axis.layoutobservables.protrusions[] == reference_protrusions
+
+    # Repeated switching must not drift either — each application has to be a
+    # full round trip, not an approximate one.
+    for _ in 1:5
+        TIFFApp.apply_axis_style!(axis, TIFFApp.PLOT_IMAGE)
+        Makie.update_state_before_display!(figure)
+        TIFFApp.apply_axis_style!(axis, TIFFApp.PLOT_RATIO)
+        Makie.update_state_before_display!(figure)
+    end
+    @test axis.layoutobservables.computedbbox[] == reference_box
+    @test axis.layoutobservables.protrusions[] == reference_protrusions
 end
 
 @testset "image frame buffer (temporal binning)" begin
