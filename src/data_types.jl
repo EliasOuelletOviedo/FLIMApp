@@ -1,14 +1,27 @@
 """
 data_types.jl
 
-Core data structures for the FLIM application.
+Core data structures for the ratiometric TIFF application.
 
 This module defines the primary structures for application state:
 - AppState: Persistent configuration that is serialized to disk
 - AppRun: Runtime transient state with observables and background tasks
-- ChannelFrame / ChannelSeries: one TCSPC channel's per-frame results and
-  runtime observables, so per-channel logic is written once and instantiated
-  per channel instead of duplicated `_ch1`/`_ch2` copies
+- RegionFrame / RoiSeries: one region's per-frame results and runtime
+  observables, so per-region logic is written once and instantiated per
+  region instead of duplicated per-channel copies
+
+# Why the series hierarchy is region-major
+
+Under FLIM, every TCSPC channel was fit independently and produced its own
+lifetime, so the natural shape was *channel* -> per-ROI series, and the app
+held `ch1_rois` / `ch2_rois`.
+
+Ratiometry inverts that. A ratio is formed *across* channels, so it belongs
+to a region, not to a channel — there is exactly one ratio per region per
+frame no matter how many channels feed it. The per-channel quantity that
+survives is the mean intensity, which is now the innermost level. Hence
+`RoiSeries` (per region: ratio, concentration, timestamps) containing
+`RoiChannelIntensity` (per region *and* channel: mean intensity).
 """
 
 using Observables
@@ -20,80 +33,112 @@ using LibSerialPort: SerialPort
 # =============================================================================
 
 """
-    ChannelFrame
+    RegionFrame
 
-One TCSPC channel's slice of a single acquisition frame: the binned
-histogram, its fitted decay curve, and the scalar fit results. Two of these
-(one per channel) make up an `AcquisitionSample`. The "absent channel"
-convention (a file with only one TCSPC channel) uses the same sentinels as
-everywhere else: `NaN` for scalars, `Float64[]` for vectors — see
-`ChannelFrame()` below and `process_frame!` in acquisition.jl.
+One region's results for a single frame instance: each channel's mean
+intensity over that region, the ratio formed from two of them, and the
+concentration that ratio calibrates to.
+
+`channel_means` is indexed by acquisition channel (1 = C1, 2 = C2, ...) and
+is always `channel_count` long. `ratio` is `NaN` when the selected
+combination names a channel the acquisition does not provide, or when the
+denominator is zero — see `ratio_from_means` in ratio_analysis.jl. `NaN` is
+the pipeline's uniform "no value" sentinel, handled by the plots, the Kalman
+smoother and the PI controller alike.
 """
-struct ChannelFrame
-    histogram::Vector{Float64}
-    fit::Vector{Float64}
-    photons::Float64
-    lifetime::Float64
+struct RegionFrame
+    channel_means::Vector{Float64}
+    ratio::Float64
     concentration::Float64
 end
 
 """
-    ChannelFrame()
+    RegionFrame(channel_count)
 
-The "absent channel" frame: empty vectors and `NaN` scalars, emitted for
-channel 2 when the source file has only one TCSPC channel.
+The "no measurement" frame: `NaN` everywhere, sized for `channel_count`
+channels. Emitted for a region whose reduction could not be computed.
 """
-ChannelFrame() = ChannelFrame(Float64[], Float64[], NaN, NaN, NaN)
+RegionFrame(channel_count::Integer) = RegionFrame(fill(NaN, channel_count), NaN, NaN)
+
+"""
+    FramePreview
+
+A downsampled snapshot of one instance, for the image plot.
+
+Deliberately not the full-resolution frame. The image plot exists to let the
+user see what the microscope is looking at, at a display size of a few
+hundred pixels; shipping a megapixel copy per channel per frame through the
+acquisition channel would allocate tens of megabytes per second at 60 Hz to
+render something no larger than this. `stride` records the subsampling factor
+so coordinates can be mapped back to the full frame.
+
+`ratio_map` is computed on the downsampled grid rather than at full
+resolution and then reduced — a per-pixel division over a megapixel costs
+more than the entire rest of the frame's work, and the result would be
+thrown away by the downsampling anyway.
+
+Built only when the image plot is actually selected, and throttled — see
+`build_preview` in acquisition.jl.
+"""
+struct FramePreview
+    channel_images::Vector{Matrix{Float32}}
+    ratio_map::Matrix{Float32}
+    stride::Int
+end
 
 """
     AcquisitionSample
 
-One frame's worth of acquisition results, emitted onto the acquisition
-channel by `run_acquisition_loop!` (acquisition.jl) and consumed by
-`consumer_loop` (runtime.jl). A struct rather than a positional tuple —
+One frame instance's worth of acquisition results, emitted onto the
+acquisition channel by `run_acquisition_loop!` (acquisition.jl) and consumed
+by `consumer_loop` (runtime.jl). A struct rather than a positional tuple —
 too many fields to destructure positionally without risking a
 silently-mismatched order.
 
-Three fields together identify *which* ROI scan produced this file — the
+`regions` holds one `RegionFrame` per region mask. Its length depends on the
+ROI mode in force (see `build_region_masks`, ratio_analysis.jl): in spatial
+mode there is one entry per drawn ROI and all of them are filled from this
+instance; in round-robin mode there is a single entry, and which ROI it
+belongs to is decided downstream by `next_roi_slot!`.
+
+Three fields together identify *which* ROI scan produced this instance — the
 whole point being that none of them is reliable alone:
 
-`frame_index` is this app's own count of files it has read so far this run
-— it advances by exactly 1 per file regardless of what the source acquisition
-actually produced, so a file the upstream hardware/software never wrote
-(e.g. a lag spike at the source) is invisible to it and it silently drifts
-out of sync with the real physical sequence from that point on.
+`frame_index` is this app's own count of instances it has read so far this
+run — it advances by exactly 1 per instance regardless of what the source
+acquisition actually produced, so an instance the upstream hardware/software
+never wrote (e.g. a lag spike at the source) is invisible to it and it
+silently drifts out of sync with the real physical sequence from that point
+on.
 
-`file_sequence_number` (parsed from `source_file`'s name, see
-`parse_file_sequence_number` in acquisition.jl) is this file's own
-embedded position in that sequence instead, so a file that exists on disk
-but never reaches this app just leaves a gap rather than shifting everything
-after it. `nothing` when the filename has no parseable trailing number. It
-does *not* catch the more common failure, though: the source numbers its
-files consecutively as they are **written**, so a scan that produced no file
-at all never consumes a number and the numbering stays perfectly consecutive
-across the hole (ROI 1 -> 1, ROI 2 -> 2, ROI 1 -> 3, ROI 2 -> *nothing*,
-ROI 1 -> 4) — every later file then lands on the wrong ROI, permanently.
+`instance_index` is the instance's own position in the acquisition's global
+sequence, recovered from the `T###` counter as `cld(T, channel_count)` — see
+tiff_source.jl's header. Unlike `frame_index` it leaves a hole rather than
+shifting when the acquisition drops files, which is exactly what makes a
+missed scan detectable.
 
-`file_time` is `source_file`'s modification time (unix seconds, `NaN` if it
-couldn't be stat'ed) — when the source actually wrote it, not when this app
-got around to reading it, so it stays meaningful even when the reader is
-backlogged. It's what makes the hole above detectable: consecutive ROI scans
-are `scan_time + shift_time` ms apart by construction (the trigger box is
-programmed with exactly those numbers, roi.jl), so a gap of ~2x that period
-means one scan produced no file. See `RoiSlotTracker`/`next_roi_slot!`
-(acquisition.jl), which `consumer_loop` (runtime.jl) drives to keep
-round-robin ROI assignment aligned through such holes.
+`file_time` is the newest modification time across the instance's files
+(unix seconds, `NaN` if none could be stat'ed) — when the source finished
+writing the group, not when this app got around to reading it, so it stays
+meaningful when the reader is backlogged. It's what makes a *silent* hole
+detectable: consecutive ROI scans are `scan_time + shift_time` ms apart by
+construction (the trigger box is programmed with exactly those numbers,
+roi.jl), so a gap of ~2x that period means one scan produced no instance.
+See `RoiSlotTracker`/`next_roi_slot!` (acquisition.jl), which `consumer_loop`
+(runtime.jl) drives to keep round-robin ROI assignment aligned through such
+holes.
 """
 struct AcquisitionSample
-    ch1::ChannelFrame
-    ch2::ChannelFrame
+    regions::Vector{RegionFrame}
+    preview::Union{Nothing, FramePreview}
     command1::Float64
     command2::Float64
     timestamps::Float64
     protocol_setpoint::Float64
     frame_index::UInt32
-    source_file::String
-    file_sequence_number::Union{Int, Nothing}
+    instance_index::Int
+    source_files::Vector{String}
+    sequence_numbers::Vector{Int}
     file_time::Float64
 end
 
@@ -112,17 +157,27 @@ end
 
 Display settings: time range, binning, smoothing, which series each plot
 shows, and per-plot channel toggles.
+
+`ratio_combination` is the ordered channel pair the ratio is formed from —
+one of `RATIO_COMBINATION_OPTIONS` (ratio_analysis.jl), stored as its label
+so the persisted value stays readable and survives a change in channel count.
+
+`plot1_ch3`/`plot2_ch3` extend the per-plot channel toggles to a third
+channel; they are inert when the acquisition writes only two.
 """
 Base.@kwdef mutable struct LayoutSettings
     time_range::Int = 60
     binning::Int = 1
     smoothing::Int = 0
-    plot1::String = "Lifetime"
-    plot2::String = "Ion concentration"
+    plot1::String = "Ratio"
+    plot2::String = "Concentration"
     plot1_ch1::Bool = false
     plot1_ch2::Bool = false
+    plot1_ch3::Bool = false
     plot2_ch1::Bool = false
     plot2_ch2::Bool = false
+    plot2_ch3::Bool = false
+    ratio_combination::String = "C1/C2"
 end
 
 """
@@ -239,39 +294,12 @@ end
 # RUNTIME APPLICATION STATE
 # =============================================================================
 
-"""
-    ChannelSeries
-
-One TCSPC channel's "latest frame" snapshot: the current histogram, fitted
-decay curve, and photon count, all overwritten (not appended to) each
-published update — used only by the Histogram plot, which shows the most
-recent frame regardless of which ROI it belongs to (see `RoiChannelSeries`
-for the per-ROI accumulated time series that back every other plot).
-`AppRun` holds one instance per channel (`ch1`/`ch2`), so every "do X for
-each channel" site loops over `(app_run.ch1, app_run.ch2)` instead of
-duplicating `_ch1`/`_ch2` code.
-"""
-struct ChannelSeries
-    histogram::Observable{Vector{Float64}}
-    fit::Observable{Vector{Float64}}
-    counts::Observable{Float64}
-end
-
-function ChannelSeries()
-    return ChannelSeries(
-        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(0.0)
-    )
-end
-
-"""
-    channel_series(app_run) -> (ChannelSeries, ChannelSeries)
-
-Both channels' "latest frame" snapshots, in channel order — the idiomatic
-way to iterate "for each channel" over an `AppRun` for Histogram-plot data.
-"""
-channel_series(app_run) = (app_run.ch1, app_run.ch2)
+# The FLIM pipeline's `ChannelSeries` — a per-channel "latest frame" snapshot
+# of the decay histogram, its fit and the photon count — has no ratiometric
+# counterpart. The Histogram plot it fed showed a TCSPC decay curve, which no
+# longer exists; the image plot that replaced it renders a `FramePreview`
+# instead, held directly on `AppRun.preview` because there is one preview per
+# instance rather than one per channel.
 
 """
     KalmanState
@@ -315,43 +343,69 @@ end
 KalmanState() = KalmanState(NaN, 0.0, NaN, 0.0, NaN, NaN, NaN, NaN)
 
 """
-    RoiChannelSeries
+    RoiChannelIntensity
 
-One ROI's accumulated runtime time series for one TCSPC channel — the unit
-that gets duplicated once per drawn ROI (`app_run.rois`), per channel, when
-incoming acquisition frames are round-robin assigned to ROIs (see
-`accumulate_roi_sample!` in runtime.jl). Carries its own
-`timestamps` because each ROI only receives every Nth frame (N = number of
-ROIs), so it can't share a single app-wide per-frame x-axis the way the
-original single-series design did.
+One region's mean-intensity time series for one acquisition channel — the
+innermost level of the series hierarchy, held by `RoiSeries.channels`.
+
+Intensity is the only per-channel quantity that survives ratiometry (the
+ratio and the concentration it calibrates to are properties of the region,
+not of a channel), so this is a deliberately thin struct: one raw series, its
+smoothed companion, and the filter state driving the smoothing.
+
+`kalman` is `smoothing.jl`'s `kalman_update!` running state for `smooth` —
+not plotted directly, just carried so `append_smooth_value!` can pick up
+where the last call left off, and reinitialized (not persisted) across a
+`recompute_smooth_series!` replay.
+"""
+struct RoiChannelIntensity
+    values::Observable{Vector{Float64}}
+    smooth::Observable{Vector{Float64}}
+    kalman::KalmanState
+end
+
+RoiChannelIntensity() = RoiChannelIntensity(Observable(Float64[]), Observable(Float64[]), KalmanState())
+
+"""
+    RoiSeries
+
+One region's accumulated runtime time series — the unit duplicated once per
+drawn ROI (`app_run.rois`).
+
+Carries its own `timestamps` because in round-robin mode each ROI only
+receives every Nth instance (N = number of ROIs), so it cannot share a single
+app-wide per-frame x-axis. In spatial-mask mode every region receives every
+instance and the timestamp vectors coincide, but keeping them per-region lets
+both modes share one code path.
 
 # Fields
-- `timestamps::Observable{Vector{Float64}}`: this ROI's own frame timestamps
-- `photons::Observable{Vector{Float64}}` / `photons_smooth` / `photons_kalman`: photon-count time series and its live Kalman filter state
-- `lifetime::Observable{Vector{Float64}}` / `lifetime_smooth` / `lifetime_kalman`: fitted-lifetime time series and its live Kalman filter state
-- `concentration::Observable{Vector{Float64}}` / `concentration_smooth` / `concentration_kalman`: ion-concentration time series and its live Kalman filter state
+- `timestamps::Observable{Vector{Float64}}`: this region's own instance timestamps
+- `ratio` / `ratio_smooth` / `ratio_kalman`: the intensity-ratio time series and its live Kalman filter state
+- `concentration` / `concentration_smooth` / `concentration_kalman`: the Hill-calibrated concentration series and its filter state
+- `channels::Vector{RoiChannelIntensity}`: per-channel mean intensity, one entry per acquisition channel
 
-The `_kalman` fields (`KalmanState`) are `smoothing.jl`'s `kalman_update!`
-running state for that metric's `_smooth` series — not plotted directly,
-just carried so `append_smooth_value!` can pick up where the last call left
-off, and reinitialized (not persisted) across a `recompute_smooth_series!`
-replay — see that function's docstring for why that's fine.
+`channels` is sized when the series are rebuilt (`rebuild_roi_series!`,
+runtime.jl), once the channel count is known from the folder layout.
 """
-struct RoiChannelSeries
+struct RoiSeries
     timestamps::Observable{Vector{Float64}}
-    photons::Observable{Vector{Float64}}
-    photons_smooth::Observable{Vector{Float64}}
-    photons_kalman::KalmanState
-    lifetime::Observable{Vector{Float64}}
-    lifetime_smooth::Observable{Vector{Float64}}
-    lifetime_kalman::KalmanState
+    ratio::Observable{Vector{Float64}}
+    ratio_smooth::Observable{Vector{Float64}}
+    ratio_kalman::KalmanState
     concentration::Observable{Vector{Float64}}
     concentration_smooth::Observable{Vector{Float64}}
     concentration_kalman::KalmanState
+    channels::Vector{RoiChannelIntensity}
 end
 
-function RoiChannelSeries()
-    return RoiChannelSeries(
+"""
+    RoiSeries(channel_count)
+
+Fresh, empty series for one region, with `channel_count` per-channel
+intensity slots.
+"""
+function RoiSeries(channel_count::Integer=2)
+    return RoiSeries(
         Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),
@@ -359,22 +413,31 @@ function RoiChannelSeries()
         Observable(Float64[]),
         Observable(Float64[]),
         KalmanState(),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        KalmanState()
+        [RoiChannelIntensity() for _ in 1:max(1, channel_count)]
     )
 end
 
 """
-    roi_channel_series(app_run)
+    roi_series(app_run)
 
-Every `RoiChannelSeries` currently allocated, across both channels — the
-idiomatic way to iterate "for each (channel, ROI)" over an `AppRun`
-regardless of channel-visibility toggles (used for resetting/notifying/
-recomputing smoothing on all of them at once; see `shown_channel_series` in
-plotting.jl for the toggle-gated, per-plot iteration).
+Every `RoiSeries` currently allocated — the idiomatic way to iterate "for
+each region" over an `AppRun` regardless of channel-visibility toggles (used
+for resetting/notifying/recomputing smoothing on all of them at once; see
+`shown_channel_series` in plotting.jl for the toggle-gated, per-plot
+iteration).
 """
-roi_channel_series(app_run) = Iterators.flatten((app_run.ch1_rois, app_run.ch2_rois))
+roi_series(app_run) = app_run.rois_series
+
+"""
+    roi_channel_intensities(app_run)
+
+Every `(RoiSeries, RoiChannelIntensity)` pair currently allocated, across all
+regions and channels — the per-channel counterpart to `roi_series`, used
+where smoothing or resetting has to reach the innermost series.
+"""
+function roi_channel_intensities(app_run)
+    return ((series, channel) for series in app_run.rois_series for channel in series.channels)
+end
 
 """
     RoiCoordinates
@@ -408,15 +471,22 @@ during execution. It is NOT serialized.
 - `infos_task::Union{Task, Nothing}`: periodic info/status update task
 - `serial_task::Union{Task, Nothing}`: periodic serial command task
 - `serial_conn::Union{SerialPort, Nothing}`: open serial connection, if any
-- `ch1::ChannelSeries` / `ch2::ChannelSeries`: per-channel "latest frame" snapshot (Histogram plot only)
-- `ch1_rois::Vector{RoiChannelSeries}` / `ch2_rois::Vector{RoiChannelSeries}`: per-channel,
-  per-ROI accumulated time series (every other plot) — always the same
-  length as each other, `max(1, length(rois[]))` as of the last
-  `rebuild_roi_series!` call (`start_pressed`/CLEAR, runtime.jl),
-  but only when the ROI toggle (`app.roi.active`, Protocol panel,
+- `preview::Observable{Union{Nothing, FramePreview}}`: the most recent
+  downsampled frame snapshot, overwritten (not appended to) each update and
+  rendered by the image plot. `nothing` until the first preview is built, and
+  whenever the image plot is not selected — see `build_preview`
+  (acquisition.jl)
+- `rois_series::Vector{RoiSeries}`: per-region accumulated time series
+  (every plot but the image one) — `max(1, length(rois[]))` entries as of the
+  last `rebuild_roi_series!` call (`start_pressed`/CLEAR, runtime.jl), but
+  only when the ROI toggle (`app.roi.active`, Protocol panel,
   handlers_protocol.jl) is on; a single-element vector — reproducing the
   original un-split single-series behavior — otherwise, regardless of how
   many ROIs are drawn
+- `channel_count::Int`: how many channels the current acquisition writes,
+  resolved from the `C<n>` folder count at START (tiff_source.jl) and used to
+  size every `RoiSeries.channels`. Defaults to 2 before a run has resolved a
+  layout
 - `protocol_setpoint::Observable{Vector{Float64}}`: time-series of protocol setpoints used by PID
 - `command1::Observable{Vector{Float64}}` / `command2`: time-series of PID command values —
   NOT split per ROI: these drive real hardware output (serial.jl), not just
@@ -424,7 +494,6 @@ during execution. It is NOT serialized.
 - `timestamps::Observable{Vector{Float64}}`: time-series timestamps
 - `i::Observable{UInt32}`: current frame/iteration counter
 - `save_progress::Observable{Float64}`: Save-mode progress (percent, `NaN` when idle)
-- `hist_time::Observable{Vector{Int64}}`: histogram time-axis values
 - `protocol::Observable{ProtocolSettings}`: normalized protocol config for the worker
 - `rois::Observable{Vector{RoiCoordinates}}`: currently-drawn ROI boundaries
   (imported or manually drawn in the ROI popup, roi_popup.jl), shared here
@@ -454,17 +523,15 @@ mutable struct AppRun
     infos_task::Union{Task, Nothing}
     serial_task::Union{Task, Nothing}
     serial_conn::Union{SerialPort, Nothing}
-    ch1::ChannelSeries
-    ch2::ChannelSeries
-    ch1_rois::Vector{RoiChannelSeries}
-    ch2_rois::Vector{RoiChannelSeries}
+    preview::Observable{Union{Nothing, FramePreview}}
+    rois_series::Vector{RoiSeries}
+    channel_count::Int
     protocol_setpoint::Observable{Vector{Float64}}
     command1::Observable{Vector{Float64}}
     command2::Observable{Vector{Float64}}
     timestamps::Observable{Vector{Float64}}
     i::Observable{UInt32}
     save_progress::Observable{Float64}
-    hist_time::Observable{Vector{Int64}}
     protocol::Observable{ProtocolSettings}
     rois::Observable{Vector{RoiCoordinates}}
     target_frequency::Threads.Atomic{Float64}
@@ -487,17 +554,15 @@ function AppRun()
         nothing,
         nothing,
         nothing,
-        ChannelSeries(),
-        ChannelSeries(),
-        [RoiChannelSeries()],
-        [RoiChannelSeries()],
+        Observable{Union{Nothing, FramePreview}}(nothing),
+        [RoiSeries(DEFAULT_CHANNEL_COUNT)],
+        DEFAULT_CHANNEL_COUNT,
         Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),
         Observable(Float64[]),
         Observable{UInt32}(0),
         Observable(NaN),
-        Observable(collect(1:DEFAULT_HISTOGRAM_RESOLUTION)),
         Observable(ProtocolSettings()),
         Observable(RoiCoordinates[]),
         Threads.Atomic{Float64}(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ),

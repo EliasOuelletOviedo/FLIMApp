@@ -38,23 +38,45 @@ persistance d'état) est conservé.
 
 ### 1.3 Numérotation `T###` et groupement des canaux
 
-Le compteur `T###` est **global** — partagé entre les canaux au moment de
-l'écriture, pas remis à zéro par canal. Conséquence : pour l'instance `k`
-(1-based) avec `N` canaux, chaque canal possède exactement un fichier dont le
-numéro `T` est dans `[N·(k−1)+1, N·k]`.
+> **Révisé après enquête sur 151 sessions réelles.** La spec initiale
+> supposait un compteur global unique. C'est faux dans les deux sens décrits
+> ci-dessous, et chaque erreur produit des ratios **plausibles mais faux**,
+> sans aucun message d'erreur.
 
-**Règle de groupement** : trier les fichiers de chaque dossier de canal par
-numéro `T` ; le `k`-ième fichier de chaque canal forme l'instance `k`. Valider
-que chaque `T` tombe bien dans la plage attendue et journaliser une anomalie
-sinon.
+**Deux conventions coexistent sur le disque, détectées et non supposées :**
 
-Exemple à 2 canaux : C1 = {T001, T004, T006}, C2 = {T002, T003, T005}
-→ instance 1 = (T001, T002), instance 2 = (T004, T003), instance 3 = (T006, T005).
+| Convention | Sessions | Règle |
+|---|---|---|
+| **Globale** | 148 | Un compteur partagé, incrémenté à chaque fichier écrit. Les canaux ont des valeurs disjointes et entrelacées (C1 = {1,3,5…}, C2 = {2,4,6…}). Instance = `cld(T, N)`. |
+| **Par canal** | 3 | Chaque canal compte depuis 1 indépendamment ; tous les canaux ont le **même** ensemble de valeurs. Instance = `T`. |
 
-### 1.4 Nombre de canaux
+**Discriminant** (`detect_numbering`) : une même valeur `T` peut-elle
+apparaître dans deux canaux ? En numérotation globale c'est impossible — un
+fichier consomme un numéro, donc les canaux partitionnent la plage. En
+numérotation par canal c'est garanti par construction. Une seule instance de
+fichiers suffit à trancher, et les deux conventions coïncident pour une
+acquisition mono-canal.
 
-Détecté automatiquement (2 ou 3) depuis la première instance lue, puis figé
-pour toute l'acquisition — même logique que `has_channel2` aujourd'hui.
+Le groupement dérive de la valeur du compteur, jamais de la position du
+fichier dans le listing : si un canal perd un fichier, le groupement par
+position décale ce canal d'un cran et **toutes les instances suivantes sont
+mal appariées** en silence.
+
+Exemple à 2 canaux, numérotation globale : C1 = {T001, T004, T006},
+C2 = {T002, T003, T005} → instances (T001,T002), (T004,T003), (T006,T005).
+
+### 1.4 Nombre et *noms* des canaux
+
+Le nombre de canaux vient du décompte des dossiers `C<n>`, donc connu avant
+toute lecture de pixel.
+
+> **Les noms de canaux ne sont pas des positions.** 33 des sessions étudiées
+> contiennent `C1` et `C3`, **sans `C2`**. La combinaison choisie dans le GUI
+> nomme des canaux (« C1/C3 »), pas des indices : elle doit être résolue via
+> `channel_numbers` (`channel_position`). Indexer directement
+> `channel_means[3]` sur une acquisition à deux dossiers dépasse la borne et
+> renvoie un ratio `NaN` pour une session dont les données sont pourtant
+> parfaitement exploitables.
 
 ### 1.5 Groupes incomplets (Realtime)
 
@@ -123,7 +145,7 @@ Le comportement dépend de l'état des bascules `app.roi.active` et
 
 | ROI actif | Protocole actif | Comportement |
 |---|---|---|
-| oui | oui | **Round-robin temporel** : chaque instance de fichiers appartient à un seul ROI (le galvo scanne séquentiellement). `RoiSlotTracker`, la boîte de trigger et la réparation des trous sont conservés tels quels. |
+| oui | oui | **Round-robin temporel** : chaque **instance** (le groupe complet de N fichiers, un par canal) appartient à un seul ROI — le galvo scanne un ROI et la caméra écrit ses 2-3 canaux pour ce ROI. `RoiSlotTracker`, la boîte de trigger et la réparation des trous sont conservés, mais cadencés à l'instance et non au fichier. |
 | sinon | | **Masques spatiaux** : chaque image contient tous les ROIs ; on applique chaque masque à chaque instance et tous les ROIs sont mis à jour à chaque frame. |
 
 Le popup ROI accepte **les deux** sources d'image de fond : import manuel d'un
@@ -218,7 +240,7 @@ Mesuré sur `~/Documents/Maîtrise/Test galvo`, 6 sessions, 54 en-têtes
 | Propriété | Valeur |
 |---|---|
 | Format | **BigTIFF** (version 43), little-endian |
-| Dimensions | 1024 × 1024 (y compris dans les dossiers nommés « 1024x512 ») |
+| Dimensions | 1024 × 1024 **ou** 1024 × 512 selon la session — d'où l'allocation dynamique du tampon |
 | Profondeur | **8 bits** (`BitsPerSample = 8`), 1 échantillon par pixel |
 | Compression | **aucune** (`Compression = 1`) |
 | Disposition | **une seule bande**, données contiguës à l'offset fixe **3840** |
@@ -227,9 +249,21 @@ Mesuré sur `~/Documents/Maîtrise/Test galvo`, 6 sessions, 54 en-têtes
 | `ImageDescription` | `{"shape": [1024, 1024, 1]}` |
 | IFD suivant | aucun (image unique par fichier) |
 
-La règle de groupement de la section 1.3 a été validée sur **2690 fichiers
-réels : zéro violation**, et la numérotation `T` s'est révélée globalement
-contiguë sur chaque session.
+La règle de groupement globale de la section 1.3 a été validée sur **2690
+fichiers réels : zéro violation** pour les sessions concernées. L'enquête
+élargie à 151 sessions a ensuite révélé la convention par canal et les noms de
+canaux non contigus, tous deux traités en 1.3 et 1.4.
+
+Le pipeline complet (résolution du dossier → groupement → lecture → binning →
+ratio) a été vérifié sur un représentant de **chacune des quatre formes**
+présentes sur le disque :
+
+| Forme | Géométrie | Instances | Résultat |
+|---|---|---|---|
+| `C1 C2 C3`, par canal | 1024×512 | 1443 | ratios finis |
+| `C1 C2`, globale | 1024×1024 | 600 | ratios finis |
+| `C1 C3`, globale | 1024×512 | 3 | ratios finis (« C1/C3 » résolu correctement) |
+| `C2` seul | 1024×1024 | 1024 | « C1/C2 » → `NaN`, comme prévu |
 
 Note : 1024 × 1024 correspond exactement à la référence de calibration galvo
 déjà présente dans `roi.jl` et au défaut de `imported_image_size`.

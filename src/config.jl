@@ -1,7 +1,7 @@
 """
 config.jl
 
-Paths, physics/UI constants, and theme definitions used across the app.
+Paths, acquisition/UI constants, and theme definitions used across the app.
 Application-state defaults live with the settings structs in data_types.jl.
 """
 
@@ -20,11 +20,15 @@ using Colors
 """
     user_data_dir()::String
 
-Per-user directory holding FLIMApp's runtime state (saved `AppState`, path
+Per-user directory holding TIFFApp's runtime state (saved `AppState`, path
 caches). Lives under the user's home directory, not the repository — state
 files change on every run and must never end up committed to git.
+
+Distinct from the FLIM app's `~/.flimapp`, so the two can be installed side
+by side without one loading the other's saved state — which would fail
+anyway, the settings structs having diverged.
 """
-user_data_dir()::String = joinpath(homedir(), ".flimapp")
+user_data_dir()::String = joinpath(homedir(), ".tiffapp")
 
 """
     state_file_path()::String
@@ -47,19 +51,25 @@ trying to detect and migrate it.
 """
 state_file_path()::String = joinpath(user_data_dir(), "AppState.jls")
 
-# Cache files remembering the last-selected IRF file / data folder.
-irf_filepath_cache()::String = joinpath(user_data_dir(), "irf_filepath.txt")
+# Cache file remembering the last-selected data folder. The IRF path cache
+# that sat alongside it is gone with lifetime fitting — there is no
+# instrument response to load for a ratiometric acquisition.
 folderpath_cache()::String = joinpath(user_data_dir(), "folderpath.txt")
 
 """
     default_data_root_path()::String
 
-Fallback root directory for `.sdt` data files when no folder has been picked
-in the GUI yet: the `FLIM_DATA_PATH` environment variable when set, otherwise
-`~/FLIMApp_data`.
+Fallback root directory for acquisition data when no folder has been picked
+in the GUI yet: the `TIFF_DATA_PATH` environment variable when set, otherwise
+`~/TIFFApp_data`.
+
+This is the folder the user points at the acquisition's output — either a
+session directory, a `Bliq VMS` directory, or the parent the Realtime watcher
+monitors for new sessions. See `find_bliq_root` (tiff_source.jl) for which
+shapes resolve.
 """
 function default_data_root_path()::String
-    return get(ENV, "FLIM_DATA_PATH", joinpath(homedir(), "FLIMApp_data"))
+    return get(ENV, "TIFF_DATA_PATH", joinpath(homedir(), "TIFFApp_data"))
 end
 
 """
@@ -85,15 +95,57 @@ function get_data_root_path()::String
 end
 
 # =============================================================================
-# PHYSICS CONSTANTS
+# ACQUISITION CONSTANTS
 # =============================================================================
 
-const DEFAULT_HISTOGRAM_RESOLUTION = 256   # time bins per histogram
-const LASER_PULSE_PERIOD = 12.5            # ns between laser pulses
-const NUM_PREVIOUS_PULSES = 5              # previous pulses for reconvolution
-const TCSPC_LOW_CUT_INDEX = 13             # TCSPC window lower-bound index
-const TCSPC_HIGH_CUT_INDEX = 12            # TCSPC window upper-bound index
 const PROTOCOL_STEP_COUNT = 10             # steps per protocol (times/setpoints length)
+
+"""
+    DEFAULT_CHANNEL_COUNT
+
+Channel count assumed before a run has resolved an actual folder layout. Only
+affects how `AppRun()` sizes its initial series; the real count comes from
+counting `C<n>` directories at START (`resolve_channel_layout`,
+tiff_source.jl).
+"""
+const DEFAULT_CHANNEL_COUNT = 2
+
+"""
+    MAX_FRAME_BUFFER_DEPTH
+
+Hard ceiling on the temporal binning window, in frames.
+
+The binning window is a circular buffer of *whole images*, so its cost scales
+with the frame size: at 1024x1024 across three channels, 50 frames is ~157 MB
+of 8-bit samples (~314 MB if the camera is switched to 16-bit). Beyond that
+the memory stops being worth what binning adds, since the Kalman smoother
+already handles noise reduction on the resulting time series.
+
+`ImageFrameBuffer` (acquisition.jl) allocates lazily from the first frame's
+real geometry rather than assuming a size, so an acquisition with smaller
+frames simply uses less.
+"""
+const MAX_FRAME_BUFFER_DEPTH = 50
+
+"""
+    PREVIEW_MAX_DIMENSION
+
+Longest edge, in pixels, of the downsampled `FramePreview` the image plot
+renders. The plot is a few hundred pixels on screen, so shipping more than
+this per frame would allocate bandwidth for detail that is immediately
+resampled away — see `FramePreview` (data_types.jl).
+"""
+const PREVIEW_MAX_DIMENSION = 256
+
+"""
+    PREVIEW_MIN_INTERVAL_S
+
+Minimum wall-clock spacing between two previews. At 60 Hz the image plot
+cannot usefully show every frame, and building one costs a strided pass over
+every channel plus a per-pixel division on the downsampled grid; throttling
+keeps that off the critical path without making the preview look stalled.
+"""
+const PREVIEW_MIN_INTERVAL_S = 0.1
 
 """
     DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ::Float64

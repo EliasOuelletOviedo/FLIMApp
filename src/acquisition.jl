@@ -1,62 +1,33 @@
 """
 acquisition.jl
 
-Data acquisition worker tasks for the FLIM application: Playback, Realtime,
-and Save modes. Serial port discovery lives in serial.jl; protocol schedule
-math lives in protocol.jl.
+Data acquisition worker tasks: Playback, Realtime, and Save modes. Folder
+resolution and channel grouping live in tiff_source.jl; the ratio and
+concentration math lives in ratio_analysis.jl; serial port discovery lives in
+serial.jl; protocol schedule math lives in protocol.jl.
 
-The three modes share ~90% of their logic (sliding-window histogram binning,
-lifetime fitting with optional partial-fit optimization, PID command
-computation, channel emission) via `run_acquisition_loop!`. They differ only
-in how the next file to process is chosen and what happens after a result is
-emitted:
-- Playback: round-robins a fixed, sorted file list on a fixed-frequency schedule.
-- Realtime: polls the data folder for the newest new file, waiting if none.
-- Save: iterates the fixed file list once, reporting progress via a callback.
+The three modes share most of their logic (sliding-window image binning,
+per-region reduction to ratios, PI command computation, channel emission) via
+`run_acquisition_loop!`. They differ only in how the next instance to process
+is chosen, what time base its timestamps use, and what happens after a result
+is emitted:
+
+- **Playback** — round-robins a fixed list of complete instances on a
+  fixed-frequency schedule; timestamps are instance indices.
+- **Realtime** — waits for a new acquisition session to appear, then
+  assembles instances from files as they are written; timestamps are
+  wall-clock seconds.
+- **Save** — iterates the fixed instance list once, reporting progress via a
+  callback; timestamps are instance indices.
+
+The unit of work is a *frame instance* — one file per channel, grouped by the
+acquisition's global `T###` counter — rather than a single file. See
+tiff_source.jl's header for why that grouping is derived from the counter
+rather than from file ordering.
 """
 
 using Base.Threads
 using Statistics: median
-
-# =============================================================================
-# SHARED CORE LOOP
-# =============================================================================
-
-"""
-    parse_file_sequence_number(filepath)::Union{Int, Nothing}
-
-Parse the trailing run of digits in `filepath`'s filename (before the
-extension) as this file's sequence number in the acquisition — e.g.
-`"sample_00042.sdt"` -> `42`. Returns `nothing` if the filename has no
-trailing digits to parse. See `AcquisitionSample`'s docstring
-(data_types.jl) for why this — not the app's own read-count — is what
-round-robin ROI assignment (`consumer_loop`, runtime.jl) is keyed on, and
-for the one failure mode it does *not* cover (which `RoiSlotTracker` below
-handles).
-"""
-function parse_file_sequence_number(filepath::AbstractString)::Union{Int, Nothing}
-    name = splitext(basename(filepath))[1]
-    m = match(r"(\d+)$", name)
-    m === nothing && return nothing
-    return tryparse(Int, m.captures[1])
-end
-
-"""
-    source_file_time(filepath)::Float64
-
-`filepath`'s modification time in unix seconds — when the source acquisition
-finished writing it, which is the timing signal `next_roi_slot!` needs (see
-`AcquisitionSample`'s `file_time`, data_types.jl). `NaN` if the file can't
-be stat'ed, which every caller downstream treats as "no timing information
-for this file" rather than as a real timestamp.
-"""
-function source_file_time(filepath::AbstractString)::Float64
-    return try
-        Float64(stat(filepath).mtime)
-    catch
-        NaN
-    end
-end
 
 # =============================================================================
 # ROI SLOT TRACKING (missed-file repair)
@@ -272,59 +243,307 @@ function next_roi_slot!(tracker::RoiSlotTracker, file_time_s::Float64, sequence_
     return (tracker.slot, step - 1, ambiguous)
 end
 
-"""
-    ChannelFitState
 
-One TCSPC channel's per-frame accumulator state for `run_acquisition_loop!`:
-sliding-window binning buffer, current MLE fit parameters, and PI error
-accumulators. Not persisted/Observable like `AppState`/`AppRun` — this is
-purely acquisition-loop-internal state, one instance per channel.
+# =============================================================================
+# IMAGE FRAME BUFFER (temporal binning)
+# =============================================================================
+
 """
-mutable struct ChannelFitState
-    vectors::Matrix{Float64}
-    n_vectors::Int
-    sum_vector::Vector{Float64}
-    last_bin::Int
-    current_count::Int
-    params::Vector{Float64}
-    full_fit_params::Vector{Float64}
-    first_fit_pending::Bool
-    I_error::Float64
-    old_error::Float64
-    pid_kalman::KalmanState
+    ImageFrameBuffer{T}
+
+One channel's sliding-window binning state: a circular buffer of whole frames
+plus the running sum over the active window.
+
+# Why whole frames, and what it costs
+
+The FLIM pipeline buffered 256-bin histograms, so depth was free. Buffering
+images is not: at 1024x1024 across three channels, 50 frames is ~157 MB of
+8-bit samples. Three things keep that in hand:
+
+- **native sample type** — frames are kept as they were read (`UInt8` today,
+  `UInt16` if the camera is switched), never widened to `Float64`, which
+  alone is a 4-8x saving over the obvious implementation;
+- **lazy allocation** — nothing is allocated until the first frame reveals
+  the real geometry, so a smaller acquisition simply uses less;
+- **incremental sum** — the window sum is maintained by adding the arriving
+  frame and subtracting the departing one, never by re-summing the window.
+
+`sum_image` is `UInt32`: 50 frames of 16-bit samples reach ~3.3 million,
+past `UInt16`, while `UInt64` would double the resident size of the one array
+touched on every reduction.
+
+# Why the sum is worth keeping at all
+
+For the "ratio of means" reduction, binning the *scalars* would give
+bit-identical results for a fraction of this memory. The images are buffered
+anyway because the image plot renders the *binned* frame, and because a
+per-pixel ratio map has no scalar equivalent to reconstruct from.
+
+`summed` tracks how many frames `sum_image` currently holds. It is carried
+explicitly rather than inferred from `filled` and `window`: those two agree
+with the sum only in the steady state, and reconstructing "is there a frame
+to evict yet" from them is exactly the kind of off-by-one that would corrupt
+every mean silently, since an over- or under-counted window still produces
+plausible-looking numbers.
+
+`frames` holds `depth + 1` slots for a maximum window of `depth`. The spare
+slot is what makes the incremental update possible at the largest window: the
+frame leaving the window has to be *subtracted* from the sum, so it must
+still be readable at the moment the arriving frame is stored. With exactly
+`depth` slots the two collide — the arriving frame lands on the very slot
+holding the outgoing one — and the update silently subtracts the new frame
+instead of the old, an error that leaves the sum plausible-looking and wrong
+for the rest of the run. Caught by testing the buffer against a naive
+re-summation across window sizes, not by reading the code.
+"""
+mutable struct ImageFrameBuffer{T<:Unsigned}
+    frames::Array{T, 3}
+    sum_image::Matrix{UInt32}
+    width::Int
+    height::Int
+    depth::Int
+    write_pos::Int
+    filled::Int
+    window::Int
+    summed::Int
 end
 
-function ChannelFitState(initial_guess::Vector{Float64})
-    return ChannelFitState(
-        zeros(100, DEFAULT_HISTOGRAM_RESOLUTION), 100,
-        zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION), 1, 0,
-        copy(initial_guess), copy(initial_guess), true,
-        0.0, 0.0, KalmanState()
+"""
+    ImageFrameBuffer{T}(width, height, depth)
+
+Allocate a buffer supporting windows up to `depth` frames of `width` x
+`height` samples of type `T`. `depth` is clamped to at least 1 and at most
+`MAX_FRAME_BUFFER_DEPTH`; `depth + 1` slots are allocated, for the reason
+given in the struct docstring.
+"""
+function ImageFrameBuffer{T}(width::Integer, height::Integer, depth::Integer) where {T<:Unsigned}
+    d = clamp(Int(depth), 1, MAX_FRAME_BUFFER_DEPTH)
+    return ImageFrameBuffer{T}(
+        Array{T, 3}(undef, Int(width), Int(height), d + 1),
+        zeros(UInt32, Int(width), Int(height)),
+        Int(width), Int(height), d,
+        0, 0, 0, 0
     )
 end
 
-"""
-    pid_command_from_state(state, setpoint_ns, P, I, inv, on)::Float64
+frame_length(buffer::ImageFrameBuffer) = buffer.width * buffer.height
 
-Apply one controller's P/I gains to `state`'s current error terms (`state.
-old_error` holds the latest P_error, `state.I_error` the integral term —
-both just set by `process_frame!`). No `D` term: the derivative
-was dropped in favor of `state.pid_kalman` (a Kalman observer) filtering
-the lifetime that `P_error` is computed from — see
-`process_frame!`'s docstring. Split out from `process_frame!`
-so a single-channel acquisition (no second SDT channel in the file) can
-still drive controller 2's output from channel 1's error dynamics with
-controller 2's own gains — this is exactly the original single-channel
-behavior (`command1`/`command2` were always two gain-weighted views of one
-shared error before channel 2 existed), preserved for files that only ever
-have one channel.
+# Physical slot count, one more than the largest usable window.
+slot_count(buffer::ImageFrameBuffer) = size(buffer.frames, 3)
+
 """
-function pid_command_from_state(state::ChannelFitState, setpoint_ns::Float64, P::Float64, I::Float64, inv::Bool, on::Bool)::Float64
-    if isnan(setpoint_ns)
+    push_frame!(buffer, pixels, requested_window) -> Int
+
+Fold a newly-read frame into `buffer` and return how many frames the window
+now sums — the divisor `region_mean` needs.
+
+`requested_window` is the user's binning setting, re-read every frame so a
+live edit takes effect immediately. It is clamped to the buffer depth and to
+how many frames have actually been seen, so an early frame with binning set
+to 50 averages over what exists rather than over uninitialized memory.
+
+The window sum is maintained incrementally in the steady state (add the
+arriving frame, subtract the one leaving the window). It is only rebuilt from
+scratch when the requested window *changes*, since the set of frames in the
+window then changes by more than one element and there is nothing to
+subtract.
+"""
+function push_frame!(buffer::ImageFrameBuffer{T}, pixels::AbstractVector{T}, requested_window::Integer) where {T<:Unsigned}
+    length(pixels) == frame_length(buffer) ||
+        throw(ArgumentError("Frame of $(length(pixels)) samples does not fit a $(buffer.width)x$(buffer.height) buffer"))
+
+    slots = slot_count(buffer)
+    buffer.write_pos = mod1(buffer.write_pos + 1, slots)
+    buffer.filled = min(buffer.filled + 1, slots)
+
+    frames_flat = reshape(buffer.frames, frame_length(buffer), slots)
+    @inbounds copyto!(view(frames_flat, :, buffer.write_pos), pixels)
+
+    window = clamp(Int(requested_window), 1, min(buffer.depth, buffer.filled))
+    sum_flat = vec(buffer.sum_image)
+
+    if window != buffer.window
+        # Window changed: the sum's membership changed by more than the single
+        # frame that just arrived, so there is nothing to subtract and it has
+        # to be rebuilt from the last `window` frames.
+        fill!(sum_flat, UInt32(0))
+        @inbounds for k in 0:(window - 1)
+            pos = mod1(buffer.write_pos - k, slots)
+            column = view(frames_flat, :, pos)
+            @simd for i in eachindex(sum_flat)
+                sum_flat[i] += UInt32(column[i])
+            end
+        end
+        buffer.window = window
+        buffer.summed = window
+        return window
+    end
+
+    # Steady state: add the arriving frame...
+    @inbounds @simd for i in eachindex(sum_flat)
+        sum_flat[i] += UInt32(pixels[i])
+    end
+    buffer.summed += 1
+
+    # ...then drop whatever that pushed out of the window. A loop, not an
+    # `if`: `summed` can exceed `window` by more than one when the window was
+    # just narrowed to a value the buffer already held frames for.
+    @inbounds while buffer.summed > window
+        evicted_pos = mod1(buffer.write_pos - buffer.summed + 1, slots)
+        evicted = view(frames_flat, :, evicted_pos)
+        @simd for i in eachindex(sum_flat)
+            sum_flat[i] -= UInt32(evicted[i])
+        end
+        buffer.summed -= 1
+    end
+
+    return window
+end
+
+"""
+    ChannelReader
+
+Per-channel scratch for the acquisition loop: the pixel buffer each frame is
+read into, and the binning buffer it is folded into.
+
+Both are allocated on the first frame, once its geometry and sample type are
+known, and reused for every frame afterwards — the acquisition loop performs
+no per-frame pixel allocation at all.
+"""
+mutable struct ChannelReader{T<:Unsigned}
+    pixels::Vector{T}
+    buffer::ImageFrameBuffer{T}
+end
+
+function ChannelReader{T}(width::Integer, height::Integer, depth::Integer) where {T<:Unsigned}
+    return ChannelReader{T}(
+        Vector{T}(undef, Int(width) * Int(height)),
+        ImageFrameBuffer{T}(width, height, depth)
+    )
+end
+
+# =============================================================================
+# PREVIEW
+# =============================================================================
+
+"""
+    preview_stride(width, height) -> Int
+
+Subsampling factor bringing the longer edge of a frame down to at most
+`PREVIEW_MAX_DIMENSION`.
+"""
+function preview_stride(width::Integer, height::Integer)::Int
+    longest = max(Int(width), Int(height))
+    longest <= PREVIEW_MAX_DIMENSION && return 1
+    return cld(longest, PREVIEW_MAX_DIMENSION)
+end
+
+"""
+    build_preview(readers, window, combination_label) -> FramePreview
+
+Build the downsampled snapshot the image plot renders, from the current
+binned sum of each channel.
+
+Strided subsampling rather than block averaging: the image plot is a
+qualitative view of the field, the binning window has already done the noise
+reduction that matters, and averaging would cost a full-resolution pass per
+channel on a path that runs while the acquisition is live.
+
+The ratio map is computed on the downsampled grid — see `FramePreview`
+(data_types.jl). Pixels whose denominator is zero become `NaN`, which Makie
+renders as a gap rather than as a spurious extreme value.
+"""
+function build_preview(readers::Vector{<:ChannelReader}, window::Int, combination_label::AbstractString,
+                       channel_numbers::AbstractVector{Int})::FramePreview
+    first_buffer = readers[1].buffer
+    width = first_buffer.width
+    height = first_buffer.height
+    stride = preview_stride(width, height)
+
+    xs = 1:stride:width
+    ys = 1:stride:height
+    out_w = length(xs)
+    out_h = length(ys)
+
+    divisor = Float32(max(window, 1))
+    images = Vector{Matrix{Float32}}(undef, length(readers))
+
+    for (c, reader) in enumerate(readers)
+        source = reader.buffer.sum_image
+        target = Matrix{Float32}(undef, out_w, out_h)
+        @inbounds for (jj, y) in enumerate(ys), (ii, x) in enumerate(xs)
+            target[ii, jj] = Float32(source[x, y]) / divisor
+        end
+        images[c] = target
+    end
+
+    num_channel, den_channel = parse_ratio_combination(combination_label)
+    num_idx = findfirst(==(num_channel), channel_numbers)
+    den_idx = findfirst(==(den_channel), channel_numbers)
+    ratio_map = Matrix{Float32}(undef, out_w, out_h)
+
+    if num_idx !== nothing && den_idx !== nothing && num_idx <= length(images) && den_idx <= length(images)
+        numerator = images[num_idx]
+        denominator = images[den_idx]
+        @inbounds for i in eachindex(ratio_map)
+            d = denominator[i]
+            ratio_map[i] = d > 0 ? numerator[i] / d : NaN32
+        end
+    else
+        fill!(ratio_map, NaN32)
+    end
+
+    return FramePreview(images, ratio_map, stride)
+end
+
+# =============================================================================
+# PER-INSTANCE PROCESSING
+# =============================================================================
+
+"""
+    PidChannelState
+
+The PI controller's own accumulators, kept per controller output rather than
+per acquisition channel.
+
+Under FLIM each TCSPC channel was fit independently and drove its own
+controller. Ratiometry produces a *single* ratio per instance, so both
+outputs regulate on that one error signal with their own gains — which is
+exactly what the FLIM pipeline already did whenever a file carried only one
+channel (see `pid_command_from_state` below).
+
+`kalman` filters the raw per-instance ratio before the error terms are
+computed from it. This is what let the controller drop its `D` term (PID ->
+PI): a raw discrete derivative amplifies measurement noise badly, while the
+observer's velocity state tracks the signal's trend from a model of its
+dynamics instead of differentiating a noisy series. It matters more here than
+it did for lifetimes — an 8-bit ratio is noisier than a fitted lifetime.
+"""
+mutable struct PidChannelState
+    I_error::Float64
+    old_error::Float64
+    kalman::KalmanState
+end
+
+PidChannelState() = PidChannelState(0.0, 0.0, KalmanState())
+
+"""
+    pid_command_from_state(state, setpoint, P, I, inv, on)::Float64
+
+Apply one controller's P/I gains to `state`'s current error terms
+(`state.old_error` holds the latest P_error, `state.I_error` the integral
+term). `NaN` setpoint, or a disabled output, yields `NaN` — the "no command"
+sentinel the serial layer and the Command plot both understand.
+
+`setpoint` is in ratio units: protocol setpoints are expressed directly as
+ratios, with no Hill conversion between the schedule and the error signal.
+"""
+function pid_command_from_state(state::PidChannelState, setpoint::Float64, P::Float64, I::Float64, inv::Bool, on::Bool)::Float64
+    if isnan(setpoint)
         return NaN
     end
 
-    command = P*state.old_error + I*state.I_error
+    command = P * state.old_error + I * state.I_error
     if inv
         command = -command
     end
@@ -333,230 +552,230 @@ function pid_command_from_state(state::ChannelFitState, setpoint_ns::Float64, P:
 end
 
 """
-    process_frame!(state, vector, histogram_resolution, n, layout, ctx,
-                            partial_fit_enabled, partial_fit_period,
-                            setpoint_ns, frame_time, P, I, inv, on)
-        -> (ChannelFrame, command)
+    update_pid_error!(state, ratio, setpoint, dt, smooth_level)
 
-One TCSPC channel's per-frame work: sliding-window histogram binning, MLE
-lifetime fit (full or partial), and PI command computation — mutating
-`state` in place. `run_acquisition_loop!` calls this once per channel per
-frame with that channel's own `ChannelFitState` and controller sub-config
-(P1/I1/ch1_inv/ch1_on vs P2/I2/ch2_inv/ch2_on), so each channel is fit and
-controlled completely independently when both are present.
+Fold one instance's ratio into `state`'s error accumulators, returning the
+Kalman-filtered ratio the error was computed from.
 
-The raw per-frame MLE-fit lifetime is filtered through `state.pid_kalman`
-(a constant-velocity Kalman observer, `kalman_update!`/smoothing.jl) before
-`P_error`/`I_error` are computed from it — this is what let the controller
-drop its `D` term (PID -> PI): a raw discrete derivative amplifies fit
-noise badly, while the observer's own velocity state tracks the lifetime's
-trend directly from a model of its dynamics instead of differentiating a
-noisy signal.
+A `NaN` setpoint (no active protocol) resets the accumulators rather than
+letting the integral term keep winding on a stale error — the same policy the
+FLIM loop used.
 """
-function process_frame!(
-        state::ChannelFitState,
-        vector::Vector{UInt16},
-        histogram_resolution::Int,
-        n::UInt32,
-        layout::LayoutSettings,
-        ctx,
-        partial_fit_enabled::Bool,
-        partial_fit_period::Int,
-        setpoint_ns::Float64,
-        frame_time::Float32,
-        P::Float64, I::Float64,
-        inv::Bool, on::Bool
-    )
-    # Store in circular buffer
-    pos = mod1(Int(n)+1, state.n_vectors)
-    state.vectors[pos, 1:histogram_resolution] .= vector
+function update_pid_error!(state::PidChannelState, ratio::Float64, setpoint::Float64, dt::Float64, smooth_level::Int)
+    filtered = kalman_update!(state.kalman, ratio, dt, smooth_level)
 
-    # Apply binning from layout with sliding window optimization
-    bin = layout.binning
-
-    if bin != state.last_bin
-        # Recalculate when binning changes
-        effective_bin = min(bin, state.current_count + 1)
-        idxs = mod1.(pos .- (0:effective_bin-1), state.n_vectors)
-        fill!(state.sum_vector, 0.0)
-        @inbounds for idx in idxs
-            @views state.sum_vector[1:histogram_resolution] .+= state.vectors[idx, 1:histogram_resolution]
-        end
-        state.last_bin = bin
-        state.current_count = effective_bin
-    else
-        if state.current_count < bin
-            # Still filling window
-            state.sum_vector .+= vector
-            state.current_count += 1
-        else
-            # Slide window: remove oldest, add new
-            old_pos = mod1(pos - bin, state.n_vectors)
-            state.sum_vector .-= state.vectors[old_pos, 1:histogram_resolution]
-            state.sum_vector .+= vector
-        end
-    end
-
-    final_vector = state.sum_vector ./ bin
-
-    # Fit every processed frame/file.
-    fit_index = Int(n) + 1
-    use_full_fit = !partial_fit_enabled || fit_index == 1 || mod1(fit_index, partial_fit_period) == 1
-
-    if use_full_fit
-        params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=state.full_fit_params, histogram_resolution=histogram_resolution, first_fit=state.first_fit_pending)
-        state.first_fit_pending = false
-
-        if !isnan(params_raw[1])
-            state.params = params_raw
-            state.full_fit_params = params_raw
-        end
-    else
-        # Fix only the offset/background (last parameter) to the last full
-        # fit's value; leave every other parameter (lifetime(s),
-        # amplitude(s), IRF shift) free. Generic over guess length so this
-        # covers both the 1- and 2-lifetime models (see partial_fit_enabled above).
-        fixed_parameters = fill(NaN, length(state.full_fit_params))
-        fixed_parameters[end] = state.full_fit_params[end]
-        params_raw, data = vec_to_lifetime(Float64.(final_vector); guess=state.params, histogram_resolution=histogram_resolution, fixed_parameters=fixed_parameters, first_fit=false)
-
-        if !isnan(params_raw[1])
-            state.params = params_raw
-        end
-    end
-
-    histogram = data[2]
-    photons = sum(histogram)
-    fit = conv_irf_data(data[1], Tuple(state.params), ctx.irf; histogram_resolution=histogram_resolution) * photons
-    lifetime = state.params[1]
-    concentration = (9.5 / lifetime - 1) / 0.025
-
-    smooth_level = lifetime_smooth_level(layout)
-    dt_sample = max(Float64(frame_time), eps(Float64))
-    lifetime_for_pid = kalman_update!(state.pid_kalman, lifetime, dt_sample, smooth_level)
-
-    if !isnan(setpoint_ns)
-        P_error = setpoint_ns - lifetime_for_pid
-        state.I_error += P_error * dt_sample
-        state.old_error = P_error
-    else
+    if isnan(setpoint) || isnan(filtered)
         state.I_error = 0.0
         state.old_error = 0.0
+    else
+        error = setpoint - filtered
+        state.I_error += error * dt
+        state.old_error = error
     end
 
-    command = pid_command_from_state(state, setpoint_ns, P, I, inv, on)
-
-    return ChannelFrame(histogram, fit, photons, lifetime, concentration), command
+    return filtered
 end
 
 """
-    run_acquisition_loop!(ch, running, layout, controller, next_file!, emit!;
-                           initial_guess, protocol, use_partial_fit)
+    reduce_regions(readers, masks, window, combination_label) -> Vector{RegionFrame}
 
-Shared body for all three acquisition modes. Repeatedly calls `next_file!(n)`
-(with `n` the current, pre-increment frame counter) to obtain the next
-`.sdt` filepath to process — or `nothing` to stop the loop, which each mode
-uses to encode its own pacing/waiting/termination policy. For each file it
-runs `process_frame!` for channel 1 and, if the file has a second
-TCSPC channel, independently for channel 2 too — decided once from the
-first file of the run (`has_channel2`) and held fixed for the rest of the
-acquisition, not re-checked per file. Then calls `emit!(sample, n)` — which
-each mode uses to `put!` onto `ch` plus its own post-emit policy (extra
-pacing, progress reporting) — returning `false` to stop the loop.
+Reduce one instance's binned channel images to a `RegionFrame` per region.
 
-Must be called from within the caller's own `try/catch/finally` so that
-IRF/path validation failures and cleanup (closing `ch`, clearing `running[]`)
-are handled by the specific mode wrapper (see `start_playback`/
-`start_realtime`/`start_save` below).
+This is the whole of the ratiometric "analysis": a masked sum per channel per
+region, a division by pixel and frame count to get a mean, one division to
+form the ratio, and the Hill inversion for the concentration. Compare
+`vec_to_lifetime`'s iterative MLE reconvolution fit, which this replaces.
+"""
+function reduce_regions(readers::Vector{<:ChannelReader}, masks::Vector{RegionMask},
+                        window::Int, combination_label::AbstractString,
+                        channel_numbers::AbstractVector{Int})::Vector{RegionFrame}
+    n_channels = length(readers)
+    frames = Vector{RegionFrame}(undef, length(masks))
+
+    for (r, mask) in enumerate(masks)
+        means = Vector{Float64}(undef, n_channels)
+        for c in 1:n_channels
+            means[c] = region_mean(vec(readers[c].buffer.sum_image), mask, window)
+        end
+
+        ratio = ratio_from_means(means, combination_label, channel_numbers)
+        frames[r] = RegionFrame(means, ratio, hill_ratio_to_concentration(ratio))
+    end
+
+    return frames
+end
+
+# =============================================================================
+# SHARED ACQUISITION LOOP
+# =============================================================================
+
+"""
+    make_channel_readers(instance, depth) -> Vector{ChannelReader}
+
+Allocate one `ChannelReader` per channel, sized from `instance`'s first file.
+
+Geometry and sample type are taken from the data rather than assumed, which
+is what lets the same build serve an 8-bit 1024x1024 acquisition today and a
+16-bit or differently-sized one later. Every channel is required to agree
+with the first: a ratio between images of different sizes is meaningless, and
+silently reducing over mismatched regions would produce plausible numbers
+from unrelated pixels.
+"""
+function make_channel_readers(instance::FrameInstance, depth::Integer)
+    reference = BigTiffFile.read_info(instance.paths[1])
+    T = BigTiffFile.sample_type(reference)
+
+    for path in instance.paths[2:end]
+        info = BigTiffFile.read_info(path)
+        (info.width == reference.width && info.height == reference.height) ||
+            error("Channel images disagree on size: $(basename(instance.paths[1])) is $(reference.width)x$(reference.height), $(basename(path)) is $(info.width)x$(info.height)")
+        info.bits_per_sample == reference.bits_per_sample ||
+            error("Channel images disagree on bit depth: $(basename(instance.paths[1])) is $(reference.bits_per_sample)-bit, $(basename(path)) is $(info.bits_per_sample)-bit")
+    end
+
+    if reference.bits_per_sample == 8
+        @info "Acquisition is 8-bit: only 256 grey levels per channel, which limits ratio precision. A 16-bit camera setting would improve it." size=(reference.width, reference.height)
+    end
+
+    return [ChannelReader{T}(reference.width, reference.height, depth) for _ in instance.paths]
+end
+
+"""
+    run_acquisition_loop!(ch, running, layout, controller, next_instance!, emit!; kwargs...)
+
+Shared body for all three acquisition modes. Repeatedly calls
+`next_instance!(n)` (with `n` the current, pre-increment frame counter) to
+obtain the next `FrameInstance` to process — or `nothing` to stop the loop,
+which each mode uses to encode its own pacing/waiting/termination policy. For
+each instance it reads every channel's image, folds it into that channel's
+binning buffer, reduces the result over each region, and computes the PI
+commands. Then calls `emit!(sample, n)` — which each mode uses to `put!` onto
+`ch` plus its own post-emit policy (extra pacing, progress reporting) —
+returning `false` to stop the loop.
+
+# Time base
+
+`use_wall_clock` selects between the two time bases the modes need:
+
+- **Realtime** (`true`) — timestamps are seconds elapsed since the first
+  instance was processed, so the x-axis reflects the acquisition's real
+  cadence and the PI integral term accumulates in real seconds.
+- **Playback / Save** (`false`) — timestamps are the instance counter and
+  `dt` is exactly 1. Replaying files as fast as the disk allows has no
+  meaningful wall-clock cadence to report, and pacing the PI by it would make
+  the integral term depend on disk speed.
+
+# Region masks
+
+Masks cannot be built until the first image reveals the geometry, so they are
+built on the first instance and reused. They are *not* rebuilt when the ROI
+set changes mid-run: the series vectors downstream are sized to match the
+mask count at START, and growing one without the other would misalign every
+subsequent sample.
+
+Must be called from within the caller's own `try/catch/finally` so that path
+validation failures and cleanup (closing `ch`, clearing `running[]`) are
+handled by the specific mode wrapper.
 """
 function run_acquisition_loop!(
         ch::Channel{AcquisitionSample},
         running::Threads.Atomic{Bool},
         layout::LayoutSettings,
         controller::ControllerSettings,
-        next_file!::Function,
+        next_instance!::Function,
         emit!::Function;
-        initial_guess::Vector{Float64},
         protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable},
-        use_partial_fit::Bool
+        rois::Vector{RoiCoordinates},
+        use_spatial_masks::Bool,
+        use_wall_clock::Bool,
+        channel_numbers::Vector{Int},
+        preview_enabled::Bool = true
     )
-    timestamps = 0.0
     n = UInt32(0)
-    partial_fit_period = 10
-    partial_fit_enabled = use_partial_fit && length(initial_guess) in (3, 5)
+    timestamps = 0.0
 
-    if use_partial_fit && !partial_fit_enabled
-        @warn "Partial fit mode is only supported for 1- and 2-lifetime fits (3 or 5 parameters); falling back to full fits."
-    end
+    # PI setpoint fallback used when no protocol is active, in ratio units.
+    fallback_setpoint = 1.0
 
-    # PID setpoint fallback used when no protocol is active.
-    fallback_setpoint_ns = 4.0
+    pid1 = PidChannelState()
+    pid2 = PidChannelState()
 
-    # Captured once, not per-iteration: RuntimeContext is mutable and RUNTIME[]
-    # always returns the same object, so this stays live if init_irf_runtime!()
-    # reloads the IRF mid-run — while letting the compiler specialize the loop
-    # body on ctx's concrete field types instead of re-reading an untyped global.
-    ctx = RUNTIME[]
-
-    state1 = ChannelFitState(initial_guess)
-    state2 = ChannelFitState(initial_guess)
-    has_channel2 = false
-    channel_count_known = false
+    readers = nothing
+    masks = RegionMask[]
+    start_time_s = NaN
+    previous_timestamp = 0.0
+    last_preview_s = -Inf
 
     while running[]
-        filepath = next_file!(n)
-        if filepath === nothing
+        instance = next_instance!(n)
+        if instance === nothing
             break
         end
 
-        vector1, vector2, histogram_resolution, frame_time = read_sdt_frame(filepath)
-
-        # Decided once, from the first file of this run; every later file is
-        # assumed to have the same channel count (per acquisition invariant).
-        if !channel_count_known
-            has_channel2 = vector2 !== nothing
-            channel_count_known = true
+        if readers === nothing
+            readers = make_channel_readers(instance, MAX_FRAME_BUFFER_DEPTH)
+            masks = build_region_masks(rois, readers[1].buffer.width, readers[1].buffer.height;
+                                       use_spatial_masks=use_spatial_masks)
+            @info "Acquisition geometry resolved" size=(readers[1].buffer.width, readers[1].buffer.height) channels=length(readers) regions=length(masks) spatial_masks=use_spatial_masks
         end
 
-        timestamps += frame_time
+        length(instance.paths) == length(readers) ||
+            error("Instance $(instance.instance_index) has $(length(instance.paths)) channels, expected $(length(readers))")
+
+        window = 1
+        for (c, reader) in enumerate(readers)
+            BigTiffFile.read_frame!(reader.pixels, instance.paths[c])
+            window = push_frame!(reader.buffer, reader.pixels, layout.binning)
+        end
+
+        # Time base. Wall-clock timestamps are measured from the first
+        # processed instance rather than from START, so a Realtime run that
+        # waited minutes for its session folder still begins its x-axis at 0.
+        now_s = time()
+        if use_wall_clock
+            isnan(start_time_s) && (start_time_s = now_s)
+            timestamps = now_s - start_time_s
+        else
+            timestamps = Float64(n) + 1.0
+        end
+        dt = max(timestamps - previous_timestamp, eps(Float64))
+        previous_timestamp = timestamps
 
         current_protocol = resolve_protocol_config(protocol)
         protocol_active = current_protocol !== nothing && current_protocol.active
-        setpoint_ns = protocol_active ? protocol_setpoint_at(current_protocol, timestamps) : fallback_setpoint_ns
+        setpoint = protocol_active ? protocol_setpoint_at(current_protocol, timestamps) : fallback_setpoint
 
-        # Distinct from setpoint_ns: PID control keeps regulating toward the
-        # fallback setpoint even without an active protocol, but the plotted
-        # series/highlight should only reflect a genuine protocol schedule —
-        # otherwise the Lifetime plot shows a spurious line and vspan at the
-        # fallback value whenever the protocol is off.
-        plot_setpoint_ns = protocol_active ? setpoint_ns : NaN
+        # Distinct from `setpoint`: PI control keeps regulating toward the
+        # fallback even without an active protocol, but the plotted series and
+        # highlight should only reflect a genuine schedule — otherwise the
+        # Ratio plot shows a spurious line and vspan whenever the protocol is
+        # off.
+        plot_setpoint = protocol_active ? setpoint : NaN
 
-        frame1, command1 = process_frame!(
-            state1, vector1, histogram_resolution, n, layout, ctx,
-            partial_fit_enabled, partial_fit_period, setpoint_ns, frame_time,
-            controller.P1, controller.I1, controller.ch1_inv, controller.ch1_on
-        )
+        regions = reduce_regions(readers, masks, window, layout.ratio_combination, channel_numbers)
 
-        if has_channel2
-            frame2, command2 = process_frame!(
-                state2, vector2, histogram_resolution, n, layout, ctx,
-                partial_fit_enabled, partial_fit_period, setpoint_ns, frame_time,
-                controller.P2, controller.I2, controller.ch2_inv, controller.ch2_on
-            )
-        else
-            # No second SDT channel: controller 2's output still tracks
-            # channel 1's lifetime error (its own gains applied to channel
-            # 1's error dynamics), exactly matching pre-two-channel behavior.
-            frame2 = ChannelFrame()
-            command2 = pid_command_from_state(state1, setpoint_ns, controller.P2, controller.I2, controller.ch2_inv, controller.ch2_on)
+        # Both controllers regulate on the same ratio, with their own gains.
+        # In spatial-mask mode several regions are produced per instance and
+        # the first is the one the hardware loop follows — there is only one
+        # physical output pair, so it cannot track all of them at once.
+        control_ratio = isempty(regions) ? NaN : regions[1].ratio
+        smooth_level = series_smooth_level(layout)
+
+        update_pid_error!(pid1, control_ratio, setpoint, dt, smooth_level)
+        update_pid_error!(pid2, control_ratio, setpoint, dt, smooth_level)
+
+        command1 = pid_command_from_state(pid1, setpoint, controller.P1, controller.I1, controller.ch1_inv, controller.ch1_on)
+        command2 = pid_command_from_state(pid2, setpoint, controller.P2, controller.I2, controller.ch2_inv, controller.ch2_on)
+
+        preview = nothing
+        if preview_enabled && (now_s - last_preview_s) >= PREVIEW_MIN_INTERVAL_S
+            preview = build_preview(readers, window, layout.ratio_combination, channel_numbers)
+            last_preview_s = now_s
         end
 
-        # UInt32(1), not the literal 1 (Int64): n += 1 would silently
-        # promote n to Int64 after the first frame (mixed UInt32/Int64
-        # addition promotes to Int64), which broke dispatch to
-        # process_frame!'s strictly-typed n::UInt32 parameter —
-        # caught by an actual `start_playback` run, not the syntax/type
-        # checks above.
+        # UInt32(1), not the literal 1 (Int64): mixed UInt32/Int64 addition
+        # promotes to Int64, which would break dispatch on the strictly-typed
+        # UInt32 frame counter downstream.
         n += UInt32(1)
 
         if !(isopen(ch) && running[])
@@ -564,10 +783,11 @@ function run_acquisition_loop!(
         end
 
         sample = AcquisitionSample(
-            frame1, frame2,
-            command1, command2, timestamps, plot_setpoint_ns, n, String(filepath),
-            parse_file_sequence_number(filepath), source_file_time(filepath)
+            regions, preview, command1, command2, timestamps, plot_setpoint,
+            n, instance.instance_index, copy(instance.paths),
+            copy(instance.sequence_numbers), instance.file_time
         )
+
         if !emit!(sample, n)
             break
         end
@@ -583,54 +803,56 @@ end
 """
     start_playback(ch, running, layout, controller; kwargs...)
 
-Worker task for Playback mode: round-robins over all `.sdt` files in
-`get_data_root_path()` on a fixed-frequency schedule (`target_frequency`).
+Worker task for Playback mode: round-robins over every complete instance in
+the selected acquisition folder on a fixed-frequency schedule
+(`target_frequency`).
+
 `target_frequency` is a live `Threads.Atomic{Float64}` (typically
-`app_run.target_frequency`), re-read every cycle rather than captured once,
-so editing the target-frequency textbox (GUI.jl/handlers.jl) re-paces the
-schedule immediately, mid-run. See `run_acquisition_loop!` for the shared
-fitting/binning/PID body.
+`app_run.target_frequency`), re-read every cycle rather than captured once, so
+editing the target-frequency textbox (GUI.jl/handlers.jl) re-paces the
+schedule immediately, mid-run.
+
+Timestamps are instance indices, not wall-clock seconds — see
+`run_acquisition_loop!`.
 """
 function start_playback(
         ch::Channel{AcquisitionSample},
         running::Threads.Atomic{Bool},
         layout::LayoutSettings,
         controller::ControllerSettings;
-        initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
         protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable} = nothing,
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
+        rois::Vector{RoiCoordinates} = RoiCoordinates[],
+        use_spatial_masks::Bool = true,
+        preview_enabled::Bool = true,
         dt::Float64 = 0.0001,
-        use_partial_fit::Bool = true,
         target_frequency::Threads.Atomic{Float64} = Threads.Atomic{Float64}(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ)
     )
     try
         @info "Playback worker started on thread $(threadid())"
 
-        @info "Checking IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
-        if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
-            @error "IRF not loaded - cannot start data processing. Please load an IRF file first."
-            @error "IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
-            return nothing
-        end
-
         path = get_data_root_path()
-        if !isdir(path)
-            @error "Data folder not found: $path"
+        layout_dirs = resolve_channel_layout(path)
+        if layout_dirs === nothing
+            @error "No Bliq VMS channel folders found under $path"
             return nothing
         end
 
-        all_entries = readdir(path; join=true)
-        filepaths = sort(filter(f -> isfile(f) && endswith(lowercase(f), ".sdt"), all_entries))
-        nb_files = length(filepaths)
+        instances = group_instances(layout_dirs)
+        nb_instances = length(instances)
 
-        if nb_files == 0
-            @error "No .sdt files found in $path"
+        if nb_instances == 0
+            @error "No complete frame instances found under $(layout_dirs.root)"
             return nothing
         end
+
+        channel_numbers_for_run = layout_dirs.channel_numbers
+
+        @info "Playback ready" instances=nb_instances channels=layout_dirs.channel_names numbering=layout_dirs.numbering
 
         next_analysis_ns = Ref(time_ns())
 
-        next_file! = function (n)
+        next_instance! = function (n)
             while running[]
                 # Re-read every cycle (not captured once) so a live edit to
                 # the target-frequency textbox re-paces the schedule
@@ -656,7 +878,7 @@ function start_playback(
                     next_analysis_ns[] = now_ns + target_period_ns
                 end
 
-                return filepaths[mod1(n+1, nb_files)]
+                return instances[mod1(Int(n) + 1, nb_instances)]
             end
             return nothing
         end
@@ -671,10 +893,11 @@ function start_playback(
             return true
         end
 
-        run_acquisition_loop!(ch, running, layout, controller, next_file!, emit!;
-                               initial_guess=initial_guess, protocol=protocol, use_partial_fit=use_partial_fit)
+        run_acquisition_loop!(ch, running, layout, controller, next_instance!, emit!;
+                              protocol=protocol, rois=rois, use_spatial_masks=use_spatial_masks,
+                              use_wall_clock=false, channel_numbers=channel_numbers_for_run, preview_enabled=preview_enabled)
     catch e
-        @error "Playback worker error" exception=e
+        @error "Playback worker error" exception=(e, catch_backtrace())
         rethrow()
     finally
         running[] = false
@@ -696,59 +919,70 @@ end
 """
     start_realtime(ch, running, layout, controller; kwargs...)
 
-Worker task for Real-time mode: always processes the newest available
-`.sdt` file in `get_data_root_path()`, waiting (polling every
-`poll_interval_s`) if no new file has appeared yet. See
-`run_acquisition_loop!` for the shared fitting/binning/PID body.
+Worker task for Realtime mode: waits for a new acquisition session to appear
+under the selected folder, then processes instances as the acquisition writes
+them.
+
+Unlike Playback, this does not fail when the folder holds no data yet — at
+START the session directory generally does not exist, because the acquisition
+software creates it when *it* starts. `wait_for_session_layout`
+(tiff_source.jl) blocks until one appears, which is what lets the user arm
+this app before triggering the microscope.
+
+Instances are assembled by `InstanceCollector`, which holds a partially
+arrived instance until every channel has contributed and abandons it once it
+is overdue by a multiple of the observed cadence.
+
+Timestamps are wall-clock seconds since the first processed instance.
 """
 function start_realtime(
         ch::Channel{AcquisitionSample},
         running::Threads.Atomic{Bool},
         layout::LayoutSettings,
         controller::ControllerSettings;
-        initial_guess::Vector{Float64} = [3.0, 0.5, 0.5, 0.0, 5.0e-5],
         protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable} = nothing,
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
+        rois::Vector{RoiCoordinates} = RoiCoordinates[],
+        use_spatial_masks::Bool = true,
+        preview_enabled::Bool = true,
+        nominal_period_s::Float64 = NaN,
         dt::Float64 = 0.0001,
-        poll_interval_s::Float64 = 0.1
+        poll_interval_s::Float64 = 0.05
     )
     try
         @info "Real-time worker started on thread $(threadid())"
 
-        @info "Checking IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
-        if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
-            @error "IRF not loaded - cannot start data processing. Please load an IRF file first."
-            @error "IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
+        path = get_data_root_path()
+        if !isdir(path)
+            @error "Data folder not found: $path"
             return nothing
         end
 
-        path = get_data_root_path()
-        @info "Real-time mode active: waiting for new .sdt files in $path"
+        known = existing_session_dirs(path)
+        channel_layout = wait_for_session_layout(path, running; poll_interval_s=0.25, known_before=known)
 
-        last_dir_mtime = Ref(0.0)
-        next_scan_at = Ref(0.0)
-
-        # Build the initial queue sorted, so the oldest file is processed
-        # first — the first file shown in the plots should be the first
-        # file read, not whichever file happens to be newest when the mode
-        # starts on a folder that already has a backlog.
-        initial_files = sort(filter(f -> isfile(f) && endswith(lowercase(f), ".sdt"), readdir(path; join=true)))
-        pending_queue = Ref(initial_files)
-        known_sdt_files = Ref(Set{String}(initial_files))
-
-        if isempty(pending_queue[])
-            @warn "No .sdt files found yet in real-time folder" path=path
+        if channel_layout === nothing
+            @info "Stopped before an acquisition session appeared"
+            return nothing
         end
 
-        next_file! = function (n)
+        channel_numbers_for_run = channel_layout.channel_numbers
+
+        @info "Real-time mode active" root=channel_layout.root channels=channel_layout.channel_names numbering=channel_layout.numbering
+
+        collector = InstanceCollector(channel_layout; nominal_period_s=nominal_period_s)
+        pending = FrameInstance[]
+        next_scan_at = Ref(0.0)
+
+        next_instance! = function (n)
             while running[]
                 if paused !== nothing && paused[]
                     sleep(min(dt, 0.05))
                     continue
                 end
 
-                if !isempty(pending_queue[])
-                    return popfirst!(pending_queue[])
+                if !isempty(pending)
+                    return popfirst!(pending)
                 end
 
                 now_t = time()
@@ -758,39 +992,10 @@ function start_realtime(
                 end
                 next_scan_at[] = now_t + poll_interval_s
 
-                dir_stat = try
-                    stat(path)
-                catch
-                    nothing
-                end
+                scan_new_files!(collector, now_t)
+                append!(pending, take_ready_instances!(collector, now_t))
 
-                if dir_stat === nothing
-                    sleep(poll_interval_s)
-                    continue
-                end
-
-                current_dir_mtime = dir_stat.mtime
-
-                if current_dir_mtime != last_dir_mtime[]
-                    last_dir_mtime[] = current_dir_mtime
-
-                    new_files = String[]
-                    for entry in readdir(path; join=true)
-                        if isfile(entry) && endswith(lowercase(entry), ".sdt") && !(entry in known_sdt_files[])
-                            push!(new_files, entry)
-                            push!(known_sdt_files[], entry)
-                        end
-                    end
-
-                    if !isempty(new_files)
-                        append!(pending_queue[], sort(new_files))
-                    end
-                end
-
-                if isempty(pending_queue[])
-                    sleep(poll_interval_s)
-                    continue
-                end
+                isempty(pending) && sleep(poll_interval_s)
             end
             return nothing
         end
@@ -806,10 +1011,11 @@ function start_realtime(
             return true
         end
 
-        run_acquisition_loop!(ch, running, layout, controller, next_file!, emit!;
-                               initial_guess=initial_guess, protocol=protocol, use_partial_fit=false)
+        run_acquisition_loop!(ch, running, layout, controller, next_instance!, emit!;
+                              protocol=protocol, rois=rois, use_spatial_masks=use_spatial_masks,
+                              use_wall_clock=true, channel_numbers=channel_numbers_for_run, preview_enabled=preview_enabled)
     catch e
-        @error "Real-time worker error" exception=e
+        @error "Real-time worker error" exception=(e, catch_backtrace())
         rethrow()
     finally
         running[] = false
@@ -831,47 +1037,46 @@ end
 """
     start_save(ch, running, layout, controller; kwargs...)
 
-Worker task for Save mode: processes all `.sdt` files in
-`get_data_root_path()` once, reporting progress via `progress_cb(pct)`, then
-stops naturally once every file has been processed. See
-`run_acquisition_loop!` for the shared fitting/binning/PID body.
+Worker task for Save mode: processes every complete instance in the selected
+folder once, reporting progress via `progress_cb(pct)`, then stops naturally.
+
+Shares Playback's instance-index time base — the run is a batch reduction of
+files already on disk, so there is no live cadence to reflect.
 """
 function start_save(
         ch::Channel{AcquisitionSample},
         running::Threads.Atomic{Bool},
         layout::LayoutSettings,
         controller::ControllerSettings;
-        initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
         protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable} = nothing,
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
+        rois::Vector{RoiCoordinates} = RoiCoordinates[],
+        use_spatial_masks::Bool = true,
+        preview_enabled::Bool = false,
         dt::Float64 = 0.0000001,
-        use_partial_fit::Bool = true,
         progress_cb::Union{Nothing, Function} = nothing
     )
     try
         @info "Save worker started on thread $(threadid())"
 
-        @info "Checking IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
-        if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
-            @error "IRF not loaded - cannot start data processing. Please load an IRF file first."
-            @error "IRF status: irf=$(RUNTIME[].irf !== nothing), tcspc_window_size=$(RUNTIME[].tcspc_window_size !== nothing)"
-            return nothing
-        end
-
         path = get_data_root_path()
-        if !isdir(path)
-            @error "Data folder not found: $path"
+        layout_dirs = resolve_channel_layout(path)
+        if layout_dirs === nothing
+            @error "No Bliq VMS channel folders found under $path"
             return nothing
         end
 
-        all_entries = readdir(path; join=true)
-        filepaths = sort(filter(f -> isfile(f) && endswith(lowercase(f), ".sdt"), all_entries))
-        nb_files = length(filepaths)
+        instances = group_instances(layout_dirs)
+        nb_instances = length(instances)
 
-        if nb_files == 0
-            @error "No .sdt files found in $path"
+        if nb_instances == 0
+            @error "No complete frame instances found under $(layout_dirs.root)"
             return nothing
         end
+
+        channel_numbers_for_run = layout_dirs.channel_numbers
+
+        @info "Save ready" instances=nb_instances channels=layout_dirs.channel_names numbering=layout_dirs.numbering
 
         last_progress_pct = Ref(-1)
 
@@ -885,27 +1090,21 @@ function start_save(
             end
         end
 
-        file_idx = Ref(0)
+        instance_idx = Ref(0)
 
-        next_file! = function (n)
-            if !running[]
-                return nothing
-            end
+        next_instance! = function (n)
+            running[] || return nothing
 
             while running[] && paused !== nothing && paused[]
                 sleep(min(dt, 0.05))
             end
 
-            if !running[]
-                return nothing
-            end
+            running[] || return nothing
 
-            file_idx[] += 1
-            if file_idx[] > nb_files
-                return nothing
-            end
+            instance_idx[] += 1
+            instance_idx[] > nb_instances && return nothing
 
-            return filepaths[file_idx[]]
+            return instances[instance_idx[]]
         end
 
         emit! = function (sample, n)
@@ -917,7 +1116,7 @@ function start_save(
             end
 
             if progress_cb !== nothing
-                progress_pct = clamp(floor(Int, (Int(n) * 100) / nb_files), 0, 100)
+                progress_pct = clamp(floor(Int, (Int(n) * 100) / nb_instances), 0, 100)
                 if progress_pct > last_progress_pct[]
                     for pct in (last_progress_pct[] + 1):progress_pct
                         try
@@ -932,17 +1131,16 @@ function start_save(
                 end
             end
 
-            if dt > 0.0
-                sleep(dt)
-            end
+            dt > 0.0 && sleep(dt)
 
             return true
         end
 
-        run_acquisition_loop!(ch, running, layout, controller, next_file!, emit!;
-                               initial_guess=initial_guess, protocol=protocol, use_partial_fit=use_partial_fit)
+        run_acquisition_loop!(ch, running, layout, controller, next_instance!, emit!;
+                              protocol=protocol, rois=rois, use_spatial_masks=use_spatial_masks,
+                              use_wall_clock=false, channel_numbers=channel_numbers_for_run, preview_enabled=preview_enabled)
     catch e
-        @error "Save worker error" exception=e
+        @error "Save worker error" exception=(e, catch_backtrace())
         rethrow()
     finally
         running[] = false

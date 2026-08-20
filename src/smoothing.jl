@@ -1,17 +1,24 @@
 """
 smoothing.jl
 
-Shared lifetime smoothing: a constant-velocity (2-state) Kalman filter
+Shared series smoothing: a constant-velocity (2-state) Kalman filter
 (`kalman_update!`, operating on a `KalmanState`, data_types.jl) used both as
-the plot-facing smoothing filter (`RoiChannelSeries`'s `_smooth` series,
-runtime.jl) and as the PID observer (`ChannelFitState.pid_kalman`,
-acquisition.jl) that replaced the PID's derivative term — see
-`process_frame!`'s docstring for why. Independent `KalmanState`
-instances in each case (per (channel, ROI, metric) for plots, per
-(channel, metric) for the PID observer): same filter, not shared state.
+the plot-facing smoothing filter (the `_smooth` series on `RoiSeries` and
+`RoiChannelIntensity`, runtime.jl) and as the PI observer
+(`PidChannelState.kalman`, acquisition.jl) that replaced the controller's
+derivative term — see `PidChannelState`'s docstring for why. Independent
+`KalmanState` instances in each case (per (region, metric) and per
+(region, channel) for plots, per controller output for the PI observer):
+same filter, not shared state.
 """
 
-function lifetime_smooth_level(layout::LayoutSettings)::Int
+"""
+    series_smooth_level(layout)::Int
+
+The smoothing level (0-10) the Layout panel's slider is set to, clamped to
+the range `kalman_update!` defines behavior for.
+"""
+function series_smooth_level(layout::LayoutSettings)::Int
     return clamp(layout.smoothing, 0, 10)
 end
 
@@ -191,7 +198,7 @@ function recompute_smooth_series!(app, source::Observable{Vector{Float64}}, targ
     n_timestamps = length(timestamps_values)
     n_common = min(n_source, n_timestamps)
 
-    level = lifetime_smooth_level(app.layout)
+    level = series_smooth_level(app.layout)
 
     # Recomputing from index 1 on every smoothing-level change (a UI-callback
     # side effect of moving the slider, running synchronously on the GUI
@@ -266,7 +273,7 @@ function append_smooth_value!(app, source::Observable{Vector{Float64}}, target::
         return nothing
     end
 
-    level = lifetime_smooth_level(app.layout)
+    level = series_smooth_level(app.layout)
     ts = timestamps[]
     dt = (idx > 1 && idx <= length(ts)) ? ts[idx] - ts[idx - 1] : NaN
 
@@ -277,21 +284,29 @@ function append_smooth_value!(app, source::Observable{Vector{Float64}}, target::
 end
 
 """
-    recompute_roi_smooth!(app, series::RoiChannelSeries)
+    recompute_roi_smooth!(app, series::RoiSeries)
 
-Recompute one ROI's smoothed photon-count, lifetime, and concentration
-series (see `recompute_smooth_series!`) and notify their observables. Uses
-`series`' own `timestamps` (each ROI has its own, since it only receives
-every Nth frame — see `RoiChannelSeries` in data_types.jl), not a shared
-app-wide one. Used when the smoothing level changes (handlers_layout.jl),
-looping every `roi_channel_series(app_run)`.
+Recompute every smoothed series belonging to one region — its ratio, its
+concentration, and each channel's mean intensity — and notify their
+observables.
+
+Uses `series`' own `timestamps`, not a shared app-wide one: in round-robin
+mode each region only receives every Nth instance, so the regions do not
+share an x-axis (see `RoiSeries` in data_types.jl).
+
+Used when the smoothing level changes (handlers_layout.jl), looping over
+every `roi_series(app_run)`.
 """
-function recompute_roi_smooth!(app, series::RoiChannelSeries)
-    recompute_smooth_series!(app, series.photons, series.photons_smooth, series.timestamps, series.photons_kalman)
-    notify(series.photons_smooth)
-    recompute_smooth_series!(app, series.lifetime, series.lifetime_smooth, series.timestamps, series.lifetime_kalman)
-    notify(series.lifetime_smooth)
+function recompute_roi_smooth!(app, series::RoiSeries)
+    recompute_smooth_series!(app, series.ratio, series.ratio_smooth, series.timestamps, series.ratio_kalman)
+    notify(series.ratio_smooth)
     recompute_smooth_series!(app, series.concentration, series.concentration_smooth, series.timestamps, series.concentration_kalman)
     notify(series.concentration_smooth)
+
+    for channel in series.channels
+        recompute_smooth_series!(app, channel.values, channel.smooth, series.timestamps, channel.kalman)
+        notify(channel.smooth)
+    end
+
     return nothing
 end
