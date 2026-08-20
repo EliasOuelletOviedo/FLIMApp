@@ -53,7 +53,7 @@ roi_voltage_calibration_size = 1024
 # connect_to_port's read timeout (serial.jl) — surfacing as
 # LibSerialPort.Timeout() and aborting the whole upload on one slow reply.
 # Raise if timeouts persist; lower if uploads feel unnecessarily slow.
-roi_trigger_command_delay_s = 0.000001
+roi_trigger_command_delay_s = 1e-6
 
 # How many times build_and_send_roi_trigger_buffer! restarts the *entire*
 # build-and-upload sequence (buffer rebuild, full point re-upload, arming
