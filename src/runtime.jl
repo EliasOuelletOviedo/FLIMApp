@@ -348,6 +348,21 @@ disagree about what a sample's `regions` vector means.
 use_spatial_roi_masks(app)::Bool = !(app.roi.active && app.protocol.active)
 
 """
+    sync_preview_enabled!(app, app_run)
+
+Set `app_run.preview_enabled` from whether either plot slot currently shows the
+Image plot.
+
+Called at START and from the Layout panel whenever a plot selection changes
+(handlers_layout.jl), so the worker stops paying for previews the moment
+nothing is displaying them and resumes the moment something is.
+"""
+function sync_preview_enabled!(app, app_run)
+    app_run.preview_enabled[] = app.layout.plot1 == PLOT_IMAGE || app.layout.plot2 == PLOT_IMAGE
+    return nothing
+end
+
+"""
     rebuild_roi_series!(app, app_run; channel_count=app_run.channel_count)
 
 Resize `app_run.rois_series` to match the current number of drawn ROIs
@@ -424,7 +439,7 @@ mutate concurrently from multiple threads.
 function spawn_acquisition_worker!(app_run, selected_mode, layout, controller, protocol_config;
                                    rois::Vector{RoiCoordinates}=RoiCoordinates[],
                                    use_spatial_masks::Bool=true,
-                                   preview_enabled::Bool=true,
+                                   preview_enabled::Threads.Atomic{Bool}=Threads.Atomic{Bool}(true),
                                    nominal_period_s::Float64=NaN)
     shared = (
         protocol = protocol_config,
@@ -447,9 +462,13 @@ function spawn_acquisition_worker!(app_run, selected_mode, layout, controller, p
             return nothing
         end
 
+        # Save runs the whole instance list as fast as the disk allows and
+        # publishes no live updates, so previews would be built and discarded.
+        # Its own Atomic, not the shared one, so disabling them here cannot
+        # switch them off for a plot that is displaying them.
         app_run.worker_task = Threads.@spawn start_save(
             app_run.channel, app_run.running, layout, controller;
-            shared..., preview_enabled=false, progress_cb=save_progress_cb
+            shared..., preview_enabled=Threads.Atomic{Bool}(false), progress_cb=save_progress_cb
         )
     else
         if selected_mode != "Playback"
@@ -640,13 +659,15 @@ function start_pressed(app, app_run, blocks)
         sync_runtime_protocol!(app, app_run)
         protocol_config = app_run.protocol
 
-        # Only build previews when a plot is actually showing them.
-        preview_enabled = app.layout.plot1 == PLOT_IMAGE || app.layout.plot2 == PLOT_IMAGE
+        # Only build previews when a plot is actually showing one. The worker
+        # re-reads this every frame, and the Layout panel writes to it, so
+        # switching a slot to the Image plot mid-run takes effect at once.
+        sync_preview_enabled!(app, app_run)
 
         spawn_acquisition_worker!(app_run, selected_mode, app.layout, app.controller, protocol_config;
                                   rois=rois_snapshot,
                                   use_spatial_masks=use_spatial_masks,
-                                  preview_enabled=preview_enabled,
+                                  preview_enabled=app_run.preview_enabled,
                                   nominal_period_s=roi_scan_period_s(app.protocol))
 
         app_run.consumer_task = @async consumer_loop(app, app_run, blocks; rate=10,

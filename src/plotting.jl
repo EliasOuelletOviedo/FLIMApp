@@ -81,48 +81,192 @@ end
 # -----------------------------------------------------------------------------
 
 """
-    preview_matrix(preview, source) -> Matrix{Float32}
+    channel_composite(preview, toggles, channel_count) -> Union{Nothing, Matrix{RGBf}}
 
-Pull one displayable image out of a `FramePreview`: `source` is either a
-channel position or `:ratio` for the per-pixel ratio map.
+Composite the enabled channels of one `FramePreview` into a single RGB image,
+each channel tinted with its own plot color and added on top of black.
 
-Returns a 1x1 `NaN` matrix when there is nothing to show (no preview built
-yet, or a channel the acquisition does not provide). Makie renders `NaN` as
-empty space, so the plot stays blank rather than erroring or showing stale
-data at the wrong size.
+Additive mixing, the convention for multichannel fluorescence display: a pixel
+bright in channels 1 and 2 shows their two colors summed, so overlap is
+visible rather than hidden behind whichever channel happened to be drawn last.
+Components are clamped at 1, so saturated overlap goes white instead of
+wrapping.
+
+Each channel is normalized to *its own* maximum before tinting. Absolute
+comparability between channels is not the point here — the Mean intensity plot
+carries that — whereas an 8-bit acquisition with a mean around 9/255 would be
+nearly invisible under a shared scale.
+
+Returns `nothing` when there is nothing to draw: no preview yet, or no channel
+toggle enabled. That last case is deliberate — with every toggle off the image
+plot must go blank, not fall back to some default channel.
 """
-function preview_matrix(preview::Union{Nothing, FramePreview}, source)::Matrix{Float32}
-    preview === nothing && return fill(NaN32, 1, 1)
+function channel_composite(preview::Union{Nothing, FramePreview}, toggles, channel_count)::Union{Nothing, Matrix{RGBf}}
+    preview === nothing && return nothing
 
-    if source === :ratio
-        return preview.ratio_map
+    positions = [p for p in shown_channel_positions(toggles, channel_count)
+                 if p <= length(preview.channel_images)]
+    isempty(positions) && return nothing
+
+    reference = preview.channel_images[first(positions)]
+    isempty(reference) && return nothing
+
+    out = fill(RGBf(0.0f0, 0.0f0, 0.0f0), size(reference))
+
+    for position in positions
+        source = preview.channel_images[position]
+        size(source) == size(reference) || continue
+
+        peak = 0.0f0
+        @inbounds for v in source
+            isfinite(v) && v > peak && (peak = v)
+        end
+        peak > 0 || continue
+
+        tint = RGBf(plot_channel_color(position))
+
+        @inbounds for i in eachindex(out)
+            v = source[i]
+            isfinite(v) || continue
+            level = clamp(v / peak, 0.0f0, 1.0f0)
+            previous = out[i]
+            out[i] = RGBf(
+                min(1.0f0, previous.r + level * tint.r),
+                min(1.0f0, previous.g + level * tint.g),
+                min(1.0f0, previous.b + level * tint.b)
+            )
+        end
     end
 
-    position = Int(source)
-    (1 <= position <= length(preview.channel_images)) || return fill(NaN32, 1, 1)
-    return preview.channel_images[position]
+    return out
+end
+
+"""
+Axis attributes the Image plot overrides, paired with the value it wants.
+
+Every one of them is restored from `AXIS_PLOTS_ATTRS` when the slot switches
+back to a line plot (`apply_axis_style!` below), so the two plot families can
+share an axis without the image's chrome-free look leaking into the traces.
+
+- **`aspect`** — `DataAspect` keeps pixels square, so a 1024x512 frame is not
+  stretched to fill a wide axis.
+- **`yreversed`** — TIFF row 0 is the top of the image, while a Makie axis puts
+  y = 0 at the bottom. Without this the frame is displayed upside down
+  relative to the ROI popup, where the ROIs were drawn.
+- **spines, grids, ticks, tick labels** — an image has no meaningful axes to
+  annotate, and the gridlines sit on top of the data.
+- **`backgroundcolor`** — black, so unlit pixels read as unlit rather than as
+  the panel's grey.
+"""
+const IMAGE_AXIS_OVERRIDES = (
+    :aspect             => DataAspect(),
+    :yreversed          => true,
+    # `RGBAf`, not `:black`: the axis's `backgroundcolor` observable is typed
+    # `RGBA{Float32}`, and a Symbol has no conversion to it — assigning one
+    # throws rather than being interpreted as a named color.
+    :backgroundcolor    => RGBAf(0.0f0, 0.0f0, 0.0f0, 1.0f0),
+    :xgridvisible       => false,
+    :ygridvisible       => false,
+    :topspinevisible    => false,
+    :bottomspinevisible => false,
+    :leftspinevisible   => false,
+    :rightspinevisible  => false,
+    :xticksvisible      => false,
+    :yticksvisible      => false,
+    :xticklabelsvisible => false,
+    :yticklabelsvisible => false,
+    :xminorticksvisible => false,
+    :yminorticksvisible => false,
+)
+
+"""
+    apply_axis_style!(axis, plot_label)
+
+Put `axis` into image mode or back into line-plot mode, depending on what it
+is about to draw.
+
+Called from `render_plot!` on every re-render — including the ones triggered by
+switching plot type or toggling a channel — so the styling always matches the
+current selection rather than whatever the previous one left behind.
+"""
+function apply_axis_style!(axis, plot_label)
+    if plot_label == PLOT_IMAGE
+        for (attribute, value) in IMAGE_AXIS_OVERRIDES
+            getproperty(axis, attribute)[] = value
+        end
+    else
+        for (attribute, _) in IMAGE_AXIS_OVERRIDES
+            getproperty(axis, attribute)[] = AXIS_PLOTS_ATTRS[attribute]
+        end
+    end
+
+    return nothing
+end
+
+"""
+    fit_image_axis!(axis, app_run)
+
+Set `axis`'s limits to the current preview's pixel extent, so the frame is
+centered and fills the axis.
+
+Called both when the Image plot is first drawn and on every publish tick (via
+`autoscale_plot!`), because the preview's size is not known until the first
+frame arrives — and can change between runs, the acquisition writing 1024x512
+as readily as 1024x1024.
+
+`DataAspect` (see `IMAGE_AXIS_OVERRIDES`) then letterboxes the frame within
+whatever aspect ratio the axis widget happens to have, rather than stretching
+it to fit.
+"""
+function fit_image_axis!(axis, app_run)
+    preview = app_run.preview[]
+    preview === nothing && return nothing
+    isempty(preview.channel_images) && return nothing
+
+    width, height = size(first(preview.channel_images))
+    (width > 0 && height > 0) || return nothing
+
+    axis.limits[] = (0, width, 0, height)
+    return nothing
 end
 
 """
     draw_image_plot!(axis, app, app_run, toggles)
 
-Draw the most recent frame snapshot onto `axis` as a heatmap.
+Draw the most recent frame snapshot onto `axis` as an additive color composite
+of the enabled channels.
 
-Which image is shown follows the channel toggles: the *first* enabled channel
-is displayed, or the per-pixel ratio map when no channel toggle is on. An
-axis can only show one heatmap meaningfully — overlaying two would hide the
-lower one entirely — so unlike the line plots the toggles select here rather
-than accumulate.
+Unlike the FLIM Histogram plot this replaces, and unlike a heatmap of a single
+channel, the toggles here *accumulate*: every enabled channel contributes its
+own color to one image (see `channel_composite`). With no toggle enabled
+nothing is drawn at all.
 
-The heatmap is `lift`ed from `app_run.preview`, so it refreshes whenever the
-consumer publishes a new snapshot without the axis being rebuilt.
+The image is `lift`ed from `app_run.preview`, so it refreshes whenever the
+consumer publishes a new snapshot without the axis being rebuilt. The lift
+substitutes a 1x1 transparent pixel when there is nothing to show, since a
+Makie plot cannot carry `nothing` as its data — but the plot is only created
+in the first place when at least one channel is on.
 """
 function draw_image_plot!(axis, app, app_run, toggles)
-    shown = shown_channel_positions(toggles, app_run.channel_count)
-    source = isempty(shown) ? :ratio : first(shown)
+    positions = shown_channel_positions(toggles, app_run.channel_count)
+    isempty(positions) && return nothing
 
-    image_data = lift(p -> preview_matrix(p, source), app_run.preview)
-    heatmap!(axis, image_data; colormap=:viridis)
+    blank = fill(RGBAf(0.0f0, 0.0f0, 0.0f0, 0.0f0), 1, 1)
+
+    image_data = lift(app_run.preview) do preview
+        composite = channel_composite(preview, toggles, app_run.channel_count)
+        composite === nothing && return blank
+        return RGBAf.(composite)
+    end
+
+    # `image!` rather than `heatmap!`: the data is already RGB, and image!
+    # maps it onto the given extent without a colormap in between.
+    extents = lift(image_data) do img
+        return (0 .. max(size(img, 1), 1), 0 .. max(size(img, 2), 1))
+    end
+
+    image!(axis, lift(first, extents), lift(last, extents), image_data; interpolate=false)
+    fit_image_axis!(axis, app_run)
 
     return nothing
 end
@@ -303,6 +447,12 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol)
 
     empty!(axis)
 
+    # Before drawing, not after: the Image plot wants a chrome-free, square,
+    # y-flipped axis on a black ground, and every other plot wants the styling
+    # AXIS_PLOTS_ATTRS gave it. Switching either way has to restore what the
+    # previous selection changed.
+    apply_axis_style!(axis, selection)
+
     if selection == PLOT_COMMAND
         add_setpoint_highlight!(axis, app_run)
 
@@ -321,9 +471,9 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol)
     end
 
     if selection == PLOT_IMAGE
-        # A heatmap has no time axis to pin, and the rolling-window logic below
-        # would squash it. Makie's own limits already fit the image.
-        autolimits!(axis)
+        # An image has no time axis to pin, and the rolling-window logic below
+        # would squash it. Its limits are the frame's pixel extent instead.
+        fit_image_axis!(axis, app_run)
     elseif !app_run.running[]
         autolimits!(axis)
         lim = axis.finallimits[]
@@ -620,7 +770,10 @@ end
 
 function autoscale_plot!(app, app_run, axis, plot_label, toggles)
     if plot_label == PLOT_IMAGE
-        autoscale_values!(axis)
+        # Re-fit rather than autoscale: the preview's size is unknown until the
+        # first frame arrives, so the limits set at draw time may predate any
+        # image existing at all.
+        fit_image_axis!(axis, app_run)
         return nothing
     end
 

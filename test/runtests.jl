@@ -1,5 +1,6 @@
 using Test
 using TIFFApp
+using GLMakie
 using TIFFApp: RegionFrame, RoiSeries, RoiChannelIntensity, AcquisitionSample,
                ProtocolSettings, LayoutSettings, ControllerSettings, RoiSettings,
                ConsoleSettings, RoiCoordinates, RegionMask, FramePreview
@@ -281,6 +282,84 @@ end
     @test TIFFApp.region_mean(image, full, 1) ≈ sum(1:16) / 16
     # Binning divisor: the same pixels summed over 4 frames average back down
     @test TIFFApp.region_mean(image, full, 4) ≈ sum(1:16) / 64
+end
+
+@testset "image plot composite and axis styling" begin
+    W, H = 4, 2
+    left  = Float32[x <= 2 ? 100 : 0 for x in 1:W, y in 1:H]
+    right = Float32[x >= 3 ? 50  : 0 for x in 1:W, y in 1:H]
+    dark  = zeros(Float32, W, H)
+    preview = FramePreview([left, right, dark], zeros(Float32, W, H), 1)
+
+    # Nothing enabled -> nothing drawn. This is the point: with every toggle
+    # off the image plot must go blank rather than fall back to a default
+    # channel.
+    @test TIFFApp.channel_composite(preview, (false, false, false), 3) === nothing
+    @test TIFFApp.channel_composite(nothing, (true, true, true), 3) === nothing
+    # A channel toggled on but not written by this acquisition
+    @test TIFFApp.channel_composite(FramePreview([left, right], zeros(Float32, W, H), 1),
+                                    (false, false, true), 2) === nothing
+
+    c1 = RGBf(TIFFApp.PLOT_COLOR_CH1)
+    c2 = RGBf(TIFFApp.PLOT_COLOR_CH2)
+
+    # Each channel is tinted with its own plot color where it has signal, and
+    # black where it does not.
+    single = TIFFApp.channel_composite(preview, (true, false, false), 3)
+    @test single[1, 1] ≈ c1
+    @test single[4, 1] == RGBf(0, 0, 0)
+
+    both = TIFFApp.channel_composite(preview, (true, true, false), 3)
+    @test both[1, 1] ≈ c1
+    @test both[4, 1] ≈ c2
+
+    # Overlap adds, so a pixel bright in two channels shows both colors summed
+    # rather than whichever was drawn last.
+    bright = fill(100.0f0, W, H)
+    overlap = TIFFApp.channel_composite(FramePreview([bright, bright, dark], zeros(Float32, W, H), 1),
+                                        (true, true, false), 3)
+    @test overlap[1, 1] ≈ RGBf(min(1, c1.r + c2.r), min(1, c1.g + c2.g), min(1, c1.b + c2.b))
+
+    # An all-zero channel contributes nothing and must not divide by its (zero)
+    # peak.
+    @test all(==(RGBf(0, 0, 0)), TIFFApp.channel_composite(preview, (false, false, true), 3))
+
+    # Axis styling round-trips: the Image plot strips the chrome, and switching
+    # back to any line plot restores every attribute it touched.
+    GLMakie.activate!(visible = false)
+    figure = Figure()
+    axis = Axis(figure[1, 1]; TIFFApp.AXIS_PLOTS_ATTRS...)
+
+    TIFFApp.apply_axis_style!(axis, TIFFApp.PLOT_IMAGE)
+    @test axis.aspect[] isa DataAspect
+    @test axis.yreversed[] == true
+    @test axis.xgridvisible[] == false
+    @test axis.ygridvisible[] == false
+    @test axis.leftspinevisible[] == false
+    @test axis.xticklabelsvisible[] == false
+    @test RGBf(axis.backgroundcolor[]) == RGBf(0, 0, 0)
+
+    TIFFApp.apply_axis_style!(axis, TIFFApp.PLOT_RATIO)
+    for (attribute, _) in TIFFApp.IMAGE_AXIS_OVERRIDES
+        expected = TIFFApp.AXIS_PLOTS_ATTRS[attribute]
+        got = getproperty(axis, attribute)[]
+        # backgroundcolor is stored as RGBA, so compare as color rather than
+        # by type.
+        if attribute === :backgroundcolor
+            @test RGBf(got) == RGBf(expected)
+        else
+            @test string(got) == string(expected)
+        end
+    end
+
+    # Limits follow the frame's pixel extent, so a non-square image is fitted
+    # rather than stretched.
+    app_run = AppRun()
+    app_run.channel_count = 3
+    app_run.preview[] = preview
+    TIFFApp.apply_axis_style!(axis, TIFFApp.PLOT_IMAGE)
+    TIFFApp.fit_image_axis!(axis, app_run)
+    @test axis.limits[] == (0, W, 0, H)
 end
 
 @testset "image frame buffer (temporal binning)" begin

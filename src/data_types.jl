@@ -483,6 +483,13 @@ during execution. It is NOT serialized.
   handlers_protocol.jl) is on; a single-element vector — reproducing the
   original un-split single-series behavior — otherwise, regardless of how
   many ROIs are drawn
+- `preview_enabled::Threads.Atomic{Bool}`: whether the worker should build
+  previews at all. An `Atomic`, not an `Observable`, because the worker reads
+  it every frame from its own thread; the Layout panel writes to it when a
+  plot slot switches to or from the Image plot, so selecting that plot
+  mid-run starts producing frames immediately instead of only on the next
+  run. Building a preview costs a strided pass over every channel, so it is
+  skipped entirely whenever no plot is showing one
 - `channel_count::Int`: how many channels the current acquisition writes,
   resolved from the `C<n>` folder count at START (tiff_source.jl) and used to
   size every `RoiSeries.channels`. Defaults to 2 before a run has resolved a
@@ -524,6 +531,7 @@ mutable struct AppRun
     serial_task::Union{Task, Nothing}
     serial_conn::Union{SerialPort, Nothing}
     preview::Observable{Union{Nothing, FramePreview}}
+    preview_enabled::Threads.Atomic{Bool}
     rois_series::Vector{RoiSeries}
     channel_count::Int
     protocol_setpoint::Observable{Vector{Float64}}
@@ -555,6 +563,7 @@ function AppRun()
         nothing,
         nothing,
         Observable{Union{Nothing, FramePreview}}(nothing),
+        Threads.Atomic{Bool}(false),
         [RoiSeries(DEFAULT_CHANNEL_COUNT)],
         DEFAULT_CHANNEL_COUNT,
         Observable(Float64[]),

@@ -229,6 +229,10 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                     # app.layout.plot1/plot2 directly, so the new selection
                     # must already be stored before it runs.
                     commit_layout_value!(symbol, selection)
+                    # Selecting (or leaving) the Image plot changes whether the
+                    # worker needs to build previews at all — see
+                    # sync_preview_enabled! (runtime.jl).
+                    sync_preview_enabled!(app, app_run)
                     render_plot!(app, app_run, blocks, symbol)
                 end
 

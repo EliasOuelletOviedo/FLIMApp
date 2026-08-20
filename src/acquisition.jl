@@ -689,7 +689,7 @@ function run_acquisition_loop!(
         use_spatial_masks::Bool,
         use_wall_clock::Bool,
         channel_numbers::Vector{Int},
-        preview_enabled::Bool = true
+        preview_enabled::Threads.Atomic{Bool} = Threads.Atomic{Bool}(true)
     )
     n = UInt32(0)
     timestamps = 0.0
@@ -767,8 +767,10 @@ function run_acquisition_loop!(
         command1 = pid_command_from_state(pid1, setpoint, controller.P1, controller.I1, controller.ch1_inv, controller.ch1_on)
         command2 = pid_command_from_state(pid2, setpoint, controller.P2, controller.I2, controller.ch2_inv, controller.ch2_on)
 
+        # Re-read every frame (not captured once) so switching a plot slot to
+        # the Image plot mid-run starts producing previews immediately.
         preview = nothing
-        if preview_enabled && (now_s - last_preview_s) >= PREVIEW_MIN_INTERVAL_S
+        if preview_enabled[] && (now_s - last_preview_s) >= PREVIEW_MIN_INTERVAL_S
             preview = build_preview(readers, window, layout.ratio_combination, channel_numbers)
             last_preview_s = now_s
         end
@@ -824,7 +826,7 @@ function start_playback(
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         rois::Vector{RoiCoordinates} = RoiCoordinates[],
         use_spatial_masks::Bool = true,
-        preview_enabled::Bool = true,
+        preview_enabled::Threads.Atomic{Bool} = Threads.Atomic{Bool}(true),
         dt::Float64 = 0.0001,
         target_frequency::Threads.Atomic{Float64} = Threads.Atomic{Float64}(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ)
     )
@@ -944,7 +946,7 @@ function start_realtime(
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         rois::Vector{RoiCoordinates} = RoiCoordinates[],
         use_spatial_masks::Bool = true,
-        preview_enabled::Bool = true,
+        preview_enabled::Threads.Atomic{Bool} = Threads.Atomic{Bool}(true),
         nominal_period_s::Float64 = NaN,
         dt::Float64 = 0.0001,
         poll_interval_s::Float64 = 0.05
@@ -1052,7 +1054,7 @@ function start_save(
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         rois::Vector{RoiCoordinates} = RoiCoordinates[],
         use_spatial_masks::Bool = true,
-        preview_enabled::Bool = false,
+        preview_enabled::Threads.Atomic{Bool} = Threads.Atomic{Bool}(false),
         dt::Float64 = 0.0000001,
         progress_cb::Union{Nothing, Function} = nothing
     )
