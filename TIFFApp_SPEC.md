@@ -210,10 +210,56 @@ les colonnes `lifetime_*` par `ratio` / `C1_mean` / `C2_mean` / `C3_mean`.
 
 ---
 
-## 11. Point ouvert
+## 11. Format réel des fichiers (vérifié)
 
-**Bibliothèque TIFF** : à choisir sur critère de vitesse pure, pour tenir le
-régime temps réel. Décision à prendre après benchmark sur un jeu de données
-réel (candidats : `TiffImages.jl` en accès paresseux/mmap, `FileIO`+`ImageIO`,
-ou un lecteur minimal maison sur le modèle de `io/SdtFile.jl` si les fichiers
-Bliq VMS sont non compressés et de structure fixe).
+Mesuré sur `~/Documents/Maîtrise/Test galvo`, 6 sessions, 54 en-têtes
+échantillonnés — **strictement uniformes** :
+
+| Propriété | Valeur |
+|---|---|
+| Format | **BigTIFF** (version 43), little-endian |
+| Dimensions | 1024 × 1024 (y compris dans les dossiers nommés « 1024x512 ») |
+| Profondeur | **8 bits** (`BitsPerSample = 8`), 1 échantillon par pixel |
+| Compression | **aucune** (`Compression = 1`) |
+| Disposition | **une seule bande**, données contiguës à l'offset fixe **3840** |
+| Charge utile | 1 048 576 octets ; fichier total 1 052 416 octets |
+| Producteur | `Nirvana 2.31.4` |
+| `ImageDescription` | `{"shape": [1024, 1024, 1]}` |
+| IFD suivant | aucun (image unique par fichier) |
+
+La règle de groupement de la section 1.3 a été validée sur **2690 fichiers
+réels : zéro violation**, et la numérotation `T` s'est révélée globalement
+contiguë sur chaque session.
+
+Note : 1024 × 1024 correspond exactement à la référence de calibration galvo
+déjà présente dans `roi.jl` et au défaut de `imported_image_size`.
+
+## 12. Lecteur TIFF — décision
+
+Un **lecteur BigTIFF minimal maison** (`src/io/BigTiffFile.jl`, dans l'esprit
+de l'ancien `io/SdtFile.jl`), sans dépendance externe. Justifié par le
+benchmark ci-dessous : les données étant un bloc contigu non compressé à offset
+fixe, la lecture se réduit à un `seek` + `read!` dans un tampon préalloué.
+
+Mesures sur 200 fichiers réels (Julia 1.11, disque local) :
+
+| Approche | Temps par fichier |
+|---|---|
+| `read()` du fichier entier | 0.173 ms |
+| **`seek` + `read!` dans un tampon préalloué** | **0.081 ms** |
+| `mmap` + parcours complet | 0.160 ms |
+| *(comparaison)* `mean()` sur 1024×1024 `UInt8` | 0.326 ms |
+
+Budget temps réel à 60 Hz × 2 canaux : **8.33 ms par fichier**. L'approche
+retenue consomme **~1 %** de ce budget, et la lecture n'est même pas le facteur
+limitant — la réduction `mean()` coûte 4× plus cher que l'I/O. Marge d'environ
+20× sur la chaîne complète.
+
+Le lecteur parse l'IFD pour lire la géométrie (largeur, hauteur,
+`BitsPerSample`, `StripOffsets`, `StripByteCounts`) plutôt que de coder en dur
+l'offset 3840, et prend en charge `BitsPerSample` de 8 **et** 16 pour rester
+valide si la profondeur d'acquisition change. Il refuse explicitement les
+fichiers compressés ou multi-bandes plutôt que de les lire de travers.
+
+Conséquence mémoire : à 8 bits, le tampon de 50 frames × 3 canaux × 1024×1024
+occupe **~157 Mo** (~314 Mo si l'acquisition passe en 16 bits).
