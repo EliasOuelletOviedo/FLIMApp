@@ -151,6 +151,31 @@ Le comportement dépend de l'état des bascules `app.roi.active` et
 Le popup ROI accepte **les deux** sources d'image de fond : import manuel d'un
 fichier TIFF, et capture de la dernière frame reçue de l'acquisition.
 
+### 3.1 Espace de coordonnées des ROIs
+
+Les coordonnées des ROIs sont dans l'espace de pixels de l'**image de
+référence** sur laquelle ils ont été dessinés (`AppRun.imported_image_size`),
+pas dans celui de l'image d'acquisition. C'est la convention que `roi.jl`
+utilise déjà pour la cartographie en tension du galvo.
+
+Les deux tailles diffèrent dès que la référence vient de la capture de frame
+live : c'est le *preview*, sous-échantillonné (`FramePreview.stride`, typiquement
+1/4). `roi_coordinate_scale` convertit donc les coordonnées avant la
+rastérisation. Sans cette conversion, chaque ROI se retrouve dans un coin de
+l'image et mesure les mauvais pixels — sans aucun signal d'erreur.
+
+### 3.2 Nombre de séries
+
+Le nombre de séries (`AppRun.rois_series`) et le nombre de régions produites
+par le worker **doivent concorder** : `consumer_loop` ignore les régions
+au-delà de la fin de `rois_series`. Les deux dérivent du nombre de ROIs
+dessinés.
+
+La bascule `app.roi.active` ne conditionne **pas** ce nombre — elle ne
+sélectionne, avec `app.protocol.active`, que le *modèle* de ROI (round-robin ou
+masques spatiaux). La conditionner ici faisait disparaître silencieusement tous
+les ROIs sauf le premier.
+
 ---
 
 ## 4. Contrôle PI

@@ -524,6 +524,94 @@ end
     @test axis.layoutobservables.protrusions[] == reference_protrusions
 end
 
+@testset "one series per drawn ROI" begin
+    # The series count and the worker's region count must agree. Gating the
+    # series count on app.roi.active while the worker built one mask per drawn
+    # ROI is what made every ROI but the first vanish: consumer_loop drops
+    # regions past the end of rois_series, so the rest were computed and then
+    # silently discarded.
+    app = AppState(true)
+    app_run = AppRun()
+    app_run.rois[] = [
+        RoiCoordinates("a", [0.0, 4.0, 4.0, 0.0, 0.0], [0.0, 0.0, 4.0, 4.0, 0.0]),
+        RoiCoordinates("b", [4.0, 8.0, 8.0, 4.0, 4.0], [0.0, 0.0, 4.0, 4.0, 0.0]),
+        RoiCoordinates("c", [8.0, 12.0, 12.0, 8.0, 8.0], [0.0, 0.0, 4.0, 4.0, 0.0]),
+    ]
+
+    for roi_active in (false, true), protocol_active in (false, true)
+        app.roi.active = roi_active
+        app.protocol.active = protocol_active
+        TIFFApp.rebuild_roi_series!(app, app_run; channel_count = 3)
+        @test length(app_run.rois_series) == 3
+    end
+
+    # No ROIs drawn still yields exactly one whole-frame series.
+    app_run.rois[] = RoiCoordinates[]
+    TIFFApp.rebuild_roi_series!(app, app_run; channel_count = 2)
+    @test length(app_run.rois_series) == 1
+    @test length(app_run.rois_series[1].channels) == 2
+end
+
+@testset "ROI coordinates scale to the acquisition frame" begin
+    # ROI coordinates live in the reference image's pixel space, which is not
+    # the acquisition frame's whenever the reference came from the popup's
+    # "current frame" capture — that records the *downsampled* preview. Without
+    # conversion every ROI lands in a corner and measures the wrong pixels,
+    # with nothing to signal it.
+    @test TIFFApp.roi_coordinate_scale(nothing, 100, 50) == (1.0, 1.0)
+    @test TIFFApp.roi_coordinate_scale((100, 50), 100, 50) == (1.0, 1.0)
+    @test TIFFApp.roi_coordinate_scale((25, 12), 100, 48) == (4.0, 4.0)
+    # A degenerate reference size must not scale everything to nothing
+    @test TIFFApp.roi_coordinate_scale((0, 50), 100, 50) == (1.0, 1.0)
+
+    # Same ROI expressed in two spaces must select the same pixels.
+    full = RoiCoordinates("q", [0.0, 8.0, 8.0, 0.0, 0.0], [0.0, 0.0, 8.0, 8.0, 0.0])
+    quarter = RoiCoordinates("q", full.xs ./ 4, full.ys ./ 4)
+
+    at_full = TIFFApp.build_region_masks([full], 16, 16; use_spatial_masks = true)
+    scaled = TIFFApp.build_region_masks([quarter], 16, 16;
+                                        use_spatial_masks = true, source_size = (4, 4))
+    unscaled = TIFFApp.build_region_masks([quarter], 16, 16; use_spatial_masks = true)
+
+    @test scaled[1].indices == at_full[1].indices
+    @test scaled[1].pixel_count == 64
+    # And the unconverted version really is wrong, so the test above is not
+    # passing by coincidence.
+    @test unscaled[1].indices != at_full[1].indices
+end
+
+@testset "distinct ROIs measure distinct regions" begin
+    # Three disjoint vertical bands over an image whose columns increase left
+    # to right: each band must report its own mean, and a ratio formed from
+    # two channels with different gradients must differ between them.
+    W, H = 12, 4
+    band(i) = RoiCoordinates("band$i",
+        [(i - 1) * W / 3, i * W / 3, i * W / 3, (i - 1) * W / 3, (i - 1) * W / 3],
+        [0.0, 0.0, Float64(H), Float64(H), 0.0])
+    rois = [band(i) for i in 1:3]
+
+    masks = TIFFApp.build_region_masks(rois, W, H; use_spatial_masks = true)
+    @test length(masks) == 3
+    @test all(m -> m.pixel_count == 16, masks)
+    # Disjoint: no pixel belongs to two bands.
+    @test length(unique(vcat((m.indices for m in masks)...))) == 3 * 16
+
+    ramp = UInt8[UInt8(x) for x in 1:W, _ in 1:H]         # grows with x
+    flat = fill(UInt8(10), W, H)
+
+    means_ramp = [TIFFApp.region_mean(vec(ramp), m, 1) for m in masks]
+    means_flat = [TIFFApp.region_mean(vec(flat), m, 1) for m in masks]
+
+    @test length(unique(means_ramp)) == 3
+    @test issorted(means_ramp)                            # left band darkest
+    @test all(≈(10.0), means_flat)
+
+    ratios = [TIFFApp.ratio_from_means([means_ramp[i], means_flat[i]], "C1/C2", [1, 2])
+              for i in 1:3]
+    @test length(unique(ratios)) == 3
+    @test issorted(ratios)
+end
+
 @testset "image frame buffer (temporal binning)" begin
     W, H, DEPTH = 3, 2, 6
     frames = [UInt8.(rand(0:60, W * H)) for _ in 1:30]

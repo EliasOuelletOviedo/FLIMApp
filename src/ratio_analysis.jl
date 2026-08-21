@@ -259,14 +259,21 @@ function point_in_polygon(x::Real, y::Real, xs::AbstractVector{<:Real}, ys::Abst
 end
 
 """
-    roi_pixel_indices(roi, width, height) -> Vector{Int32}
+    roi_pixel_indices(roi, width, height; scale_x=1.0, scale_y=1.0) -> Vector{Int32}
 
 Rasterize one ROI polygon to the linear indices of the pixels inside it.
 
-`roi`'s `xs`/`ys` are in the underlying image's own **0-based** pixel
+`roi`'s `xs`/`ys` are in the **reference image's** own 0-based pixel
 coordinates (see `RoiCoordinates`, data_types.jl), while the returned indices
-address a 1-based Julia array laid out `[x, y]`. Pixel `(i, j)` 0-based maps
-to linear index `j * width + i + 1`.
+address a 1-based Julia array laid out `[x, y]` over an image `width` x
+`height`. Pixel `(i, j)` 0-based maps to linear index `j * width + i + 1`.
+
+`scale_x`/`scale_y` convert from the reference image's pixel space to this
+image's, for the case where the two differ — which is routine: capturing the
+acquisition's current frame in the ROI popup yields a *downsampled* preview
+(1/4 scale, say), so ROIs drawn on it are numerically a quarter of the size of
+the frame they must be measured against. Without the conversion every ROI
+lands in a corner of the image and measures the wrong pixels, silently.
 
 Each pixel is tested at its **center** (`i + 0.5`, `j + 0.5`) rather than its
 corner. Testing corners biases every ROI half a pixel up and left, which is
@@ -276,12 +283,14 @@ Only the polygon's bounding box is scanned, so cost scales with the ROI
 rather than with the image — the difference between thousands and a million
 tests for a typical cell-sized ROI.
 """
-function roi_pixel_indices(roi::RoiCoordinates, width::Integer, height::Integer)::Vector{Int32}
+function roi_pixel_indices(roi::RoiCoordinates, width::Integer, height::Integer;
+                           scale_x::Real=1.0, scale_y::Real=1.0)::Vector{Int32}
     indices = Int32[]
 
-    xs = roi.xs
-    ys = roi.ys
-    (length(xs) >= 3 && length(xs) == length(ys)) || return indices
+    (length(roi.xs) >= 3 && length(roi.xs) == length(roi.ys)) || return indices
+
+    xs = scale_x == 1.0 ? roi.xs : roi.xs .* scale_x
+    ys = scale_y == 1.0 ? roi.ys : roi.ys .* scale_y
 
     w = Int(width)
     h = Int(height)
@@ -311,9 +320,41 @@ function roi_pixel_indices(roi::RoiCoordinates, width::Integer, height::Integer)
 end
 
 """
-    build_region_masks(rois, width, height; use_spatial_masks) -> Vector{RegionMask}
+    roi_coordinate_scale(source_size, width, height) -> (scale_x, scale_y)
+
+Factors converting ROI coordinates from the reference image they were drawn on
+to an acquisition frame of `width` x `height`.
+
+Returns `(1.0, 1.0)` when there is nothing to convert — no reference size
+recorded, or one that already matches. A non-positive or non-finite reference
+size is treated the same way and logged, since scaling by it would place every
+ROI outside the image rather than merely in the wrong spot.
+"""
+function roi_coordinate_scale(source_size::Union{Nothing, Tuple{Int, Int}}, width::Integer, height::Integer)
+    source_size === nothing && return (1.0, 1.0)
+
+    source_width, source_height = source_size
+    if source_width <= 0 || source_height <= 0
+        @warn "Reference image size is not usable; ROI coordinates left unscaled" reference_size=source_size
+        return (1.0, 1.0)
+    end
+
+    (source_width == Int(width) && source_height == Int(height)) && return (1.0, 1.0)
+
+    scale = (Int(width) / source_width, Int(height) / source_height)
+    @info "Scaling ROI coordinates from the reference image to the acquisition frame" reference_size=source_size frame_size=(Int(width), Int(height)) scale=scale
+    return scale
+end
+
+"""
+    build_region_masks(rois, width, height; use_spatial_masks, source_size=nothing) -> Vector{RegionMask}
 
 The regions each frame is reduced over, for a given ROI set and image size.
+
+`source_size` is the `(width, height)` of the reference image the ROIs were
+drawn on (`AppRun.imported_image_size`). When it differs from the acquisition
+frame's size the coordinates are scaled across — see `roi_pixel_indices`.
+`nothing` means "same space, no conversion".
 
 `use_spatial_masks` selects between the two ROI models this app supports (see
 TIFFApp_SPEC.md section 3):
@@ -335,18 +376,20 @@ falls back to the whole image with a warning rather than producing a region
 whose every reduction is `NaN`.
 """
 function build_region_masks(rois::AbstractVector{RoiCoordinates}, width::Integer, height::Integer;
-                            use_spatial_masks::Bool)::Vector{RegionMask}
+                            use_spatial_masks::Bool,
+                            source_size::Union{Nothing, Tuple{Int, Int}}=nothing)::Vector{RegionMask}
     if isempty(rois) || !use_spatial_masks
         return [whole_image_mask(width, height)]
     end
 
+    scale_x, scale_y = roi_coordinate_scale(source_size, width, height)
     masks = Vector{RegionMask}(undef, length(rois))
 
     for (i, roi) in enumerate(rois)
-        indices = roi_pixel_indices(roi, width, height)
+        indices = roi_pixel_indices(roi, width, height; scale_x=scale_x, scale_y=scale_y)
 
         if isempty(indices)
-            @warn "ROI covers no pixels of the image; reducing over the whole frame instead" roi=roi.name image_size=(width, height)
+            @warn "ROI covers no pixels of the image; reducing over the whole frame instead" roi=roi.name image_size=(width, height) reference_size=source_size
             masks[i] = RegionMask(roi.name, Int32[], Int(width) * Int(height))
         else
             masks[i] = RegionMask(roi.name, indices, length(indices))

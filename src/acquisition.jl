@@ -687,6 +687,7 @@ function run_acquisition_loop!(
         protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable},
         rois::Vector{RoiCoordinates},
         use_spatial_masks::Bool,
+        roi_reference_size::Union{Nothing, Tuple{Int, Int}},
         use_wall_clock::Bool,
         channel_numbers::Vector{Int},
         preview_enabled::Threads.Atomic{Bool} = Threads.Atomic{Bool}(true)
@@ -715,7 +716,8 @@ function run_acquisition_loop!(
         if readers === nothing
             readers = make_channel_readers(instance, MAX_FRAME_BUFFER_DEPTH)
             masks = build_region_masks(rois, readers[1].buffer.width, readers[1].buffer.height;
-                                       use_spatial_masks=use_spatial_masks)
+                                       use_spatial_masks=use_spatial_masks,
+                                       source_size=roi_reference_size)
             @info "Acquisition geometry resolved" size=(readers[1].buffer.width, readers[1].buffer.height) channels=length(readers) regions=length(masks) spatial_masks=use_spatial_masks
         end
 
@@ -826,6 +828,7 @@ function start_playback(
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         rois::Vector{RoiCoordinates} = RoiCoordinates[],
         use_spatial_masks::Bool = true,
+        roi_reference_size::Union{Nothing, Tuple{Int, Int}} = nothing,
         preview_enabled::Threads.Atomic{Bool} = Threads.Atomic{Bool}(true),
         dt::Float64 = 0.0001,
         target_frequency::Threads.Atomic{Float64} = Threads.Atomic{Float64}(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ)
@@ -896,7 +899,7 @@ function start_playback(
         end
 
         run_acquisition_loop!(ch, running, layout, controller, next_instance!, emit!;
-                              protocol=protocol, rois=rois, use_spatial_masks=use_spatial_masks,
+                              protocol=protocol, rois=rois, use_spatial_masks=use_spatial_masks, roi_reference_size=roi_reference_size,
                               use_wall_clock=false, channel_numbers=channel_numbers_for_run, preview_enabled=preview_enabled)
     catch e
         @error "Playback worker error" exception=(e, catch_backtrace())
@@ -946,6 +949,7 @@ function start_realtime(
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         rois::Vector{RoiCoordinates} = RoiCoordinates[],
         use_spatial_masks::Bool = true,
+        roi_reference_size::Union{Nothing, Tuple{Int, Int}} = nothing,
         preview_enabled::Threads.Atomic{Bool} = Threads.Atomic{Bool}(true),
         nominal_period_s::Float64 = NaN,
         dt::Float64 = 0.0001,
@@ -1014,7 +1018,7 @@ function start_realtime(
         end
 
         run_acquisition_loop!(ch, running, layout, controller, next_instance!, emit!;
-                              protocol=protocol, rois=rois, use_spatial_masks=use_spatial_masks,
+                              protocol=protocol, rois=rois, use_spatial_masks=use_spatial_masks, roi_reference_size=roi_reference_size,
                               use_wall_clock=true, channel_numbers=channel_numbers_for_run, preview_enabled=preview_enabled)
     catch e
         @error "Real-time worker error" exception=(e, catch_backtrace())
@@ -1054,6 +1058,7 @@ function start_save(
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         rois::Vector{RoiCoordinates} = RoiCoordinates[],
         use_spatial_masks::Bool = true,
+        roi_reference_size::Union{Nothing, Tuple{Int, Int}} = nothing,
         preview_enabled::Threads.Atomic{Bool} = Threads.Atomic{Bool}(false),
         dt::Float64 = 0.0000001,
         progress_cb::Union{Nothing, Function} = nothing
@@ -1139,7 +1144,7 @@ function start_save(
         end
 
         run_acquisition_loop!(ch, running, layout, controller, next_instance!, emit!;
-                              protocol=protocol, rois=rois, use_spatial_masks=use_spatial_masks,
+                              protocol=protocol, rois=rois, use_spatial_masks=use_spatial_masks, roi_reference_size=roi_reference_size,
                               use_wall_clock=false, channel_numbers=channel_numbers_for_run, preview_enabled=preview_enabled)
     catch e
         @error "Save worker error" exception=(e, catch_backtrace())

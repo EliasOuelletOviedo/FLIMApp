@@ -365,11 +365,19 @@ end
 """
     rebuild_roi_series!(app, app_run; channel_count=app_run.channel_count)
 
-Resize `app_run.rois_series` to match the current number of drawn ROIs
-(`app_run.rois[]`) — but only when the ROI toggle (`app.roi.active`, set in
-the Protocol panel, handlers_protocol.jl) is on; otherwise always resize to 1,
-so multi-ROI splitting only kicks in when the user has explicitly enabled it,
-regardless of how many ROIs happen to be drawn.
+Resize `app_run.rois_series` to one series per drawn ROI (`app_run.rois[]`),
+or a single series when none are drawn.
+
+**Not** gated on the ROI toggle (`app.roi.active`). That toggle, together with
+`app.protocol.active`, selects which ROI *model* is in force — round-robin or
+spatial masks, see `use_spatial_roi_masks` — it does not decide whether drawn
+ROIs are measured at all. Gating the series count on it here while the worker
+kept building one mask per drawn ROI is what made every ROI but the first
+vanish: `consumer_loop` drops regions past the end of `rois_series`, so with
+the toggle off the other ROIs were computed and then silently discarded.
+
+The series count and the worker's region count must agree, and both now derive
+from the same thing — the number of drawn ROIs.
 
 Each series is sized for `channel_count` channels, which is what makes
 `accumulate_roi_sample!`'s per-channel loop line up with the worker's
@@ -385,7 +393,7 @@ themselves (not just their contents), so any existing `lines!` plot objects on
 the axes are left pointing at now-orphaned data.
 """
 function rebuild_roi_series!(app, app_run; channel_count::Integer=app_run.channel_count)
-    n = app.roi.active ? max(1, length(app_run.rois[])) : 1
+    n = max(1, length(app_run.rois[]))
     app_run.channel_count = max(Int(channel_count), 1)
     app_run.rois_series = [RoiSeries(app_run.channel_count) for _ in 1:n]
     return nothing
@@ -415,9 +423,10 @@ Launch the background worker task for the selected acquisition mode
 (Playback/Realtime/Save, defaulting to Playback for an unrecognized mode)
 and store it on `app_run.worker_task`.
 
-`rois` and `use_spatial_masks` are snapshotted by the caller and passed by
-value: the worker builds its pixel masks from them on its own thread, and
-reaching into `app_run.rois[]` from there would race the ROI popup.
+`rois`, `use_spatial_masks` and `roi_reference_size` are snapshotted by the
+caller and passed by value: the worker builds its pixel masks from them on its
+own thread, and reaching into `app_run.rois[]` from there would race the ROI
+popup.
 
 Launched with `Threads.@spawn`, not `@async`: the worker loop reads and
 reduces whole images, and `@async` tasks are sticky to the thread they were
@@ -439,6 +448,7 @@ mutate concurrently from multiple threads.
 function spawn_acquisition_worker!(app_run, selected_mode, layout, controller, protocol_config;
                                    rois::Vector{RoiCoordinates}=RoiCoordinates[],
                                    use_spatial_masks::Bool=true,
+                                   roi_reference_size::Union{Nothing, Tuple{Int, Int}}=nothing,
                                    preview_enabled::Threads.Atomic{Bool}=Threads.Atomic{Bool}(true),
                                    nominal_period_s::Float64=NaN)
     shared = (
@@ -446,6 +456,7 @@ function spawn_acquisition_worker!(app_run, selected_mode, layout, controller, p
         paused = app_run.paused,
         rois = rois,
         use_spatial_masks = use_spatial_masks,
+        roi_reference_size = roi_reference_size,
         preview_enabled = preview_enabled
     )
 
@@ -633,6 +644,11 @@ function start_pressed(app, app_run, blocks)
         # consumer (which routes the regions) so the two cannot disagree.
         use_spatial_masks = use_spatial_roi_masks(app)
         rois_snapshot = copy(app_run.rois[])
+        # ROI coordinates live in the reference image's pixel space, not the
+        # acquisition frame's — capturing a live frame in the ROI popup records
+        # the *downsampled* preview's size. Passed along so the worker can
+        # convert; see roi_coordinate_scale (ratio_analysis.jl).
+        roi_reference_size = app_run.imported_image_size
 
         # Capacity: the worker (its own thread since Threads.@spawn, see
         # spawn_acquisition_worker!) blocks on put! once this fills, so a
@@ -667,6 +683,7 @@ function start_pressed(app, app_run, blocks)
         spawn_acquisition_worker!(app_run, selected_mode, app.layout, app.controller, protocol_config;
                                   rois=rois_snapshot,
                                   use_spatial_masks=use_spatial_masks,
+                                  roi_reference_size=roi_reference_size,
                                   preview_enabled=app_run.preview_enabled,
                                   nominal_period_s=roi_scan_period_s(app.protocol))
 
