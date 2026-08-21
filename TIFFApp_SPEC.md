@@ -50,12 +50,23 @@ persistance d'état) est conservé.
 | **Globale** | 148 | Un compteur partagé, incrémenté à chaque fichier écrit. Les canaux ont des valeurs disjointes et entrelacées (C1 = {1,3,5…}, C2 = {2,4,6…}). Instance = `cld(T, N)`. |
 | **Par canal** | 3 | Chaque canal compte depuis 1 indépendamment ; tous les canaux ont le **même** ensemble de valeurs. Instance = `T`. |
 
-**Discriminant** (`detect_numbering`) : une même valeur `T` peut-elle
-apparaître dans deux canaux ? En numérotation globale c'est impossible — un
-fichier consomme un numéro, donc les canaux partitionnent la plage. En
-numérotation par canal c'est garanti par construction. Une seule instance de
-fichiers suffit à trancher, et les deux conventions coïncident pour une
-acquisition mono-canal.
+**Discriminant** (`detect_numbering`) : proportion de valeurs `T` **distinctes**
+rapportée au nombre de fichiers. En numérotation globale chaque fichier
+consomme un numéro, donc les deux comptes sont égaux (ratio ≈ 1). En
+numérotation par canal, `N` canaux se partagent chaque valeur (ratio ≈ 1/N). Le
+seuil est placé à mi-chemin entre les deux attentes.
+
+> **Pourquoi une proportion et non « une collision suffit ».** Le test binaire
+> initial — une valeur présente dans deux canaux ⇒ numérotation par canal — est
+> beaucoup trop fragile. Une acquisition réelle de 1764 fichiers a produit deux
+> ratés du compteur : le logiciel a sauté une valeur puis écrit la suivante en
+> double, une fois pour chaque canal. Deux fichiers anormaux sur 1764
+> reclassaient tout le jeu, mappaient chaque fichier sur sa propre instance et
+> déclaraient les 588 instances incomplètes — jeu illisible à cause de deux
+> fichiers. Le groupement `cld` absorbe ce raté sans problème ; seule la
+> détection devait cesser d'y voir une preuve.
+
+Les deux conventions coïncident pour une acquisition mono-canal.
 
 Le groupement dérive de la valeur du compteur, jamais de la position du
 fichier dans le listing : si un canal perd un fichier, le groupement par

@@ -209,6 +209,62 @@ end
     end
 end
 
+@testset "numbering detection tolerates counter glitches" begin
+    # A real 1764-file acquisition skipped a counter value twice and then wrote
+    # the next one to two channels at once. Under the old "any collision means
+    # per-channel" rule those two anomalous files reclassified the whole run,
+    # mapping every file to its own instance and reporting all 588 of them as
+    # incomplete — an unreadable dataset because of two files.
+    function write_files(dir, sequences)
+        mkpath(dir)
+        for seq in sequences
+            channel = match(r"C(\d+)$", dir).captures[1]
+            write(joinpath(dir, "run-C$channel-T$(lpad(seq, 3, '0')).tif"), UInt8[])
+        end
+    end
+
+    mktempdir() do dir
+        bliq = joinpath(dir, "Bliq VMS")
+        # Global numbering across three channels, with one glitch: 613 is never
+        # written and both C1 and C2 land on 614.
+        c1 = [t for t in 1:3:60 if t != 13]
+        push!(c1, 14)
+        write_files(joinpath(bliq, "C1"), sort(c1))
+        write_files(joinpath(bliq, "C2"), 2:3:60)
+        write_files(joinpath(bliq, "C3"), 3:3:60)
+
+        layout = TIFFApp.resolve_channel_layout(dir)
+        @test layout.numbering == :global
+
+        # And the glitch is absorbed: the duplicated value still falls inside
+        # the instance it belongs to, so no instance is lost.
+        instances = TIFFApp.group_instances(layout)
+        @test length(instances) == 20
+        @test [i.instance_index for i in instances] == collect(1:20)
+        glitched = instances[findfirst(i -> i.instance_index == 5, instances)]
+        @test glitched.sequence_numbers == [14, 14, 15]
+    end
+
+    # Genuine per-channel numbering must still be recognised: every channel
+    # holding the same full range is nothing like a couple of stray collisions.
+    mktempdir() do dir
+        bliq = joinpath(dir, "Bliq VMS")
+        for channel in 1:3
+            write_files(joinpath(bliq, "C$channel"), 1:40)
+        end
+        @test TIFFApp.resolve_channel_layout(dir).numbering == :per_channel
+    end
+
+    # Two channels sharing every value is per-channel too, and must not be
+    # mistaken for a heavily glitched global run.
+    mktempdir() do dir
+        bliq = joinpath(dir, "Bliq VMS")
+        write_files(joinpath(bliq, "C1"), 1:30)
+        write_files(joinpath(bliq, "C2"), 1:30)
+        @test TIFFApp.resolve_channel_layout(dir).numbering == :per_channel
+    end
+end
+
 @testset "ratio and Hill calibration" begin
     numbers = [1, 2, 3]
 

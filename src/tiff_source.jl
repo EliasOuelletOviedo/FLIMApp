@@ -170,10 +170,26 @@ instance_index_for(sequence_number::Integer, layout::ChannelLayout) =
 Decide whether an acquisition numbers its files with one shared counter
 (`:global`) or one counter per channel (`:per_channel`).
 
-The test is whether any counter value appears in more than one channel. Under
-global numbering that is impossible — each written file consumes the next
-value, so the channels partition the range. Under per-channel numbering it is
-guaranteed, since every channel counts from 1.
+The discriminator is how many *distinct* counter values the run holds relative
+to how many files it has. Under global numbering each written file consumes
+the next value, so the channels partition the range and the two counts are
+equal. Under per-channel numbering every channel counts from 1 over the same
+range, so `N` channels share each value and there are only `total / N` distinct
+ones. The decision splits the difference between those two expectations.
+
+# Why a proportion and not "does any value collide"
+
+The obvious test — any counter value appearing in two channels means
+per-channel numbering — is what this used to do, and it is far too brittle. A
+real 1764-file acquisition on this rig produced exactly two counter glitches:
+the software skipped a value and then wrote the *next* one twice, once for each
+of two channels. Two anomalous files out of 1764 flipped the classification,
+which then mapped every file to its own instance and reported all 588 of them
+as incomplete — the whole run unreadable because of two files.
+
+Grouping itself absorbs such a glitch (`cld` still lands both files in the
+right instance), so only the detection needed to stop treating a single
+collision as proof.
 
 A single-channel acquisition returns `:global`, where the two conventions
 coincide (`cld(T, 1) == T`). An acquisition with no files yet also returns
@@ -181,17 +197,35 @@ coincide (`cld(T, 1) == T`). An acquisition with no files yet also returns
 START there is usually nothing on disk to judge from.
 """
 function detect_numbering(channel_dirs::AbstractVector{<:AbstractString})::Symbol
-    length(channel_dirs) <= 1 && return :global
+    n_channels = length(channel_dirs)
+    n_channels <= 1 && return :global
 
-    seen = Set{Int}()
+    total = 0
+    distinct = Set{Int}()
+
     for dir in channel_dirs
-        values = Set(seq for (seq, _) in list_channel_files(dir))
-        isempty(values) && continue
-        isempty(intersect(seen, values)) || return :per_channel
-        union!(seen, values)
+        for (seq, _) in list_channel_files(dir)
+            total += 1
+            push!(distinct, seq)
+        end
     end
 
-    return :global
+    total == 0 && return :global
+
+    # Expected ratio of distinct values to files: ~1 for global numbering,
+    # ~1/N for per-channel. Anything below the midpoint is per-channel.
+    ratio = length(distinct) / total
+    threshold = (1.0 + 1.0 / n_channels) / 2
+
+    if ratio >= threshold
+        collisions = total - length(distinct)
+        if collisions > 0
+            @warn "Acquisition reused some counter values across channels; treating the run as globally numbered anyway" collisions=collisions files=total
+        end
+        return :global
+    end
+
+    return :per_channel
 end
 
 """
