@@ -370,6 +370,123 @@ end
     @test axis.limits[] == (0, W, 0, H)
 end
 
+@testset "no local shadowed by a Makie export" begin
+    # Regression guard for a bug that reached the running app: renaming a local
+    # (`volume` -> `image`) left one call site behind, and because `using
+    # GLMakie` brings `Makie.volume` — a plotting function — into scope, the
+    # stale name resolved to *that* instead of raising. Nothing failed at load
+    # or precompile time; it surfaced only as a MethodError the moment a user
+    # drew a ROI.
+    #
+    # This walks every top-level function in src/ and reports any identifier
+    # passed as a call argument that the function never binds, but which
+    # TIFFApp only knows because Makie exports it. Those can only be forgotten
+    # locals: a genuine reference to a Makie plotting function would be called,
+    # not passed.
+
+    function collect_lhs!(x::Symbol, out); push!(out, x); end
+    function collect_lhs!(x, out)
+        x isa Expr || return
+        x.head === :tuple && for a in x.args; collect_lhs!(a, out); end
+        x.head === :(::) && collect_lhs!(x.args[1], out)
+    end
+
+    function collect_params!(sig, out)
+        if sig isa Symbol; push!(out, sig); return; end
+        sig isa Expr || return
+        args = sig.head === :call ? sig.args[2:end] : sig.args
+        for a in args
+            a isa Symbol && push!(out, a)
+            if a isa Expr
+                a.head === :(::) && a.args[1] isa Symbol && push!(out, a.args[1])
+                a.head === :kw && collect_lhs!(a.args[1], out)
+                a.head === :parameters && for prm in a.args
+                    collect_lhs!(prm isa Expr && prm.head === :kw ? prm.args[1] : prm, out)
+                end
+            end
+        end
+    end
+
+    function collect_bindings!(e, out)
+        e isa Expr || return
+        h = e.head
+        if h in (:(=), :(+=), :(-=), :(*=), :(/=))
+            collect_lhs!(e.args[1], out)
+        elseif h === :local || h === :global
+            for a in e.args; collect_lhs!(a, out); end
+        elseif h === :for
+            spec = e.args[1]
+            for st in (spec isa Expr && spec.head === :block ? spec.args : [spec])
+                st isa Expr && st.head === :(=) && collect_lhs!(st.args[1], out)
+            end
+        elseif h === :function || h === :(->)
+            collect_params!(e.args[1], out)
+        elseif h === :do
+            length(e.args) >= 2 && collect_params!(e.args[2].args[1], out)
+        end
+        for a in e.args; collect_bindings!(a, out); end
+    end
+
+    function collect_arg_uses!(e, out)
+        e isa Expr || return
+        if e.head === :call
+            for a in e.args[2:end]
+                a isa Symbol && push!(out, a)
+                a isa Expr && a.head === :kw && a.args[2] isa Symbol && push!(out, a.args[2])
+            end
+        end
+        for a in e.args; collect_arg_uses!(a, out); end
+    end
+
+    src_dir = joinpath(@__DIR__, "..", "src")
+    offenders = Tuple{String, String, Symbol}[]
+
+    for (root, _, files) in walkdir(src_dir), file in files
+        endswith(file, ".jl") || continue
+        path = joinpath(root, file)
+
+        for expression in Meta.parseall(read(path, String)).args
+            (expression isa Expr && expression.head === :function) || continue
+
+            signature = expression.args[1]
+            name = string(signature isa Expr ? signature.args[1] : signature)
+
+            bound = Set{Symbol}()
+            collect_bindings!(expression, bound)
+            collect_params!(signature, bound)
+
+            used = Set{Symbol}()
+            collect_arg_uses!(expression, used)
+
+            for identifier in setdiff(used, bound)
+                # `isdefined(TIFFApp, id)` alone is not enough: `using GLMakie`
+                # makes every Makie export "defined" there. `which` reports the
+                # module that actually owns the binding, which separates a real
+                # definition from an import — and it is precisely an import
+                # that lets a forgotten local load without error.
+                isdefined(TIFFApp, identifier) || continue
+                owner = try
+                    Base.which(TIFFApp, identifier)
+                catch
+                    nothing
+                end
+                owner === nothing && continue
+
+                if Base.moduleroot(owner) === Base.moduleroot(Makie) && !isdefined(Base, identifier)
+                    push!(offenders, (relpath(path, src_dir), name, identifier))
+                end
+            end
+        end
+    end
+
+    if !isempty(offenders)
+        for (file, fn, identifier) in offenders
+            @info "Unbound identifier resolving through Makie" file=file function_name=fn identifier=identifier
+        end
+    end
+    @test isempty(offenders)
+end
+
 @testset "plot switching preserves layout" begin
     # Switching a slot to the Image plot and back must not move anything. The
     # axis carries a fixed width/height, but its *protrusions* — the space

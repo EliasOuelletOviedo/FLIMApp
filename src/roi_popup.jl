@@ -632,7 +632,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
                         push!(ys, ys[1])
 
                         manual_roi_count[] += 1
-                        add_and_track_roi!(volume, x_offset, y_offset, xs, ys, "manual-$(manual_roi_count[])")
+                        add_and_track_roi!(image, x_offset, y_offset, xs, ys, "manual-$(manual_roi_count[])")
                     end
                 end
 
@@ -840,7 +840,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
                         @warn "Skipping a Cellpose object whose boundary could not be traced" label=label
                         continue
                     end
-                    add_and_track_roi!(volume, x_offset, y_offset, xs, ys, "cellpose-$label")
+                    add_and_track_roi!(intensity, x_offset, y_offset, xs, ys, "cellpose-$label")
                     n_added += 1
                 end
 
