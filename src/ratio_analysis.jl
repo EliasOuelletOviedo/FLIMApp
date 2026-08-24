@@ -404,32 +404,52 @@ end
 # =============================================================================
 
 """
-    region_sum(image, mask) -> UInt64
+    region_accumulator_type(::Type{T})
 
-Sum `image`'s samples over `mask`'s pixels.
+Element type `region_sum` accumulates `T` samples into: `UInt64` for integers,
+`Float64` for floats. See `region_sum` for why floats widen.
+"""
+region_accumulator_type(::Type{T}) where {T<:Integer}       = UInt64
+region_accumulator_type(::Type{T}) where {T<:AbstractFloat} = Float64
 
-Accumulates in `UInt64` because the caller's `image` is already a *binned*
-sum: up to 50 frames of 16-bit samples over a megapixel region reaches ~10^11,
-far past what `UInt32` holds. The accumulator is the only place this could
-overflow silently, so it is sized for the worst case the buffer allows rather
-than for the 8-bit data seen today.
+"""
+    region_sum(image, mask)
+
+Sum `image`'s samples over `mask`'s pixels, in an accumulator wide enough not
+to lose them.
+
+Integer images accumulate in `UInt64`, because the caller's `image` is already
+a *binned* sum: up to 50 frames of 16-bit samples over a megapixel region
+reaches ~10^11, far past what `UInt32` holds. The accumulator is the only place
+this could overflow silently, so it is sized for the worst case the buffer
+allows rather than for the 8-bit data seen today.
+
+Floating-point images accumulate in `Float64` regardless of their own width.
+Summing a megapixel of `Float32` in `Float32` loses the low bits of the running
+total long before the end — the region mean is the whole output of this
+function, so the widening is worth its cost here even though the *per-pixel*
+window sum stays narrow.
+
+The accumulator type is resolved from `T` at compile time, so each element type
+gets its own specialization and none of them pays for the others.
 
 The empty-`indices` case sums the whole image directly — see `RegionMask` for
 why "whole image" is represented by an absent index list rather than a
 complete one.
 """
-function region_sum(image::AbstractVector{T}, mask::RegionMask)::UInt64 where {T<:Unsigned}
-    total = UInt64(0)
+function region_sum(image::AbstractVector{T}, mask::RegionMask) where {T<:Real}
+    S = region_accumulator_type(T)
+    total = zero(S)
 
     if isempty(mask.indices)
         @inbounds @simd for i in eachindex(image)
-            total += UInt64(image[i])
+            total += S(image[i])
         end
         return total
     end
 
     @inbounds @simd for k in eachindex(mask.indices)
-        total += UInt64(image[mask.indices[k]])
+        total += S(image[mask.indices[k]])
     end
 
     return total
@@ -449,7 +469,7 @@ region first, and the division happens once, on two scalars. Averaging
 per-pixel ratios instead would need a validity threshold to survive dark
 pixels, and would not agree with this except on noiseless data.
 """
-function region_mean(image::AbstractVector{T}, mask::RegionMask, frames_summed::Integer)::Float64 where {T<:Unsigned}
+function region_mean(image::AbstractVector{T}, mask::RegionMask, frames_summed::Integer)::Float64 where {T<:Real}
     (mask.pixel_count > 0 && frames_summed > 0) || return NaN
     return Float64(region_sum(image, mask)) / (mask.pixel_count * frames_summed)
 end

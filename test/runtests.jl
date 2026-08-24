@@ -17,8 +17,7 @@ using TIFFApp: RegionFrame, RoiSeries, RoiChannelIntensity, AcquisitionSample,
     # Build a minimal BigTIFF by hand rather than shipping a fixture: it pins
     # the exact byte layout the reader must accept, and a fixture would hide
     # which field a regression actually broke.
-    function write_bigtiff(path, width, height, bits, pixels; little=true)
-        bo = little ? "<" : ">"
+    function write_bigtiff(path, width, height, bits, pixels; little=true, sample_format=1)
         entries = [
             (256, 4, 1, width),      # ImageWidth
             (257, 4, 1, height),     # ImageLength
@@ -27,6 +26,7 @@ using TIFFApp: RegionFrame, RoiSeries, RoiChannelIntensity, AcquisitionSample,
             (277, 3, 1, 1),          # SamplesPerPixel
             (273, 16, 1, 0),         # StripOffsets (patched below)
             (279, 16, 1, length(pixels) * (bits ÷ 8)),  # StripByteCounts
+            (339, 3, 1, sample_format),                 # SampleFormat
         ]
         header = 16
         ifd = header
@@ -95,6 +95,37 @@ using TIFFApp: RegionFrame, RoiSeries, RoiChannelIntensity, AcquisitionSample,
         # A buffer of the wrong element type must be refused, not silently
         # reinterpreted — that would read half an image and look plausible.
         @test_throws ArgumentError TIFFApp.BigTiffFile.read_frame!(Vector{UInt8}(undef, 8), path16)
+
+        # 32-bit unsigned: SampleFormat 1 (or absent) means integers.
+        pixels32 = UInt32[1, 70000, 3_000_000_000, 42]
+        path32 = write_bigtiff(joinpath(dir, "c.tif"), 2, 2, 32, pixels32; sample_format=1)
+        info32 = TIFFApp.BigTiffFile.read_info(path32)
+        @test info32.bits_per_sample == 32
+        @test TIFFApp.BigTiffFile.sample_type(info32) == UInt32
+        buf32 = Vector{UInt32}(undef, 4)
+        TIFFApp.BigTiffFile.read_frame!(buf32, path32)
+        @test buf32 == pixels32
+
+        # 32-bit IEEE float: same width, entirely different numbers. Only
+        # SampleFormat distinguishes them, and reading one as the other yields
+        # plausible values rather than an error — hence the tag is honored.
+        pixelsF = Float32[0.5, -1.25, 3.0f8, 1.0f-7]
+        pathF = write_bigtiff(joinpath(dir, "d.tif"), 2, 2, 32, pixelsF; sample_format=3)
+        infoF = TIFFApp.BigTiffFile.read_info(pathF)
+        @test TIFFApp.BigTiffFile.sample_type(infoF) == Float32
+        bufF = Vector{Float32}(undef, 4)
+        TIFFApp.BigTiffFile.read_frame!(bufF, pathF)
+        @test bufF == pixelsF
+
+        # A buffer of the right width but the wrong format must be refused:
+        # reinterpreting float bits as integers is exactly the silent
+        # corruption this guards against.
+        @test_throws ArgumentError TIFFApp.BigTiffFile.read_frame!(Vector{UInt32}(undef, 4), pathF)
+        @test_throws ArgumentError TIFFApp.BigTiffFile.read_frame!(Vector{Float32}(undef, 4), path32)
+
+        # An unsupported sample format is rejected rather than guessed at.
+        weird = write_bigtiff(joinpath(dir, "e.tif"), 2, 2, 32, pixels32; sample_format=2)
+        @test_throws ArgumentError TIFFApp.BigTiffFile.read_info(weird)
 
         # Not a TIFF at all
         junk = joinpath(dir, "junk.tif")
@@ -703,6 +734,67 @@ end
 
     # A frame of the wrong size is refused rather than partially copied.
     @test_throws ArgumentError TIFFApp.push_frame!(big, UInt8[1, 2, 3], 1)
+end
+
+@testset "32-bit samples through the pipeline" begin
+    # Accumulator widths: 8- and 16-bit deliberately share UInt32 so the common
+    # paths stay byte-identical to what they were before 32-bit support; the
+    # wider types get what they actually need.
+    @test TIFFApp.accumulator_type(UInt8)   == UInt32
+    @test TIFFApp.accumulator_type(UInt16)  == UInt32
+    @test TIFFApp.accumulator_type(UInt32)  == UInt64
+    @test TIFFApp.accumulator_type(Float32) == Float32
+
+    # region_sum widens floats to Float64: a megapixel summed in Float32 loses
+    # the low bits of the running total, and the region mean is the whole
+    # output of the function.
+    @test TIFFApp.region_accumulator_type(UInt32)  == UInt64
+    @test TIFFApp.region_accumulator_type(Float32) == Float64
+
+    W, H, DEPTH = 4, 3, 5
+
+    # A 32-bit integer window must not overflow: five frames near typemax(UInt32)
+    # exceed UInt32 by design, which is why the accumulator widens.
+    big = fill(typemax(UInt32), W * H)
+    buffer32 = TIFFApp.ImageFrameBuffer{UInt32}(W, H, DEPTH)
+    for _ in 1:DEPTH
+        TIFFApp.push_frame!(buffer32, big, DEPTH)
+    end
+    @test all(==(UInt64(typemax(UInt32)) * DEPTH), buffer32.sum_image)
+    full = TIFFApp.whole_image_mask(W, H)
+    @test TIFFApp.region_mean(vec(buffer32.sum_image), full, DEPTH) ≈ Float64(typemax(UInt32))
+
+    # Float frames: the sliding window must agree with a plain re-summation.
+    frames = [rand(Float32, W * H) .* 100.0f0 for _ in 1:40]
+    naive(k, window) = sum(Float32.(frames[i]) for i in (k - min(window, k) + 1):k)
+
+    for window in (1, 3, DEPTH)
+        buffer = TIFFApp.ImageFrameBuffer{Float32}(W, H, DEPTH)
+        for k in 1:40
+            got = TIFFApp.push_frame!(buffer, frames[k], window)
+            expected = clamp(window, 1, min(DEPTH, k))
+            @test got == expected
+            @test vec(buffer.sum_image) ≈ naive(k, expected) rtol=1e-4
+        end
+    end
+
+    # Negative values (a float image can carry them) survive the window.
+    signed_frames = [fill(-2.5f0, W * H) for _ in 1:4]
+    buffer = TIFFApp.ImageFrameBuffer{Float32}(W, H, DEPTH)
+    for f in signed_frames
+        TIFFApp.push_frame!(buffer, f, 4)
+    end
+    @test TIFFApp.region_mean(vec(buffer.sum_image), full, 4) ≈ -2.5
+
+    # The periodic rebuild keeps a long float run from drifting: run well past
+    # the rebuild interval and compare against an exact re-summation.
+    steady = fill(0.1f0, W * H)
+    drifting = TIFFApp.ImageFrameBuffer{Float32}(W, H, DEPTH)
+    for _ in 1:(TIFFApp.FLOAT_SUM_REBUILD_INTERVAL * 3)
+        TIFFApp.push_frame!(drifting, steady, DEPTH)
+    end
+    @test TIFFApp.region_mean(vec(drifting.sum_image), full, DEPTH) ≈ 0.1 rtol=1e-5
+    @test drifting.updates_since_rebuild <= TIFFApp.FLOAT_SUM_REBUILD_INTERVAL
 end
 
 @testset "realtime instance collector" begin

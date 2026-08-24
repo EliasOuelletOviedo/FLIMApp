@@ -173,10 +173,18 @@ The build takes tens of minutes and bundles Julia + all libraries
 
 ## File format
 
-Uncompressed TIFF or BigTIFF, 8- or 16-bit, one sample per pixel, read by
-`src/io/BigTiffFile.jl`. Compressed or multi-sample files are rejected with a
-specific error rather than decoded incorrectly — a wrong image silently
-feeding the ratio is worse than a failed read.
+Uncompressed TIFF or BigTIFF, one sample per pixel, read by
+`src/io/BigTiffFile.jl`. Supported depths are 8-bit, 16-bit, and 32-bit in
+either unsigned-integer or IEEE-float form — at 32 bits the `SampleFormat` tag
+decides which, since the two are indistinguishable by width and reading one as
+the other yields plausible numbers rather than an error. Compressed or
+multi-sample files are rejected with a specific error rather than decoded
+incorrectly: a wrong image silently feeding the ratio is worse than a failed
+read.
+
+Each depth carries its own accumulator width through the binning buffer and the
+region reduction, resolved at compile time. 8- and 16-bit share `UInt32`
+deliberately, so adding the wider formats left those paths byte-identical.
 
 The reader is deliberately narrow rather than general: the pixel data is a
 contiguous block at a fixed offset, so a frame read is a `seek` plus one bulk

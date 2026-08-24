@@ -283,7 +283,7 @@ Mesuré sur `~/Documents/Maîtrise/Test galvo`, 6 sessions, 54 en-têtes
 |---|---|
 | Format | **BigTIFF** (version 43), little-endian |
 | Dimensions | 1024 × 1024 **ou** 1024 × 512 selon la session — d'où l'allocation dynamique du tampon |
-| Profondeur | **8 bits** (`BitsPerSample = 8`), 1 échantillon par pixel |
+| Profondeur | **8 bits** (`BitsPerSample = 8`), 1 échantillon par pixel — le lecteur accepte aussi 16 et 32 bits (voir 12.1) |
 | Compression | **aucune** (`Compression = 1`) |
 | Disposition | **une seule bande**, données contiguës à l'offset fixe **3840** |
 | Charge utile | 1 048 576 octets ; fichier total 1 052 416 octets |
@@ -332,10 +332,36 @@ limitant — la réduction `mean()` coûte 4× plus cher que l'I/O. Marge d'envi
 20× sur la chaîne complète.
 
 Le lecteur parse l'IFD pour lire la géométrie (largeur, hauteur,
-`BitsPerSample`, `StripOffsets`, `StripByteCounts`) plutôt que de coder en dur
-l'offset 3840, et prend en charge `BitsPerSample` de 8 **et** 16 pour rester
-valide si la profondeur d'acquisition change. Il refuse explicitement les
-fichiers compressés ou multi-bandes plutôt que de les lire de travers.
+`BitsPerSample`, `SampleFormat`, `StripOffsets`, `StripByteCounts`) plutôt que
+de coder en dur l'offset 3840. Il refuse explicitement les fichiers compressés
+ou multi-bandes plutôt que de les lire de travers.
 
-Conséquence mémoire : à 8 bits, le tampon de 50 frames × 3 canaux × 1024×1024
-occupe **~157 Mo** (~314 Mo si l'acquisition passe en 16 bits).
+### 12.1 Profondeurs prises en charge
+
+| `BitsPerSample` | `SampleFormat` | Type Julia | Accumulateur fenêtre | Accumulateur région |
+|---|---|---|---|---|
+| 8  | 1 (défaut) | `UInt8`   | `UInt32` | `UInt64` |
+| 16 | 1 (défaut) | `UInt16`  | `UInt32` | `UInt64` |
+| 32 | 1 (entier) | `UInt32`  | `UInt64` | `UInt64` |
+| 32 | 3 (IEEE)   | `Float32` | `Float32` | `Float64` |
+
+À 32 bits, seul `SampleFormat` distingue entier et flottant : même largeur,
+nombres totalement différents. Lire l'un comme l'autre produit des valeurs
+plausibles sans erreur, donc le tag est honoré et un tampon du mauvais type est
+refusé explicitement.
+
+**Le 8 et le 16 bits partagent délibérément `UInt32`** : leurs chemins de code
+restent identiques au bit près à ce qu'ils étaient avant l'ajout du 32 bits.
+Vérifié en comparant le LLVM généré — la branche de reconstruction flottante
+est entièrement éliminée à la compilation pour les types entiers.
+
+**Dérive flottante.** L'accumulation entière est exacte, donc la somme
+glissante (ajout du nouveau, retrait du sortant) peut tourner indéfiniment.
+L'addition flottante n'est pas associative et la soustraction n'annule pas
+exactement l'addition antérieure : sur une acquisition de 1764 frames l'erreur
+s'accumulerait. La somme est donc reconstruite depuis zéro tous les
+`FLOAT_SUM_REBUILD_INTERVAL` (256) frames — une passe supplémentaire toutes les
+quelques centaines de frames, négligeable, et jamais payée par les entiers.
+
+Conséquence mémoire, tampon de 50 frames × 3 canaux × 1024×1024 :
+**~157 Mo** en 8 bits, ~314 Mo en 16 bits, ~629 Mo en 32 bits.

@@ -27,17 +27,22 @@ What it accepts beyond the exact acquisition format, and why:
 - **Classic TIFF (42) as well as BigTIFF (43)**: the ROI popup lets the user
   import an arbitrary image to draw ROIs on, and files coming out of ImageJ
   are ordinarily classic TIFF.
-- **8- and 16-bit samples**: the acquisition is 8-bit today, but that is a
-  camera setting rather than a property of the pipeline, so a switch to
-  16 bits must not require touching this code.
+- **8-, 16- and 32-bit samples**: the acquisition is 8-bit today, but that is a
+  camera setting rather than a property of the pipeline, so a switch to a
+  deeper format must not require touching this code. At 32 bits the
+  `SampleFormat` tag decides between unsigned integers and IEEE floats — the
+  two are indistinguishable by width, and reading one as the other yields
+  plausible numbers rather than an error, so the tag is honored rather than
+  assumed.
 - **Multiple strips**: ImageJ writes `RowsPerStrip` well below the image
   height, so an imported reference image is routinely multi-strip even
   though acquisition frames never are.
 
 Anything outside that — compression, more than one sample per pixel, a bit
-depth that is neither 8 nor 16 — is rejected with a specific error rather
-than decoded incorrectly, on the principle that a wrong image silently
-feeding the ratio is far worse than a failed read.
+depth that is none of 8, 16 or 32, or a sample format the depth does not allow
+— is rejected with a specific error rather than decoded incorrectly, on the
+principle that a wrong image silently feeding the ratio is far worse than a
+failed read.
 """
 module BigTiffFile
 
@@ -51,8 +56,16 @@ const TAG_COMPRESSION       = 259
 const TAG_STRIP_OFFSETS     = 273
 const TAG_SAMPLES_PER_PIXEL = 277
 const TAG_STRIP_BYTE_COUNTS = 279
+const TAG_SAMPLE_FORMAT     = 339
 
 const COMPRESSION_NONE = 1
+
+# SampleFormat values (tag 339). Only these two are meaningful here: at 32 bits
+# the same bit width means completely different numbers depending on which one
+# it is, and reading a float buffer as integers produces plausible-looking
+# garbage rather than an error.
+const SAMPLE_FORMAT_UINT = 1
+const SAMPLE_FORMAT_IEEE = 3
 
 const MAGIC_CLASSIC = 42
 const MAGIC_BIG     = 43
@@ -81,6 +94,7 @@ struct TiffInfo
     width::Int
     height::Int
     bits_per_sample::Int
+    sample_format::Int
     little_endian::Bool
     strip_offsets::Vector{Int}
     strip_byte_counts::Vector{Int}
@@ -89,11 +103,20 @@ end
 """
     sample_type(info::TiffInfo)
 
-The Julia element type matching `info`'s sample depth: `UInt8` for 8-bit
-images, `UInt16` for 16-bit. Callers use this to size a frame buffer once,
-from the first file of a run, then reuse it for every later frame.
+The Julia element type matching `info`'s sample depth and format: `UInt8` for
+8-bit, `UInt16` for 16-bit, and at 32 bits either `UInt32` or `Float32`
+depending on `SampleFormat`.
+
+Callers use this to size a frame buffer once, from the first file of a run,
+then reuse it for every later frame — the element type is what carries the
+depth through the rest of the pipeline, so nothing downstream has to branch on
+it at runtime.
 """
-sample_type(info::TiffInfo) = info.bits_per_sample == 8 ? UInt8 : UInt16
+function sample_type(info::TiffInfo)
+    info.bits_per_sample == 8 && return UInt8
+    info.bits_per_sample == 16 && return UInt16
+    return info.sample_format == SAMPLE_FORMAT_IEEE ? Float32 : UInt32
+end
 
 """
     pixel_count(info::TiffInfo)
@@ -240,6 +263,7 @@ function read_info(io::IO, label::AbstractString="<tiff>")
     bits_per_sample = -1
     samples_per_pixel = -1
     compression = -1
+    sample_format = -1
     strip_offsets = Int[]
     strip_byte_counts = Int[]
     scratch = Int[]
@@ -253,7 +277,7 @@ function read_info(io::IO, label::AbstractString="<tiff>")
         # cost a seek and a read each.
         if !(tag in (TAG_IMAGE_WIDTH, TAG_IMAGE_LENGTH, TAG_BITS_PER_SAMPLE,
                      TAG_COMPRESSION, TAG_STRIP_OFFSETS, TAG_SAMPLES_PER_PIXEL,
-                     TAG_STRIP_BYTE_COUNTS))
+                     TAG_STRIP_BYTE_COUNTS, TAG_SAMPLE_FORMAT))
             continue
         end
 
@@ -278,6 +302,8 @@ function read_info(io::IO, label::AbstractString="<tiff>")
                 samples_per_pixel = value
             elseif tag == TAG_COMPRESSION
                 compression = value
+            elseif tag == TAG_SAMPLE_FORMAT
+                sample_format = value
             end
         end
     end
@@ -289,13 +315,22 @@ function read_info(io::IO, label::AbstractString="<tiff>")
     samples_per_pixel < 0 && (samples_per_pixel = 1)
     bits_per_sample   < 0 && (bits_per_sample = 1)
     compression       < 0 && (compression = COMPRESSION_NONE)
+    # The spec's default for an absent SampleFormat is unsigned integer, which
+    # is also what every 8- and 16-bit file this app has seen omits it as.
+    sample_format     < 0 && (sample_format = SAMPLE_FORMAT_UINT)
 
     compression == COMPRESSION_NONE ||
         throw(ArgumentError("Compressed TIFF (compression=$compression) is not supported: $label"))
     samples_per_pixel == 1 ||
         throw(ArgumentError("Multi-sample TIFF (samples/pixel=$samples_per_pixel) is not supported: $label"))
-    bits_per_sample in (8, 16) ||
-        throw(ArgumentError("Unsupported TIFF bit depth $bits_per_sample (expected 8 or 16): $label"))
+    bits_per_sample in (8, 16, 32) ||
+        throw(ArgumentError("Unsupported TIFF bit depth $bits_per_sample (expected 8, 16 or 32): $label"))
+    if bits_per_sample == 32
+        sample_format in (SAMPLE_FORMAT_UINT, SAMPLE_FORMAT_IEEE) ||
+            throw(ArgumentError("Unsupported 32-bit TIFF sample format $sample_format (expected 1 = unsigned or 3 = IEEE float): $label"))
+    elseif sample_format != SAMPLE_FORMAT_UINT
+        throw(ArgumentError("Unsupported $(bits_per_sample)-bit TIFF sample format $sample_format (expected 1 = unsigned): $label"))
+    end
 
     isempty(strip_offsets) &&
         throw(ArgumentError("TIFF missing required tag StripOffsets: $label"))
@@ -310,7 +345,7 @@ function read_info(io::IO, label::AbstractString="<tiff>")
     actual_bytes == expected_bytes ||
         throw(ArgumentError("TIFF strip bytes ($actual_bytes) do not match $(width)x$(height)x$(bits_per_sample)-bit geometry ($expected_bytes): $label"))
 
-    return TiffInfo(width, height, bits_per_sample, little, strip_offsets, strip_byte_counts)
+    return TiffInfo(width, height, bits_per_sample, sample_format, little, strip_offsets, strip_byte_counts)
 end
 
 read_info(path::AbstractString) = open(io -> read_info(io, path), path, "r")
@@ -327,9 +362,11 @@ allocate a `SubArray` per strip on a path that runs once per frame. The
 pointer arithmetic is bounded by the length check above it and the buffer is
 kept alive across the read by `GC.@preserve`.
 """
-function read_pixels!(dest::AbstractVector{T}, io::IO, info::TiffInfo) where {T<:Unsigned}
+function read_pixels!(dest::AbstractVector{T}, io::IO, info::TiffInfo) where {T<:Real}
     sizeof(T) * 8 == info.bits_per_sample ||
         throw(ArgumentError("Buffer element type $T does not match TIFF bit depth $(info.bits_per_sample)"))
+    T === sample_type(info) ||
+        throw(ArgumentError("Buffer element type $T does not match the TIFF's sample format (expected $(sample_type(info)))"))
     length(dest) == pixel_count(info) ||
         throw(ArgumentError("Buffer length $(length(dest)) does not match image size $(info.width)x$(info.height)"))
 
@@ -343,15 +380,27 @@ function read_pixels!(dest::AbstractVector{T}, io::IO, info::TiffInfo) where {T<
         end
     end
 
-    # 16-bit samples written on a machine of the opposite endianness need a
+    # Multi-byte samples written on a machine of the opposite endianness need a
     # swap; 8-bit data never does. The acquisition and this app are both
-    # little-endian in practice, so this loop is normally skipped entirely.
+    # little-endian in practice, so this is normally skipped entirely.
+    #
+    # Floats go through their integer bit pattern: `bswap` is defined on
+    # integers, and byte-reversing a float any other way would round-trip
+    # through arithmetic and corrupt NaNs and denormals.
     if sizeof(T) > 1 && info.little_endian != HOST_IS_LITTLE_ENDIAN
-        @inbounds for i in eachindex(dest)
-            dest[i] = bswap(dest[i])
-        end
+        byteswap_samples!(dest)
     end
 
+    return dest
+end
+
+byteswap_samples!(dest::AbstractVector{<:Integer}) = (@inbounds for i in eachindex(dest); dest[i] = bswap(dest[i]); end; dest)
+
+function byteswap_samples!(dest::AbstractVector{Float32})
+    raw = reinterpret(UInt32, dest)
+    @inbounds for i in eachindex(raw)
+        raw[i] = bswap(raw[i])
+    end
     return dest
 end
 
@@ -368,7 +417,7 @@ reading next to a megabyte of pixels, and it means a file that unexpectedly
 changes geometry mid-acquisition raises an error here instead of being read
 into a wrongly-sized buffer.
 """
-function read_frame!(dest::AbstractVector{T}, path::AbstractString) where {T<:Unsigned}
+function read_frame!(dest::AbstractVector{T}, path::AbstractString) where {T<:Real}
     return open(path, "r") do io
         info = read_info(io, path)
         read_pixels!(dest, io, info)

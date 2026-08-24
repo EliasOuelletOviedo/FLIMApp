@@ -268,9 +268,12 @@ images is not: at 1024x1024 across three channels, 50 frames is ~157 MB of
 - **incremental sum** — the window sum is maintained by adding the arriving
   frame and subtracting the departing one, never by re-summing the window.
 
-`sum_image` is `UInt32`: 50 frames of 16-bit samples reach ~3.3 million,
-past `UInt16`, while `UInt64` would double the resident size of the one array
-touched on every reduction.
+`sum_image`'s element type is chosen from the sample type by
+`accumulator_type`, wide enough that a full window cannot overflow but no
+wider — it is the one array touched on every reduction, so doubling it would
+be paid on every frame. 8- and 16-bit samples both accumulate in `UInt32`
+(50 frames of 16-bit peaks at ~3.3 million, comfortably inside it), 32-bit
+integers need `UInt64`, and floats accumulate as floats.
 
 # Why the sum is worth keeping at all
 
@@ -296,9 +299,9 @@ instead of the old, an error that leaves the sum plausible-looking and wrong
 for the rest of the run. Caught by testing the buffer against a naive
 re-summation across window sizes, not by reading the code.
 """
-mutable struct ImageFrameBuffer{T<:Unsigned}
+mutable struct ImageFrameBuffer{T<:Real, A<:Real}
     frames::Array{T, 3}
-    sum_image::Matrix{UInt32}
+    sum_image::Matrix{A}
     width::Int
     height::Int
     depth::Int
@@ -306,6 +309,7 @@ mutable struct ImageFrameBuffer{T<:Unsigned}
     filled::Int
     window::Int
     summed::Int
+    updates_since_rebuild::Int
 end
 
 """
@@ -316,15 +320,52 @@ Allocate a buffer supporting windows up to `depth` frames of `width` x
 `MAX_FRAME_BUFFER_DEPTH`; `depth + 1` slots are allocated, for the reason
 given in the struct docstring.
 """
-function ImageFrameBuffer{T}(width::Integer, height::Integer, depth::Integer) where {T<:Unsigned}
+function ImageFrameBuffer{T}(width::Integer, height::Integer, depth::Integer) where {T<:Real}
     d = clamp(Int(depth), 1, MAX_FRAME_BUFFER_DEPTH)
-    return ImageFrameBuffer{T}(
+    A = accumulator_type(T)
+    return ImageFrameBuffer{T, A}(
         Array{T, 3}(undef, Int(width), Int(height), d + 1),
-        zeros(UInt32, Int(width), Int(height)),
+        zeros(A, Int(width), Int(height)),
         Int(width), Int(height), d,
-        0, 0, 0, 0
+        0, 0, 0, 0, 0
     )
 end
+
+"""
+    accumulator_type(::Type{T})
+
+Element type `ImageFrameBuffer` sums a window of `T` samples into.
+
+Sized to the widest total a full `MAX_FRAME_BUFFER_DEPTH` window can reach,
+and no wider: `sum_image` is read in full on every reduction, so an
+unnecessarily wide accumulator costs bandwidth on every frame. 8- and 16-bit
+samples share `UInt32` deliberately — it keeps the common paths byte-identical
+to what they were before 32-bit support existed.
+"""
+accumulator_type(::Type{UInt8})   = UInt32
+accumulator_type(::Type{UInt16})  = UInt32
+accumulator_type(::Type{UInt32})  = UInt64
+accumulator_type(::Type{Float32}) = Float32
+accumulator_type(::Type{T}) where {T<:Integer}       = UInt64
+accumulator_type(::Type{T}) where {T<:AbstractFloat} = Float64
+
+"""
+    FLOAT_SUM_REBUILD_INTERVAL
+
+How many frames a floating-point window sum may be updated incrementally
+before being rebuilt from scratch.
+
+Integer accumulation is exact, so the add-new/subtract-old update can run
+forever. Floating-point addition is not associative and the subtraction does
+not exactly undo the earlier addition, so error accumulates over a long run —
+a 1764-frame acquisition would carry thousands of updates through one sum.
+Rebuilding periodically bounds that at the cost of one extra window pass every
+few hundred frames, which is amortized noise.
+
+Integer buffers never reach this code: the branch is on a type parameter and
+is eliminated at compile time.
+"""
+const FLOAT_SUM_REBUILD_INTERVAL = 256
 
 frame_length(buffer::ImageFrameBuffer) = buffer.width * buffer.height
 
@@ -348,7 +389,7 @@ scratch when the requested window *changes*, since the set of frames in the
 window then changes by more than one element and there is nothing to
 subtract.
 """
-function push_frame!(buffer::ImageFrameBuffer{T}, pixels::AbstractVector{T}, requested_window::Integer) where {T<:Unsigned}
+function push_frame!(buffer::ImageFrameBuffer{T, A}, pixels::AbstractVector{T}, requested_window::Integer) where {T<:Real, A<:Real}
     length(pixels) == frame_length(buffer) ||
         throw(ArgumentError("Frame of $(length(pixels)) samples does not fit a $(buffer.width)x$(buffer.height) buffer"))
 
@@ -362,28 +403,36 @@ function push_frame!(buffer::ImageFrameBuffer{T}, pixels::AbstractVector{T}, req
     window = clamp(Int(requested_window), 1, min(buffer.depth, buffer.filled))
     sum_flat = vec(buffer.sum_image)
 
-    if window != buffer.window
+    # A float sum drifts under repeated add/subtract, so it is periodically
+    # rebuilt. `A <: AbstractFloat` is a type-parameter test: for integer
+    # buffers the whole condition folds to `false` at compile time and no check
+    # survives in the generated code.
+    stale_float_sum = (A <: AbstractFloat) && buffer.updates_since_rebuild >= FLOAT_SUM_REBUILD_INTERVAL
+
+    if window != buffer.window || stale_float_sum
         # Window changed: the sum's membership changed by more than the single
         # frame that just arrived, so there is nothing to subtract and it has
         # to be rebuilt from the last `window` frames.
-        fill!(sum_flat, UInt32(0))
+        fill!(sum_flat, zero(A))
         @inbounds for k in 0:(window - 1)
             pos = mod1(buffer.write_pos - k, slots)
             column = view(frames_flat, :, pos)
             @simd for i in eachindex(sum_flat)
-                sum_flat[i] += UInt32(column[i])
+                sum_flat[i] += A(column[i])
             end
         end
         buffer.window = window
         buffer.summed = window
+        buffer.updates_since_rebuild = 0
         return window
     end
 
     # Steady state: add the arriving frame...
     @inbounds @simd for i in eachindex(sum_flat)
-        sum_flat[i] += UInt32(pixels[i])
+        sum_flat[i] += A(pixels[i])
     end
     buffer.summed += 1
+    buffer.updates_since_rebuild += 1
 
     # ...then drop whatever that pushed out of the window. A loop, not an
     # `if`: `summed` can exceed `window` by more than one when the window was
@@ -392,7 +441,7 @@ function push_frame!(buffer::ImageFrameBuffer{T}, pixels::AbstractVector{T}, req
         evicted_pos = mod1(buffer.write_pos - buffer.summed + 1, slots)
         evicted = view(frames_flat, :, evicted_pos)
         @simd for i in eachindex(sum_flat)
-            sum_flat[i] -= UInt32(evicted[i])
+            sum_flat[i] -= A(evicted[i])
         end
         buffer.summed -= 1
     end
@@ -410,13 +459,13 @@ Both are allocated on the first frame, once its geometry and sample type are
 known, and reused for every frame afterwards — the acquisition loop performs
 no per-frame pixel allocation at all.
 """
-mutable struct ChannelReader{T<:Unsigned}
+mutable struct ChannelReader{T<:Real, A<:Real}
     pixels::Vector{T}
-    buffer::ImageFrameBuffer{T}
+    buffer::ImageFrameBuffer{T, A}
 end
 
-function ChannelReader{T}(width::Integer, height::Integer, depth::Integer) where {T<:Unsigned}
-    return ChannelReader{T}(
+function ChannelReader{T}(width::Integer, height::Integer, depth::Integer) where {T<:Real}
+    return ChannelReader{T, accumulator_type(T)}(
         Vector{T}(undef, Int(width) * Int(height)),
         ImageFrameBuffer{T}(width, height, depth)
     )

@@ -119,23 +119,23 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         Label(panel_grid[2, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Binning :"))...)
         Label(panel_grid[3, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Smoothing :"))...)
 
-        Label(panel_grid[4, 1:4]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 1"))...)
-        Label(panel_grid[4, 5:7]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
-        Label(panel_grid[6, 1:4]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 2"))...)
-        Label(panel_grid[6, 5:7]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
+        Label(panel_grid[4, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 1"))...)
+        Label(panel_grid[4, 4:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
+        Label(panel_grid[6, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Plot 2"))...)
+        Label(panel_grid[6, 4:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16,   :text => "Ch"))...)
 
         Box(panel_grid[1, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[2, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[3, 4:6]; SPINNER_BOX_ATTRS...)
 
-        Box(panel_grid[5, 1:4]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[5, 1:3]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[5, 4]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
         Box(panel_grid[5, 5]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
         Box(panel_grid[5, 6]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
-        Box(panel_grid[5, 7]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
-        Box(panel_grid[7, 1:4]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[7, 1:3]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[7, 4]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
         Box(panel_grid[7, 5]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
         Box(panel_grid[7, 6]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
-        Box(panel_grid[7, 7]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
 
         options = PLOT_OPTIONS
 
@@ -159,25 +159,22 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                             Button(panel_grid[3, 4:6];  SPINNER_UP_ATTRS...),
                             Button(panel_grid[3, 4:6];  SPINNER_DOWN_ATTRS...),
                             (0, 10, Int)),
-            :plot1      =>  Menu(panel_grid[5, 1:4];  merge(MENU_ATTRS, Dict(:default => app.layout.plot1, :options => options))...),
-            :plot2      =>  Menu(panel_grid[7, 1:4];  merge(MENU_ATTRS, Dict(:default => app.layout.plot2, :options => options))...),
-            :plot1_ch1  =>  Toggle(panel_grid[5, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH1))...),
-            :plot1_ch2  =>  Toggle(panel_grid[5, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH2))...),
-            :plot2_ch1  =>  Toggle(panel_grid[7, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH1))...),
-            :plot2_ch2  =>  Toggle(panel_grid[7, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH2))...),
-            # Third channel: inert when the acquisition writes only two, but
-            # always present so the panel does not have to be rebuilt when a
-            # run's channel count changes.
-            :plot1_ch3  =>  Toggle(panel_grid[5, 7];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch3, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH3))...),
-            :plot2_ch3  =>  Toggle(panel_grid[7, 7];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch3, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH3))...),
+            :plot1      =>  Menu(panel_grid[5, 1:3];  merge(MENU_ATTRS, Dict(:default => app.layout.plot1, :options => options))...),
+            :plot2      =>  Menu(panel_grid[7, 1:3];  merge(MENU_ATTRS, Dict(:default => app.layout.plot2, :options => options))...),
+            :plot1_ch1  =>  Toggle(panel_grid[5, 4];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH1))...),
+            :plot1_ch2  =>  Toggle(panel_grid[5, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH2))...),
+            :plot1_ch3  =>  Toggle(panel_grid[5, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot1_ch3, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH3))...),
+            :plot2_ch1  =>  Toggle(panel_grid[7, 4];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch1, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH1))...),
+            :plot2_ch2  =>  Toggle(panel_grid[7, 5];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch2, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH2))...),
+            :plot2_ch3  =>  Toggle(panel_grid[7, 6];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.layout.plot2_ch3, :height => 32, :width => 32, :markersize => 32, :length => 32, :framecolor_active => PLOT_COLOR_CH3))...),
         )
 
-        Label(panel_grid[5, 5]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "1"))...)
-        Label(panel_grid[5, 6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "2"))...)
-        Label(panel_grid[5, 7]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "3"))...)
-        Label(panel_grid[7, 5]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "1"))...)
-        Label(panel_grid[7, 6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "2"))...)
-        Label(panel_grid[7, 7]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "3"))...)
+        Label(panel_grid[5, 4]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "1"))...)
+        Label(panel_grid[5, 5]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "2"))...)
+        Label(panel_grid[5, 6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "3"))...)
+        Label(panel_grid[7, 4]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "1"))...)
+        Label(panel_grid[7, 5]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "2"))...)
+        Label(panel_grid[7, 6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "3"))...)
 
         function commit_layout_value!(key::Symbol, value)
             setfield!(app.layout, key, value)
@@ -245,7 +242,7 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
             end
         end
 
-        foreach(n -> colsize!(panel_grid, n, 28), 1:7)
+        foreach(n -> colsize!(panel_grid, n, 28), 1:6)
         colgap!(panel_grid, 8)
         rowgap!(panel_grid, 3, 32)
         rowgap!(panel_grid, 4, 8)
