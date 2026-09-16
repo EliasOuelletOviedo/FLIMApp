@@ -471,9 +471,18 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol)
     if selection == PLOT_COMMAND
         add_setpoint_highlight!(axis, app_run)
 
-        cmd1_x, cmd1_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.command1)
+        # One trace per region, on that region's own timestamps: in round-robin
+        # ROI mode each ROI is regulated by its own controller and only sees
+        # every nth instance, so there is no single app-wide command series to
+        # draw (see RoiSeries.command, data_types.jl).
+        for series in app_run.rois_series
+            cmd_x, cmd_y = plot_xy_observables(app, app_run, series.timestamps, series.command)
+            lines!(axis, cmd_x, cmd_y, color=PLOT_COLOR_CH1, linewidth=PLOT_LINEWIDTH)
+        end
+
+        # Output 2 still drives one physical channel from the worker's own PI
+        # pair (serial.jl's serial_signal_loop), so it stays a single trace.
         cmd2_x, cmd2_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.command2)
-        lines!(axis, cmd1_x, cmd1_y, color=PLOT_COLOR_CH1, linewidth=PLOT_LINEWIDTH)
         lines!(axis, cmd2_x, cmd2_y, color=PLOT_COLOR_CH2, linewidth=PLOT_LINEWIDTH)
     elseif selection == PLOT_RATIO
         draw_ratio_plot!(axis, app, app_run)
@@ -742,9 +751,10 @@ function lookup_plot_series(app_run, plot_label, time_range, toggles)
     end
 
     if plot_label == PLOT_COMMAND
-        ts = app_run.timestamps[]
-        accumulate_windowed!(xs, ys, ts, app_run.command1[], time_range)
-        accumulate_windowed!(xs, ys, ts, app_run.command2[], time_range)
+        for series in app_run.rois_series
+            accumulate_windowed!(xs, ys, series.timestamps[], series.command[], time_range)
+        end
+        accumulate_windowed!(xs, ys, app_run.timestamps[], app_run.command2[], time_range)
         return (xs, ys)
     end
 
@@ -754,12 +764,13 @@ end
 """
     notify_roi_series!(series::RoiSeries)
 
-Notify one region's time-series observables — timestamps, ratio,
+Notify one region's time-series observables — timestamps, PI command, ratio,
 concentration, each channel's mean intensity, and their smoothed
 counterparts.
 """
 function notify_roi_series!(series::RoiSeries)
     notify(series.timestamps)
+    notify(series.command)
     notify(series.ratio)
     notify(series.ratio_smooth)
     notify(series.concentration)

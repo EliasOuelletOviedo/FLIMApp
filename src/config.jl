@@ -158,6 +158,26 @@ possible — so this has no effect on those two modes.
 """
 const DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ = 1000.0
 
+"""
+    ANALOG_OUTPUT_MAX_MV::Int
+
+Hard ceiling, in mV, on every analog level this app ever commands a trigger
+box to produce. Not a preference — a safety limit protecting whatever is wired
+to the analog outputs.
+
+Every writer must clamp to it, and there are two: `write_pwm_command!`
+(serial.jl), driving outputs 3 and 4 from the PI loop, and
+`command_to_power_mv` (roi.jl), behind the per-ROI power buffer and the
+whole-frame command. They used to disagree — the PI path emitted up to 5000
+while the power path stopped at 1000, so the same 100% command meant five
+different volts depending on whether ROI mode happened to be on. Anything
+connected to output 3 saw that as a 5x step on a toggle unrelated to it.
+
+Lives here, in the first file loaded, precisely so no later module can be
+written against a different idea of full scale.
+"""
+const ANALOG_OUTPUT_MAX_MV = 1000
+
 # =============================================================================
 # UI THEME DEFINITIONS
 # =============================================================================

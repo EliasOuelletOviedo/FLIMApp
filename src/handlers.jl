@@ -112,10 +112,10 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
 
     on(blocks.stop_button.clicks) do _
         if app_run.running[] && !app_run.paused[]
-            stop_pressed(app_run)
+            stop_pressed(app, app_run)
         else
             if app_run.running[]
-                stop_pressed(app_run)
+                stop_pressed(app, app_run)
             end
             clear_runtime_plots!(app, app_run, blocks)
         end
@@ -162,23 +162,23 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
         end
     end
 
-    on(blocks.connect_button.clicks) do _
-        if app_run.serial_conn !== nothing
-            zero_all_outputs!(app_run.serial_conn)
+    on(blocks.connect_button1.clicks) do _
+        if app_run.serial1 !== nothing
+            zero_all_outputs!(app_run.serial1)
 
             try
-                close(app_run.serial_conn)
-                @info "Serial port disconnected"
+                close(app_run.serial1)
+                @info "Serial port 1 disconnected"
             catch e
-                @warn "Error while disconnecting serial port" error=string(e)
+                @warn "Error while disconnecting serial port 1" error=string(e)
             end
 
-            app_run.serial_conn = nothing
-            blocks.connect_button.label[] = "CONNECT"
+            app_run.serial1 = nothing
+            blocks.connect_button1.label[] = "CONNECT"
             return
         end
 
-        selected_port = blocks.port_menu.selection[]
+        selected_port = blocks.port_menu1.selection[]
         if !(selected_port isa AbstractString) || selected_port == "No port selected"
             @warn "No port selected"
             show_status!(blocks, "Select a serial port first")
@@ -187,13 +187,51 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
 
         ser = connect_to_port(selected_port)
         if ser === nothing
-            blocks.connect_button.label[] = "CONNECT"
+            blocks.connect_button1.label[] = "CONNECT"
             show_status!(blocks, "Could not connect to $selected_port")
             return
         end
 
-        app_run.serial_conn = ser
-        blocks.connect_button.label[] = "DISCONNECT"
+        # Nothing else resets the box's outputs, and it keeps driving whatever
+        # it last held — across an app restart, or a crash that never reached
+        # STOP. Connecting is the first moment this app can vouch for the
+        # hardware's state, so it starts by making that state zero.
+        zero_all_outputs!(ser)
+
+        app_run.serial1 = ser
+        blocks.connect_button1.label[] = "DISCONNECT"
+    end
+
+    on(blocks.connect_button2.clicks) do _
+        if app_run.serial2 !== nothing
+            try
+                close(app_run.serial2)
+                @info "Serial port 2 disconnected"
+            catch e
+                @warn "Error while disconnecting serial port 2" error=string(e)
+            end
+
+            app_run.serial2 = nothing
+            blocks.connect_button2.label[] = "CONNECT"
+            return
+        end
+
+        selected_port = blocks.port_menu2.selection[]
+        if !(selected_port isa AbstractString) || selected_port == "No port selected"
+            @warn "No port selected"
+            show_status!(blocks, "Select a serial port first")
+            return
+        end
+
+        ser = connect_to_port(selected_port)
+        if ser === nothing
+            blocks.connect_button2.label[] = "CONNECT"
+            show_status!(blocks, "Could not connect to $selected_port")
+            return
+        end
+
+        app_run.serial2 = ser
+        blocks.connect_button2.label[] = "DISCONNECT"
     end
 
     for (key, btn) in panel

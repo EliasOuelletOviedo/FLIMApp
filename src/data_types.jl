@@ -382,6 +382,13 @@ both modes share one code path.
 - `timestamps::Observable{Vector{Float64}}`: this region's own instance timestamps
 - `ratio` / `ratio_smooth` / `ratio_kalman`: the intensity-ratio time series and its live Kalman filter state
 - `concentration` / `concentration_smooth` / `concentration_kalman`: the Hill-calibrated concentration series and its filter state
+- `command::Observable{Vector{Float64}}`: this region's own PI output — in
+  round-robin ROI mode each region is regulated by its own controller
+  (`RoiPowerControl`, roi.jl) and drives its own share of the laser-power
+  buffer, so the Command plot shows one trace per ROI rather than one for the
+  whole run. In spatial-mask mode there is a single controller and every
+  region carries a copy of its output, which reproduces the old single-trace
+  display
 - `channels::Vector{RoiChannelIntensity}`: per-channel mean intensity, one entry per acquisition channel
 
 `channels` is sized when the series are rebuilt (`rebuild_roi_series!`,
@@ -395,6 +402,7 @@ struct RoiSeries
     concentration::Observable{Vector{Float64}}
     concentration_smooth::Observable{Vector{Float64}}
     concentration_kalman::KalmanState
+    command::Observable{Vector{Float64}}
     channels::Vector{RoiChannelIntensity}
 end
 
@@ -413,6 +421,7 @@ function RoiSeries(channel_count::Integer=2)
         Observable(Float64[]),
         Observable(Float64[]),
         KalmanState(),
+        Observable(Float64[]),
         [RoiChannelIntensity() for _ in 1:max(1, channel_count)]
     )
 end
@@ -470,7 +479,8 @@ during execution. It is NOT serialized.
 - `autoscaler_task::Union{Task, Nothing}`: periodic axis autoscaling task
 - `infos_task::Union{Task, Nothing}`: periodic info/status update task
 - `serial_task::Union{Task, Nothing}`: periodic serial command task
-- `serial_conn::Union{SerialPort, Nothing}`: open serial connection, if any
+- `serial1::Union{SerialPort, Nothing}`: open serial connection 1, if any
+- `serial2::Union{SerialPort, Nothing}`: open serial connection 2, if any
 - `preview::Observable{Union{Nothing, FramePreview}}`: the most recent
   downsampled frame snapshot, overwritten (not appended to) each update and
   rendered by the image plot. `nothing` until the first preview is built, and
@@ -511,6 +521,13 @@ during execution. It is NOT serialized.
   (acquisition.jl) reads it every cycle from its own worker thread
   (`Threads.@spawn`), not the GUI thread; the target-frequency textbox
   (GUI.jl/handlers.jl) writes to it live, so it takes effect mid-run
+- `roi_scan_order::Vector{Int}`: the order the galvo trigger box was actually
+  programmed to visit the drawn ROIs in — `roi_scan_order[k]` indexes
+  `rois[]` for the ROI scanned in cycle position `k`. Recorded by
+  `build_and_send_roi_trigger_buffer!` (roi.jl) at upload time rather than
+  recomputed later, since the drawn ROI set can change afterwards while the
+  hardware keeps replaying the buffer it was given. Empty until a first
+  upload; `RoiPowerControl` falls back to the identity order then
 - `imported_image_size::Tuple{Int,Int}`: `(width, height)` in pixels of the
   most recently imported ROI-popup image (roi_popup.jl's `im_import_button`
   handler) — `rois[]`'s coordinates are in this image's own pixel space.
@@ -529,7 +546,8 @@ mutable struct AppRun
     autoscaler_task::Union{Task, Nothing}
     infos_task::Union{Task, Nothing}
     serial_task::Union{Task, Nothing}
-    serial_conn::Union{SerialPort, Nothing}
+    serial1::Union{SerialPort, Nothing}
+    serial2::Union{SerialPort, Nothing}
     preview::Observable{Union{Nothing, FramePreview}}
     preview_enabled::Threads.Atomic{Bool}
     rois_series::Vector{RoiSeries}
@@ -544,6 +562,7 @@ mutable struct AppRun
     rois::Observable{Vector{RoiCoordinates}}
     target_frequency::Threads.Atomic{Float64}
     imported_image_size::Tuple{Int,Int}
+    roi_scan_order::Vector{Int}
 end
 
 """
@@ -556,6 +575,7 @@ function AppRun()
         nothing,
         Threads.Atomic{Bool}(false),
         Threads.Atomic{Bool}(false),
+        nothing,
         nothing,
         nothing,
         nothing,
@@ -575,6 +595,7 @@ function AppRun()
         Observable(ProtocolSettings()),
         Observable(RoiCoordinates[]),
         Threads.Atomic{Float64}(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ),
-        (1024, 1024)
+        (1024, 1024),
+        Int[]
     )
 end

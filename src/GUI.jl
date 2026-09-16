@@ -196,8 +196,9 @@ end
 """
     make_control_widgets!(button_grid, panelbtn_grid, initial_ratio_combination)
 
-Create the START/CLEAR buttons, the data-folder path control, serial port
-menu + CONNECT button, info label, mode/ratio menus, and the panel switch
+Create the START/CLEAR buttons, the data-folder path control, two serial
+port menu + CONNECT button pairs (independent connections, `serial1`/
+`serial2` on `AppRun`), info label, mode/ratio menus, and the panel switch
 buttons. Returns a NamedTuple of the created widgets.
 
 The IRF path control the FLIM layout carried is gone — a ratiometric
@@ -220,22 +221,26 @@ function make_control_widgets!(button_grid, panelbtn_grid, initial_ratio_combina
     no_port_selected_label = "No port selected"
 
     initial_port_options = port_options(no_port_selected_label)
-    port = Menu(button_grid[3, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => initial_port_options, :default => 1))...)
+    port1 = Menu(button_grid[3, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => initial_port_options, :default => 1))...)
 
-    connect = Button(button_grid[3, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
+    connect1 = Button(button_grid[3, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
 
-    label = Label(button_grid[4, 1], "Frequency: -- Hz\nFile: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
+    port2 = Menu(button_grid[4, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => initial_port_options, :default => 1))...)
+
+    connect2 = Button(button_grid[4, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
+
+    label = Label(button_grid[5, 1], "Frequency: -- Hz\nFile: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
     default_target_freq_string = string(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ)
-    target_freq = Textbox(button_grid[4, 2]; merge(SPINNER_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Target frequency (Hz)", :displayed_string => default_target_freq_string, :stored_string => default_target_freq_string, :validator => make_float_range_validator(0.01, 1.0e6)))...)
+    target_freq = Textbox(button_grid[5, 2]; merge(SPINNER_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Target frequency (Hz)", :displayed_string => default_target_freq_string, :stored_string => default_target_freq_string, :validator => make_float_range_validator(0.01, 1.0e6)))...)
 
-    mode = Menu(button_grid[5, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime", "Save"]))...)
+    mode = Menu(button_grid[6, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime", "Save"]))...)
 
     # Occupies the slot the "1/2/3 lifetimes" menu used to. All six ordered
     # channel pairs are always offered regardless of how many channels the
     # acquisition writes: a combination naming an absent channel yields a NaN
     # ratio rather than blocking the run, and the per-channel intensity series
     # stay usable either way.
-    ratio = Menu(button_grid[5, 2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => RATIO_COMBINATION_OPTIONS, :default => initial_ratio_combination))...)
+    ratio = Menu(button_grid[6, 2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => RATIO_COMBINATION_OPTIONS, :default => initial_ratio_combination))...)
 
     Box(button_grid[2, 1:2]; PATH_BOX_ATTRS...)
 
@@ -247,19 +252,22 @@ function make_control_widgets!(button_grid, panelbtn_grid, initial_ratio_combina
     )
 
     return (start_button=start, stop_button=stop,
-            folder_path_textbox=folder_path, folder_button=folder_button, port_menu=port,
-            connect_button=connect, info_label=label, target_freq_textbox=target_freq,
+            folder_path_textbox=folder_path, folder_button=folder_button,
+            port_menu1=port1, connect_button1=connect1,
+            port_menu2=port2, connect_button2=connect2,
+            info_label=label, target_freq_textbox=target_freq,
             mode_menu=mode, ratio_menu=ratio,
             panel_buttons=panel, no_port_selected_label=no_port_selected_label)
 end
 
 """
-    start_port_menu_refresher!(fig, port_menu, no_port_label)
+    start_port_menu_refresher!(fig, port_menus, no_port_label)
 
-Launch a background task that periodically refreshes `port_menu`'s options
-while the figure window is open, and exits once the window is closed.
+Launch a background task that periodically refreshes each menu in
+`port_menus` (a collection of `Menu`s) while the figure window is open, and
+exits once the window is closed.
 """
-function start_port_menu_refresher!(fig, port_menu, no_port_label)
+function start_port_menu_refresher!(fig, port_menus, no_port_label)
     @async begin
         was_open = false
 
@@ -268,7 +276,9 @@ function start_port_menu_refresher!(fig, port_menu, no_port_label)
 
             if is_window_open
                 was_open = true
-                refresh_port_menu!(port_menu; no_port_label=no_port_label)
+                for port_menu in port_menus
+                    refresh_port_menu!(port_menu; no_port_label=no_port_label)
+                end
             elseif was_open
                 break
             end
@@ -329,8 +339,10 @@ function make_gui(app, app_run)
         stop_button         = widgets.stop_button,
         folder_path_textbox = widgets.folder_path_textbox,
         folder_button       = widgets.folder_button,
-        port_menu           = widgets.port_menu,
-        connect_button      = widgets.connect_button,
+        port_menu1          = widgets.port_menu1,
+        connect_button1     = widgets.connect_button1,
+        port_menu2          = widgets.port_menu2,
+        connect_button2     = widgets.connect_button2,
         target_freq_textbox = widgets.target_freq_textbox,
         mode_menu           = widgets.mode_menu,
         ratio_menu          = widgets.ratio_menu,
@@ -342,7 +354,7 @@ function make_gui(app, app_run)
         save_progress_axis  = axes.save_progress_axis
     )
 
-    start_port_menu_refresher!(fig, widgets.port_menu, widgets.no_port_selected_label)
+    start_port_menu_refresher!(fig, (widgets.port_menu1, widgets.port_menu2), widgets.no_port_selected_label)
     draw_initial_plots!(app, app_run, blocks)
 
     # Axis autoscaling is handled by plotting.jl's autoscale_values!/autoscale_plot!

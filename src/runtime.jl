@@ -15,19 +15,26 @@ using DataFrames
 using Base.Threads
 
 """
-    accumulate_roi_sample!(app, series::RoiSeries, frame::RegionFrame, timestamp::Float64)
+    accumulate_roi_sample!(app, series::RoiSeries, frame::RegionFrame, timestamp::Float64, command::Float64)
 
 Append one instance's results for one region — the ratio, the concentration,
 each channel's mean intensity, and their smoothed companions — plus that
-region's own timestamp onto its time-series observables.
+region's own timestamp and the PI `command` in force for it onto its
+time-series observables.
+
+`command` is passed in rather than read off the frame because who computed it
+depends on the ROI model: in round-robin mode it is this region's own
+controller (`RoiPowerControl`, roi.jl), in spatial-mask mode the worker's
+single PI pair, shared by every region.
 
 Which `RoiSeries` a `RegionFrame` is routed to is decided by the caller
 (`consumer_loop`), not here: in spatial-mask mode region `i` goes to series
 `i`, while in round-robin mode the single region goes to whichever series the
 scan slot points at.
 """
-function accumulate_roi_sample!(app, series::RoiSeries, frame::RegionFrame, timestamp::Float64)
+function accumulate_roi_sample!(app, series::RoiSeries, frame::RegionFrame, timestamp::Float64, command::Float64)
     push!(series.timestamps[], timestamp)
+    push!(series.command[], command)
 
     push!(series.ratio[], frame.ratio)
     append_smooth_value!(app, series.ratio, series.ratio_smooth, series.timestamps, series.ratio_kalman)
@@ -92,6 +99,59 @@ function realtime_capture_dataframe(channel_count::Integer)
 end
 
 """
+    release_hardware_outputs!(app, app_run)
+
+Drive every output on both trigger boxes back to its resting state: analog and
+digital outputs on the galvo box (`zero_all_outputs!`, serial.jl) and the power
+buffer on the second one (`zero_roi_power_buffer!`, roi.jl).
+
+The single place that answers "the run is over, stop driving things". Called
+from `stop_pressed` (the STOP button) *and* from `consumer_loop`'s `finally`,
+because those are two genuinely different ways for a run to end and only the
+first used to zero anything — a Save run that reached its last file, or a
+worker that threw, left the outputs energized at whatever the controller last
+commanded.
+
+Safe to call twice, with no device connected, or on a dead port: both helpers
+no-op on `nothing` and swallow their own failures.
+"""
+function release_hardware_outputs!(app, app_run)
+    if app_run.serial1 !== nothing
+        zero_all_outputs!(app_run.serial1)
+    end
+
+    zero_roi_power_buffer!(app, app_run)
+
+    return nothing
+end
+
+"""
+    scan_position_to_roi(scan_order, slot_key, n_rois)::Int
+
+Which ROI series a round-robin scan slot belongs to.
+
+`slot_key` counts scan *positions* around the cycle, while `rois_series` (and
+`app_run.rois[]`, which it mirrors) is in the order the ROIs were drawn. Those
+two orders are not the same: `roi_trigger_buffer` (roi.jl) lays the ROIs out
+along `optimize_centers`' shortest tour, so the ROI physically scanned first
+is whichever one that tour starts at, not the first one drawn.
+
+`scan_order` is the permutation the trigger box was actually programmed with
+(`app_run.roi_scan_order`). An empty or wrong-length one — no upload happened,
+or the ROI set changed after it did — falls back to treating the two orders as
+identical, which is exactly the behavior from before the mapping existed.
+"""
+function scan_position_to_roi(scan_order::Vector{Int}, slot_key::Integer, n_rois::Integer)::Int
+    position = mod1(Int(slot_key), Int(n_rois))
+
+    if length(scan_order) != Int(n_rois)
+        return position
+    end
+
+    return clamp(scan_order[position], 1, Int(n_rois))
+end
+
+"""
     consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback", use_spatial_masks=true)
 
 Consumes acquisition samples from the channel and updates the `app_run`
@@ -137,6 +197,37 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
     warned_ambiguous_roi_gap = Ref(false)
     realtime_frame_df = realtime_capture_dataframe(app_run.channel_count)
 
+    # The order the galvo box was actually programmed to visit the ROIs in,
+    # snapshotted for the run: `roi_scan_order[k]` is the index into
+    # `rois_series` of the ROI scanned in cycle position `k`. Empty when no
+    # upload happened (no device, ROI mode off), where scan position and drawn
+    # order coincide by default.
+    roi_scan_order = copy(app_run.roi_scan_order)
+
+    # Per-ROI PI control: every instance measures every ROI, so every instance
+    # advances all n controllers and produces all n commands at once.
+    #
+    # Deliberately NOT gated on `serial2` being connected: this also produces
+    # the per-ROI traces the Command plot draws, so the plot has to work with
+    # no power hardware attached. Only the *upload* checks for the device.
+    roi_power = RoiPowerControl(app.protocol, roi_scan_order, length(app_run.rois_series))
+
+    # How this run gets its power onto the hardware. Three ways, and exactly one
+    # applies — `serial_signal_loop` consults the same helper, so only ever one
+    # writer owns the analog output.
+    #
+    # - ROI + protocol on with two or more ROIs: alternating set-and-wait
+    #   sequences on the galvo box itself (`RoiPowerSequencer`, roi.jl). No
+    #   second device involved.
+    # - ROI on with two or more ROIs but no protocol: the power box's replayed
+    #   sample buffer, as before.
+    # - a single region (ROI off, or one ROI): one held level on analog output 3.
+    direct_output = drives_analog_output_directly(app, app_run)
+    use_power_sequencer = !direct_output && app.protocol.active
+    push_power = !direct_output && !use_power_sequencer
+
+    power_sequencer = use_power_sequencer ? RoiPowerSequencer() : nothing
+
     try
         for sample in app_run.channel
             while app_run.running[] && app_run.paused[]
@@ -158,7 +249,34 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                 # not track) are dropped rather than written past the end.
                 for (i, region) in enumerate(sample.regions)
                     i > n_rois && break
-                    accumulate_roi_sample!(app, app_run.rois_series[i], region, sample.timestamps)
+
+                    # Each ROI is regulated by its own controller, all advanced
+                    # from this one instance. Computed before accumulating so
+                    # the command lands on the same index as its timestamp.
+                    command = update_roi_power_command!(roi_power, i, region.ratio,
+                                                        sample.protocol_setpoint, sample.timestamps,
+                                                        app.controller, series_smooth_level(app.layout))
+
+                    accumulate_roi_sample!(app, app_run.rois_series[i], region, sample.timestamps, command)
+                end
+
+                if power_sequencer !== nothing
+                    # Rebuild the idle sequence with the new levels and swap onto
+                    # it, leaving the running one to be parked — the output is
+                    # never interrupted to be updated.
+                    log_roi_power_commands(roi_power, sample.frame_index)
+                    push_roi_power_sequence!(app, app_run, power_sequencer, roi_power)
+                elseif push_power
+                    # Every ROI's command just changed, so the whole buffer is
+                    # rebuilt and re-sent — one upload per acquired image.
+                    log_roi_power_commands(roi_power, sample.frame_index)
+                    push_roi_power_buffer!(app, app_run, roi_power)
+                elseif !isempty(sample.regions)
+                    # One region — the whole frame, or the single ROI the galvo
+                    # traces for the entire period. One command, written straight
+                    # to the galvo box's analog output 3 as a held level. No
+                    # buffer and no second box involved.
+                    push_whole_image_command!(app_run, roi_power.commands[1])
                 end
             else
                 # Round-robin: instance 1 -> ROI 1, instance 2 -> ROI 2, ...,
@@ -180,7 +298,7 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                     slot, skipped, ambiguous = next_roi_slot!(roi_slot_tracker, sample.file_time, slot_key)
 
                     if skipped > 0
-                        @warn "Gap between acquisition instances spans more than one ROI scan; assuming the source wrote nothing for it and advancing ROI assignment to stay aligned" instance=sample.instance_index skipped_scans=skipped period_s=round(roi_slot_tracker.period_est_s, digits=3) roi_index=mod1(slot, n_rois)
+                        @warn "Gap between acquisition instances spans more than one ROI scan; assuming the source wrote nothing for it and advancing ROI assignment to stay aligned" instance=sample.instance_index skipped_scans=skipped period_s=round(roi_slot_tracker.period_est_s, digits=3) roi_index=scan_position_to_roi(roi_scan_order, slot, n_rois)
                     elseif ambiguous && !warned_ambiguous_roi_gap[]
                         @warn "Delay between acquisition instances doesn't line up with the expected scan period; ROI assignment may drift — check Scan time / Shift time against the actual acquisition" instance=sample.instance_index expected_period_s=round(roi_slot_tracker.period_est_s, digits=3)
                         warned_ambiguous_roi_gap[] = true
@@ -189,10 +307,29 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
                     slot_key = slot
                 end
 
-                roi_idx = mod1(slot_key, n_rois)
+                # `slot_key` counts *scan positions*, but the series (and the
+                # drawn ROI set they mirror) are in the order the ROIs were
+                # drawn — and the trigger box visits them in the optimized tour
+                # order instead (`ordered_roi_indices`, roi.jl). Mapping through
+                # the order the box was actually programmed with is what puts
+                # each scan's measurement on the ROI it really came from.
+                roi_idx = scan_position_to_roi(roi_scan_order, slot_key, n_rois)
 
                 if !isempty(sample.regions)
-                    accumulate_roi_sample!(app, app_run.rois_series[roi_idx], sample.regions[1], sample.timestamps)
+                    # Only the ROI this instance covered advances; the others
+                    # keep the command they last held. Computed before
+                    # accumulating so the command lands on the same index as the
+                    # timestamp it belongs to.
+                    command = update_roi_power_command!(roi_power, roi_idx, sample.regions[1].ratio,
+                                                        sample.protocol_setpoint, sample.timestamps,
+                                                        app.controller, series_smooth_level(app.layout))
+
+                    accumulate_roi_sample!(app, app_run.rois_series[roi_idx], sample.regions[1], sample.timestamps, command)
+
+                    if push_power
+                        log_roi_power_commands(roi_power, sample.frame_index)
+                        push_roi_power_buffer!(app, app_run, roi_power)
+                    end
                 end
             end
 
@@ -269,6 +406,13 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
         blocks.stop_button.label[] = "CLEAR"
     catch e
         @error "Consumer error" exception=(e, catch_backtrace())
+    finally
+        # Whatever ends this loop — STOP, a Save run reaching its last file, a
+        # worker that died, an exception above — the hardware must not be left
+        # holding the last commanded level. `stop_pressed` covers only the STOP
+        # button, so without this a run that finished on its own kept driving
+        # the outputs indefinitely.
+        release_hardware_outputs!(app, app_run)
     end
 end
 
@@ -316,6 +460,7 @@ Does not notify — callers batch their own notifications.
 """
 function reset_roi_series!(series::RoiSeries)
     empty!(series.timestamps[])
+    empty!(series.command[])
     empty!(series.ratio[])
     empty!(series.ratio_smooth[])
     empty!(series.concentration[])
@@ -332,20 +477,26 @@ end
 """
     use_spatial_roi_masks(app)::Bool
 
-Which of the two ROI models a run should use.
+Which of the two ROI models a run should use — always spatial masks now.
 
-Round-robin applies only when the ROI toggle **and** the protocol are both on:
-that is the configuration where the trigger box is actually driving the galvo
-from ROI to ROI, so each instance covers one ROI and the frames must be dealt
-out in turn. In every other configuration the acquisition is imaging one fixed
-field that contains all the drawn ROIs at once, so each is measured from every
-instance through its own pixel mask.
+Every acquired image carries all of the drawn ROIs, so each is measured from
+every instance through its own pixel mask, and one instance yields one
+`RegionFrame` per ROI. That holds in ROI mode too: the camera integrates over a
+full scan cycle, so the frame it writes contains every ROI the galvo visited
+during that exposure, not just one of them.
 
-Read once at START and passed to both the worker (which builds the masks) and
-`consumer_loop` (which routes the resulting regions), so the two cannot
-disagree about what a sample's `regions` vector means.
+This used to return `false` when the ROI toggle and the protocol were both on,
+selecting a round-robin model where each instance was assumed to cover a single
+ROI and successive frames were dealt out in turn. That assumption did not match
+the acquisition, which is why per-ROI control saw one ROI's measurement per
+frame instead of all of them.
+
+Kept as a function rather than inlined: it is still read once at START and
+passed to both the worker (which builds the masks) and `consumer_loop` (which
+routes the resulting regions), so the two cannot disagree about what a sample's
+`regions` vector means.
 """
-use_spatial_roi_masks(app)::Bool = !(app.roi.active && app.protocol.active)
+use_spatial_roi_masks(app)::Bool = true
 
 """
     sync_preview_enabled!(app, app_run)
@@ -366,18 +517,18 @@ end
     rebuild_roi_series!(app, app_run; channel_count=app_run.channel_count)
 
 Resize `app_run.rois_series` to one series per drawn ROI (`app_run.rois[]`),
-or a single series when none are drawn.
+or a single series when none are drawn — or when ROI mode is off.
 
-**Not** gated on the ROI toggle (`app.roi.active`). That toggle, together with
-`app.protocol.active`, selects which ROI *model* is in force — round-robin or
-spatial masks, see `use_spatial_roi_masks` — it does not decide whether drawn
-ROIs are measured at all. Gating the series count on it here while the worker
-kept building one mask per drawn ROI is what made every ROI but the first
-vanish: `consumer_loop` drops regions past the end of `rois_series`, so with
-the toggle off the other ROIs were computed and then silently discarded.
+Gated on the ROI toggle (`app.roi.active`): with it off the run reduces over
+the whole frame instead of per-ROI, so there is exactly one region and one
+series no matter how many ROIs happen to be drawn. `start_pressed` enforces
+the other half of that by handing the worker an empty ROI set, which is what
+makes `build_region_masks` (ratio_analysis.jl) return a single whole-image
+mask.
 
-The series count and the worker's region count must agree, and both now derive
-from the same thing — the number of drawn ROIs.
+The series count and the worker's region count must agree — `consumer_loop`
+drops regions past the end of `rois_series` — so both are derived from the
+same two things: the toggle, and the number of drawn ROIs.
 
 Each series is sized for `channel_count` channels, which is what makes
 `accumulate_roi_sample!`'s per-channel loop line up with the worker's
@@ -393,7 +544,7 @@ themselves (not just their contents), so any existing `lines!` plot objects on
 the axes are left pointing at now-orphaned data.
 """
 function rebuild_roi_series!(app, app_run; channel_count::Integer=app_run.channel_count)
-    n = max(1, length(app_run.rois[]))
+    n = app.roi.active ? max(1, length(app_run.rois[])) : 1
     app_run.channel_count = max(Int(channel_count), 1)
     app_run.rois_series = [RoiSeries(app_run.channel_count) for _ in 1:n]
     return nothing
@@ -643,7 +794,11 @@ function start_pressed(app, app_run, blocks)
         # Read once, and shared by the worker (which builds the masks) and the
         # consumer (which routes the regions) so the two cannot disagree.
         use_spatial_masks = use_spatial_roi_masks(app)
-        rois_snapshot = copy(app_run.rois[])
+        # With ROI mode off the ratio is taken over the whole frame, so the
+        # worker gets no ROIs at all — `build_region_masks` (ratio_analysis.jl)
+        # then returns a single whole-image mask. `rebuild_roi_series!` gates on
+        # the same toggle, so the region count and the series count agree.
+        rois_snapshot = app.roi.active ? copy(app_run.rois[]) : RoiCoordinates[]
         # ROI coordinates live in the reference image's pixel space, not the
         # acquisition frame's — capturing a live frame in the ROI popup records
         # the *downsampled* preview's size. Passed along so the worker can
@@ -732,9 +887,10 @@ function tasks_still_running(app_run)::Bool
 end
 
 """
-    stop_pressed(app_run)
+    stop_pressed(app, app_run)
 
-Stop any running acquisition: zero the hardware outputs, clear `running`,
+Stop any running acquisition: zero the hardware outputs (both boxes — see
+`zero_roi_power_buffer!`, roi.jl), clear `running`,
 and close the channel — all synchronously — then `wait` on the background
 tasks from a detached `@async` task rather than inline.
 
@@ -746,10 +902,11 @@ nil'd) so `tasks_still_running` can see the teardown is ongoing and block a
 restart until it completes — `start_pressed` overwrites them with the fresh
 run's tasks once they're done.
 """
-function stop_pressed(app_run)
-    if app_run.serial_conn !== nothing
-        zero_all_outputs!(app_run.serial_conn)
-    end
+function stop_pressed(app, app_run)
+    # Both boxes, every output — see release_hardware_outputs!. Done here as
+    # well as in consumer_loop's finally so STOP takes effect immediately
+    # rather than whenever the consumer notices and unwinds.
+    release_hardware_outputs!(app, app_run)
 
     if !app_run.running[]
         app_run.save_progress[] = NaN

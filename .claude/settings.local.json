@@ -9,7 +9,8 @@
       "Bash(julia --project=. -e ' *)",
       "Bash(echo \"started PID $!\")",
       "Bash(cat /tmp/using_flimapp_test.txt)",
-      "Read(//private/tmp/**)"
+      "Read(//private/tmp/**)",
+      "Bash(julia --project=. -e 'using TIFFApp; println\\(\"OK: module loaded\"\\)')"
     ]
   }
 }

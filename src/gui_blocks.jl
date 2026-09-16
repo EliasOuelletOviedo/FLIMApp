@@ -34,8 +34,10 @@ Base.@kwdef struct GuiBlocks
     stop_button::Button
     folder_path_textbox::Textbox
     folder_button::Button
-    port_menu::Menu
-    connect_button::Button
+    port_menu1::Menu
+    connect_button1::Button
+    port_menu2::Menu
+    connect_button2::Button
     target_freq_textbox::Textbox
     mode_menu::Menu
     ratio_menu::Menu
