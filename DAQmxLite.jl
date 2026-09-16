@@ -42,6 +42,7 @@ const Val_ChanPerLine       = Int32(0)
 const Val_ChanForAllLines   = Int32(1)
 const Val_Cfg_Default       = Int32(-1)
 const Val_Diff              = Int32(10106)
+const Val_PseudoDiff        = Int32(12529)
 const Val_RSE               = Int32(10083)
 const Val_NRSE              = Int32(10078)
 const Val_AC                = Int32(10045)
@@ -283,6 +284,61 @@ function ao_hold(chans::AbstractString, volts::Vector{Float64};
         try; clear_task(th); catch; end
         rethrow()
     end
+end
+
+# ==== Ajouts phase 6 : synchronisation =============================
+
+export withtasks, write_do_u8, wait_until_done, get_samp_clk_rate
+
+"""
+    withtasks(f, noms...)
+
+Comme `withtask`, pour plusieurs tâches : `f` les reçoit dans l'ordre
+des noms, et toutes sont arrêtées puis libérées à la fin, dans l'ordre
+inverse, même en cas d'erreur.
+"""
+function withtasks(f, noms::AbstractString...)
+    ths = TaskHandle[]
+    try
+        for nom in noms
+            push!(ths, create_task(nom))
+        end
+        return f(ths...)
+    finally
+        for th in reverse(ths)
+            try; stop_task(th); catch; end
+            try; clear_task(th); catch; end
+        end
+    end
+end
+
+"""
+    write_do_u8(th, octets; autostart=false)
+
+Forme d'onde numérique : un octet par échantillon, le bit k pilote la
+ligne k de la voie (déclarée avec `add_do`, lignes groupées).
+"""
+function write_do_u8(th, octets::Vector{UInt8}; autostart::Bool = false,
+                     timeout = 10.0)
+    written = Ref{Int32}(0)
+    chk(ccall((:DAQmxWriteDigitalU8, LIB), Int32,
+              (TaskHandle, Int32, UInt32, Float64, UInt32,
+               Ptr{UInt8}, Ptr{Int32}, Ptr{UInt32}),
+              th, Int32(length(octets)), UInt32(autostart), Float64(timeout),
+              UInt32(Val_GroupByChannel), octets, written, C_NULL))
+    return Int(written[])
+end
+
+wait_until_done(th, timeout = 10.0) =
+    chk(ccall((:DAQmxWaitUntilTaskDone, LIB), Int32,
+              (TaskHandle, Float64), th, Float64(timeout)))
+
+"""Cadence réellement retenue par la carte, après arrondi."""
+function get_samp_clk_rate(th)
+    v = Ref{Float64}(0.0)
+    chk(ccall((:DAQmxGetSampClkRate, LIB), Int32,
+              (TaskHandle, Ptr{Float64}), th, v))
+    return v[]
 end
 
 end # module

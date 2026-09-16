@@ -15,7 +15,7 @@ sleep(0.1)
 # Couplage DC forcé : la 6110 accepte AC ou DC par voie, et en AC
 # une tension continue est purement et simplement supprimée.
 d = ai_block("$CARTE/ai0:3", 4, 100_000, 1000;
-             coupling = Val_DC, termcfg = Val_Diff)
+             coupling = Val_DC, termcfg = Val_PseudoDiff)
 clear_task(th)
 
 println("voie    moyenne     écart-type")
