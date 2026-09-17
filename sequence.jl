@@ -69,3 +69,52 @@ function construire()
     push!(x, 0.0); push!(y, 0.0); push!(p8, 0.0); push!(p10, 0.0); push!(d, 0x00)
     return (; x, y, p850 = p8, p1064 = p10, d, debuts, nl)
 end
+
+# ---- Briques pour la génération continue (phase 7) ------------------
+# construire() ci-dessus reste pour les tests 8 et 9.
+
+longueur_creneau() = ne(T_LECT) + ne(T_ACT) + ne(T_PAUSE)
+
+"""
+    creneau(k, suivant, p850, p1064; debut_sequence=false)
+
+Un créneau pour la région `k` : passe de lecture, passe d'actionnement,
+puis pause pendant laquelle les galvos rejoignent `suivant`, un couple
+(x, y). Renvoie les cinq voies du créneau.
+"""
+function creneau(k::Integer, suivant, p850::Real, p1064::Real;
+                 debut_sequence::Bool = false)
+    nl, na, np, ni = ne(T_LECT), ne(T_ACT), ne(T_PAUSE), ne(T_IMP)
+    xc, yc = CENTRES[k]
+    code = UInt8(k - 1) << 4
+
+    lx, ly = spirale(nl, xc, yc)
+    ax, ay = spirale(na, xc, yc)
+    x = vcat(lx, ax, deplacement(np, xc, suivant[1]))
+    y = vcat(ly, ay, deplacement(np, yc, suivant[2]))
+
+    p8  = vcat(fill(Float64(p850), nl), zeros(na + np))
+    p10 = vcat(zeros(nl), fill(Float64(p1064), na), zeros(np))
+
+    d = vcat(fill(code | bit(B_850), nl), fill(code | bit(B_1064), na), fill(code, np))
+    d[1:ni] .|= bit(B_REG)
+    debut_sequence && (d[1:ni] .|= bit(B_SEQ))
+    return (; x, y, p850 = p8, p1064 = p10, d)
+end
+
+"""De (0, 0) au centre de la première région, tout éteint."""
+function entree()
+    np = ne(T_PAUSE)
+    return (; x = deplacement(np, 0.0, CENTRES[1][1]),
+              y = deplacement(np, 0.0, CENTRES[1][2]),
+              p850 = zeros(np), p1064 = zeros(np), d = zeros(UInt8, np))
+end
+
+"""Du centre de la première région à (0, 0), puis `nzero` échantillons à zéro."""
+function sortie(nzero::Integer)
+    np = ne(T_PAUSE)
+    return (; x = vcat(deplacement(np, CENTRES[1][1], 0.0), zeros(nzero)),
+              y = vcat(deplacement(np, CENTRES[1][2], 0.0), zeros(nzero)),
+              p850 = zeros(np + nzero), p1064 = zeros(np + nzero),
+              d = zeros(UInt8, np + nzero))
+end

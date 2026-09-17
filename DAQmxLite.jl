@@ -413,4 +413,21 @@ function samples_generated(th)
     return Int(v[])
 end
 
+
+# ==== Ajouts phase 7 : génération continue =========================
+
+export Val_DoNotAllowRegen, set_regen_mode, cfg_output_buffer
+
+const Val_DoNotAllowRegen = Int32(10158)
+
+"""Régénération des sorties (à fixer avant la première écriture)."""
+set_regen_mode(th, mode) =
+    chk(ccall((:DAQmxSetWriteRegenMode, LIB), Int32,
+              (TaskHandle, Int32), th, Int32(mode)))
+
+"""Taille du tampon de sortie, en échantillons par voie."""
+cfg_output_buffer(th, n::Integer) =
+    chk(ccall((:DAQmxCfgOutputBuffer, LIB), Int32,
+              (TaskHandle, UInt32), th, UInt32(n)))
+
 end # module
