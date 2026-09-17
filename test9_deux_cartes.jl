@@ -7,8 +7,7 @@ include("verif.jl")
 const X = "X6321"
 const S = "S6110"
 # Un train d'impulsions carré produit par le compteur 0 de la 6321 sert
-# d'horloge à toutes les tâches, sur les deux cartes. Ses impulsions de
-# 50 µs sont détectées sans ambiguïté par la 6110, qui exige au moins 10 ns.
+# d'horloge à toutes les tâches, sur les deux cartes, par le câble RTSI.
 const HORLOGE = "/$X/Ctr0InternalOutput"
 
 function jouer_deux_cartes(s)
@@ -32,9 +31,11 @@ function jouer_deux_cartes(s)
         add_ai_voltage(tai, "$X/ai0:2"; termcfg = Val_RSE)
         cfg_sample_clock(tai, FS; source = HORLOGE, nsamp = N)
 
-        # l'horloge elle-même : N impulsions, puis retour au repos
+        # l'horloge elle-même : N + 1 impulsions, puis retour au repos.
+        # La 6110 (S Series) exige une impulsion de plus que le nombre
+        # d'échantillons pour se déclarer terminée ; la 6321 ignore la dernière.
         add_co_pulse_freq(tco, "$X/ctr0", FS; duty = 0.5)
-        cfg_implicit_timing(tco, Val_FiniteSamps, N)
+        cfg_implicit_timing(tco, Val_FiniteSamps, N + 1)
 
         start_task(tax); start_task(tdx); start_task(tas); start_task(tai)  # esclaves
         start_task(tco)                                                    # l'horloge part

@@ -63,12 +63,25 @@ function last_error()
     return GC.@preserve buf unsafe_string(pointer(buf))
 end
 
-"""Vérifie un code de retour DAQmx : < 0 lève, > 0 avertit."""
+"""Description d'un code DAQmx précis (erreur ou avertissement)."""
+function error_string(code::Integer)
+    buf = zeros(UInt8, 2048)
+    ccall((:DAQmxGetErrorString, LIB), Int32,
+          (Int32, Ptr{UInt8}, UInt32), Int32(code), buf, UInt32(length(buf)))
+    return GC.@preserve buf unsafe_string(pointer(buf))
+end
+
+"""
+Vérifie un code de retour DAQmx : < 0 lève, > 0 avertit.
+Pour une erreur, le détail étendu (tâche, voie, valeurs) décrit bien
+l'erreur en cours. Pour un avertissement, il décrirait la dernière
+*erreur* enregistrée, sans rapport : on affiche la description du code.
+"""
 function chk(code::Int32)
     if code < 0
         throw(DAQmxError(code, last_error()))
     elseif code > 0
-        @warn "DAQmx avertissement $code : $(last_error())"
+        @warn "DAQmx avertissement $code : $(error_string(code))"
     end
     return code
 end
