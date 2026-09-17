@@ -18,6 +18,7 @@ const UMAX     = 1.5          # V, plafond de la commande Pockels
 
 const TC   = R * longueur_creneau() / FS   # s entre deux visites d'une même région
 const TACT = ne(T_ACT) / FS
+const COL  = voies_lues()[2]               # colonne de chaque signal dans la relecture
 
 # ---- Cellules simulées : c'est ce que remplacera la mesure FLIM ------------
 const C0_VRAI  = 5.0                    # mM
@@ -45,7 +46,7 @@ function apres_creneau_boucle(s, bloc)
     t = (ne(T_PAUSE) + s * longueur_creneau()) / FS
     nl, na = ne(T_LECT), ne(T_ACT)
     u_cmd = get(commandes, (k, v), 0.0)
-    u_mes = mean(view(bloc, nl + 20 : nl + na - 20, 4))   # puissance réellement produite (AI 3)
+    u_mes = mean(view(bloc, nl + 20 : nl + na - 20, COL[:p1064]))   # puissance réellement produite
 
     # cellule simulée : la lecture voit l'état d'avant l'actionnement de ce créneau
     vrai = chlorure[k]

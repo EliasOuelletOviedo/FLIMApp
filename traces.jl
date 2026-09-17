@@ -1,6 +1,6 @@
 # traces.jl — fichiers de données et tracés SVG, sans aucune dépendance externe.
 # N'utilise que la bibliothèque standard de Julia (Printf, Dates).
-# À inclure après sequence.jl (FS et bits du port 0).
+# À inclure après sequence.jl et generateur.jl (FS, SIGNAUX, valeurs_demandees).
 
 using Printf, Dates
 
@@ -8,30 +8,39 @@ using Printf, Dates
 # Données : deux fichiers CSV, un échantillon par ligne
 # =====================================================================
 
-"""Écrit exactement ce qui a été envoyé aux sorties."""
-function enregistrer_demande(fichier::AbstractString, res; fs = FS)
+"""Écrit exactement ce qui a été envoyé sur toutes les sorties, analogiques et numériques."""
+function enregistrer_demande(fichier::AbstractString, res; fs = FS, signaux = SIGNAUX)
+    voies = [valeurs_demandees(res, s) for s in signaux]
+    entetes = [s.bit === nothing ? "$(s.cle)_V" : string(s.cle) for s in signaux]
     open(fichier, "w") do io
-        println(io, "echantillon,temps_s,galvo_x_V,galvo_y_V,p850_V,p1064_V,",
-                    "port0,porte_850,porte_1064,imp_sequence,imp_region,code_region")
+        println(io, "echantillon,temps_s,", join(entetes, ","), ",port0,code_region")
         for i in eachindex(res.x)
-            b = res.d[i]
-            @printf(io, "%d,%.5f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%d,%d\n",
-                    i, (i - 1) / fs, res.x[i], res.y[i], res.p850[i], res.p1064[i],
-                    b, (b >> B_850) & 1, (b >> B_1064) & 1,
-                    (b >> B_SEQ) & 1, (b >> B_REG) & 1, b >> 4)
+            @printf(io, "%d,%.5f", i, (i - 1) / fs)
+            for (s, v) in zip(signaux, voies)
+                if s.bit === nothing
+                    @printf(io, ",%.6f", v[i])
+                else
+                    print(io, v[i] > 0.5 ? ",1" : ",0")
+                end
+            end
+            @printf(io, ",%d,%d\n", res.d[i], res.d[i] >> 4)
         end
     end
     return fichier
 end
 
-"""Écrit exactement ce que la 6321 a relu."""
-function enregistrer_recu(fichier::AbstractString, res; fs = FS)
+"""Écrit exactement ce que la 6321 a relu, une colonne par voie AI."""
+function enregistrer_recu(fichier::AbstractString, res; fs = FS, signaux = SIGNAUX)
+    lus = sort([s for s in signaux if haskey(res.colonne, s.cle)]; by = s -> s.ai)
     m = res.mesure
     open(fichier, "w") do io
-        println(io, "echantillon,temps_s,ai0_galvo_x_V,ai1_porte_850_V,ai2_p850_V,ai3_p1064_V")
+        println(io, "echantillon,temps_s,", join(["ai$(s.ai)_$(s.cle)_V" for s in lus], ","))
         for i in 1:size(m, 1)
-            @printf(io, "%d,%.5f,%.6f,%.6f,%.6f,%.6f\n",
-                    i, (i - 1) / fs, m[i, 1], m[i, 2], m[i, 3], m[i, 4])
+            @printf(io, "%d,%.5f", i, (i - 1) / fs)
+            for s in lus
+                @printf(io, ",%.5f", m[i, res.colonne[s.cle]])
+            end
+            print(io, "\n")
         end
     end
     return fichier
@@ -44,7 +53,14 @@ end
 const PALETTE = (galvo_x = "#1d4ed8", galvo_y = "#0e7490", p850 = "#c2410c",
                  p1064 = "#be123c", porte = "#334155", code = "#6d28d9",
                  consigne = "#15803d", estime = "#7c3aed", vrai = "#0f172a",
-                 mesure = "#64748b")
+                 mesure = "#64748b", relu = "#0f172a")
+
+"""Couleur d'un signal, la même dans les trois figures."""
+couleur_signal(s) = s.cle === :galvo_x ? PALETTE.galvo_x :
+                    s.cle === :galvo_y ? PALETTE.galvo_y :
+                    s.cle === :p850    ? PALETTE.p850 :
+                    s.cle === :p1064   ? PALETTE.p1064 :
+                    startswith(string(s.cle), "code") ? PALETTE.code : PALETTE.porte
 
 xml(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
 
@@ -74,27 +90,31 @@ function etiquette(v::Real, pas::Real)
 end
 
 """
-    serie(nom, t, v, couleur; mode=:ligne, epaisseur=1.4)
+    serie(nom, t, v, couleur; mode=:ligne, epaisseur=1.4, ligne=0)
 
-Une courbe. `t` doit être croissant. Modes :
-- `:escalier` — chaque valeur est tenue jusqu'à la suivante (sortie d'un convertisseur) ;
-- `:points`   — échantillons reliés, avec un point chacun quand on zoome assez ;
-- `:ligne`    — échantillons reliés ;
-- `:marques`  — points seuls (mesures ponctuelles).
+Une courbe. `t` doit être croissant, et peut être vide : rien n'est alors tracé.
+Modes : `:escalier` (valeur tenue jusqu'à la suivante, comme une sortie de
+convertisseur), `:points` (échantillons reliés, avec un point chacun quand on
+zoome assez), `:ligne`, `:marques` (points seuls). `ligne` place la courbe sur
+une rangée précise d'un panneau numérique (0 : une rangée par courbe).
 """
-serie(nom, t, v, couleur; mode = :ligne, epaisseur = 1.4) =
-    (; nom = string(nom), t, v, couleur, mode, epaisseur)
+serie(nom, t, v, couleur; mode = :ligne, epaisseur = 1.4, ligne = 0) =
+    (; nom = string(nom), t, v, couleur, mode, epaisseur, ligne)
 
-"""Un panneau du graphique : une ou plusieurs séries partageant un axe vertical."""
+"""
+Un panneau : une ou plusieurs séries partageant un axe vertical. Un panneau
+`numerique` empile des rangées ; `etiquettes` donne leurs libellés et
+`plage_ligne` la valeur qui remplit une rangée (1 pour des bits, 5 pour des volts).
+"""
 panneau(titre, series; unite = "", numerique = false, entier = false,
-        hauteur = 150, yplage = nothing) =
-    (; titre = string(titre), series, unite = string(unite), numerique, entier, hauteur, yplage)
+        hauteur = 150, yplage = nothing, etiquettes = String[], plage_ligne = 1.0) =
+    (; titre = string(titre), series, unite = string(unite), numerique, entier,
+       hauteur, yplage, etiquettes, plage_ligne)
 
-"""Nombre d'échantillons d'une série dans la fenêtre [ta, tb]."""
+"""Bornes (en indices) d'une série dans la fenêtre [ta, tb]."""
 function dans_fenetre(s, ta, tb)
-    i0 = searchsortedfirst(s.t, ta)
-    i1 = searchsortedlast(s.t, tb)
-    return i0, i1
+    isempty(s.t) && return (1, 0)
+    return (searchsortedfirst(s.t, ta), searchsortedlast(s.t, tb))
 end
 
 """
@@ -165,26 +185,28 @@ end
     figure_svg(fichier, titre, sous_titre, panneaux; t0, t1, marqueurs, etiquettes)
 
 Empile les panneaux sur un axe du temps commun et écrit le fichier SVG.
-`marqueurs` : instants (s) tracés en pointillés sur tous les panneaux,
-`etiquettes` : leur libellé, affiché en haut du premier panneau.
+`marqueurs` : instants (s) tracés en pointillés sur tous les panneaux ;
+`etiquettes` : leur libellé, affiché au-dessus du premier panneau.
 """
 function figure_svg(fichier::AbstractString, titre, sous_titre, panneaux;
                     t0 = -Inf, t1 = Inf, marqueurs = Float64[], etiquettes = String[],
                     largeur::Integer = 1400)
-    tmin = minimum(first(s.t) for p in panneaux for s in p.series)
-    tmax = maximum(last(s.t) for p in panneaux for s in p.series)
+    pleines = [s for p in panneaux for s in p.series if !isempty(s.t)]
+    isempty(pleines) && error("aucune donnée à tracer")
+    tmin = minimum(first(s.t) for s in pleines)
+    tmax = maximum(last(s.t) for s in pleines)
     ta, tb = max(float(t0), tmin), min(float(t1), tmax)
     tb > ta || error("fenêtre de temps vide : [$ta, $tb]")
 
-    G, D, HT, HA, ESP, BT = 150, 40, 96, 64, 14, 22     # BT : bandeau de titre
+    G, D, HT, HA, ESP, BT = 250, 40, 96, 64, 14, 22     # BT : bandeau de titre
     W = largeur - G - D
     hauteur = HT + sum(BT + p.hauteur for p in panneaux) + ESP * (length(panneaux) - 1) + HA
     en_ms = (tb - ta) < 2.0
     k = en_ms ? 1000.0 : 1.0
     X = t -> G + (t - ta) / (tb - ta) * W
     xt, xpas = graduations(ta * k, tb * k; cible = 10)
-    fenetre = @sprintf("fenêtre %s à %s %s", etiquette(ta * k, xpas / 10), etiquette(tb * k, xpas / 10),
-                       en_ms ? "ms" : "s")
+    fenetre = @sprintf("fenêtre %s à %s %s", etiquette(ta * k, xpas / 10),
+                       etiquette(tb * k, xpas / 10), en_ms ? "ms" : "s")
     reduit = false
 
     open(fichier, "w") do io
@@ -200,9 +222,24 @@ function figure_svg(fichier::AbstractString, titre, sous_titre, panneaux;
         y = HT
         for (ip, p) in enumerate(panneaux)
             h = p.hauteur
-            # titre dans un bandeau au-dessus du panneau : il ne masque jamais une donnée
             @printf(io, "<text x=\"%d\" y=\"%d\" font-size=\"12.5\" font-weight=\"bold\" fill=\"#0f172a\">%s</text>\n",
-                    G, y + 15, xml(p.titre))
+                    G, y + 15, xml(isempty(p.unite) ? p.titre : string(p.titre, "  (", p.unite, ")")))
+            if length(p.series) > 1 && !p.numerique
+                xl = G + W
+                for s in reverse(p.series)
+                    largeur_txt = 7 * length(s.nom) + 30
+                    if s.mode == :marques
+                        @printf(io, "<circle cx=\"%.1f\" cy=\"%d\" r=\"3\" fill=\"%s\"/>\n",
+                                xl - largeur_txt + 13, y + 11, s.couleur)
+                    else
+                        @printf(io, "<line x1=\"%.1f\" y1=\"%d\" x2=\"%.1f\" y2=\"%d\" stroke=\"%s\" stroke-width=\"2.5\"/>\n",
+                                xl - largeur_txt + 5, y + 11, xl - largeur_txt + 21, y + 11, s.couleur)
+                    end
+                    @printf(io, "<text x=\"%.1f\" y=\"%d\" fill=\"#334155\">%s</text>\n",
+                            xl - largeur_txt + 26, y + 15, xml(s.nom))
+                    xl -= largeur_txt + 8
+                end
+            end
             y += BT
             @printf(io, "<rect x=\"%d\" y=\"%d\" width=\"%d\" height=\"%d\" fill=\"#f8fafc\" stroke=\"#cbd5e1\"/>\n",
                     G, y, W, h)
@@ -222,15 +259,24 @@ function figure_svg(fichier::AbstractString, titre, sous_titre, panneaux;
                 end
             end
 
-            if p.numerique
-                hr = (h - 8) / length(p.series)
-                for (j, s) in enumerate(p.series)
-                    base = y + 4 + (j - 1) * hr
-                    Yj = w -> base + hr * (0.82 - 0.64 * w)
+            if all(isempty(s.t) for s in p.series)
+                @printf(io, "<text x=\"%.1f\" y=\"%.1f\" text-anchor=\"middle\" font-size=\"12\" fill=\"#94a3b8\">non relu</text>\n",
+                        G + W / 2, y + h / 2 + 4)
+            elseif p.numerique
+                noms = isempty(p.etiquettes) ? [s.nom for s in p.series] : p.etiquettes
+                hr = (h - 8) / length(noms)
+                for (j, nom) in enumerate(noms)
+                    @printf(io, "<line x1=\"%d\" y1=\"%.2f\" x2=\"%d\" y2=\"%.2f\" stroke=\"#e2e8f0\"/>\n",
+                            G, y + 4 + j * hr, G + W, y + 4 + j * hr)
                     @printf(io, "<text x=\"%d\" y=\"%.2f\" text-anchor=\"end\" fill=\"#334155\">%s</text>\n",
-                            G - 10, base + hr * 0.62, xml(s.nom))
-                    n = trace_serie(io, s, ta, tb, X, Yj, W)
-                    reduit = reduit || n > W
+                            G - 10, y + 4 + (j - 1) * hr + hr * 0.62, xml(nom))
+                end
+                for (idx, s) in enumerate(p.series)
+                    j = s.ligne == 0 ? idx : s.ligne
+                    base = y + 4 + (j - 1) * hr
+                    Yj = w -> base + hr * (0.82 - 0.64 * w / p.plage_ligne)
+                    nn = trace_serie(io, s, ta, tb, X, Yj, W)
+                    reduit = reduit || nn > W
                 end
             else
                 if p.yplage === nothing
@@ -263,33 +309,11 @@ function figure_svg(fichier::AbstractString, titre, sous_titre, panneaux;
                     @printf(io, "<text x=\"%d\" y=\"%.2f\" text-anchor=\"end\" fill=\"#475569\">%s</text>\n",
                             G - 8, Yp(v) + 4, etiquette(v, ypas))
                 end
-                if !isempty(p.unite)
-                    @printf(io, "<text transform=\"translate(%d,%.2f) rotate(-90)\" text-anchor=\"middle\" fill=\"#475569\">%s</text>\n",
-                            G - 58, y + h / 2, xml(p.unite))
-                end
                 for s in p.series
-                    n = trace_serie(io, s, ta, tb, X, Yp, W)
-                    reduit = reduit || n > W
-                end
-                if length(p.series) > 1
-                    xl = G + W
-                    for (j, s) in enumerate(reverse(p.series))
-                        largeur_txt = 7 * length(s.nom) + 30
-                        yl = y - BT + 15
-                        if s.mode == :marques
-                            @printf(io, "<circle cx=\"%.1f\" cy=\"%d\" r=\"3\" fill=\"%s\"/>\n",
-                                    xl - largeur_txt + 13, yl - 4, s.couleur)
-                        else
-                            @printf(io, "<line x1=\"%.1f\" y1=\"%d\" x2=\"%.1f\" y2=\"%d\" stroke=\"%s\" stroke-width=\"2.5\"/>\n",
-                                    xl - largeur_txt + 5, yl - 4, xl - largeur_txt + 21, yl - 4, s.couleur)
-                        end
-                        @printf(io, "<text x=\"%.1f\" y=\"%d\" fill=\"#334155\">%s</text>\n",
-                                xl - largeur_txt + 26, yl, xml(s.nom))
-                        xl -= largeur_txt + 8
-                    end
+                    nn = trace_serie(io, s, ta, tb, X, Yp, W)
+                    reduit = reduit || nn > W
                 end
             end
-
             y += h + ESP
         end
 
@@ -311,7 +335,7 @@ function figure_svg(fichier::AbstractString, titre, sous_titre, panneaux;
 end
 
 # =====================================================================
-# Figures du générateur continu
+# Les trois figures d'un essai : même disposition dans les trois
 # =====================================================================
 
 function marqueurs_creneaux(res; fs = FS)
@@ -319,73 +343,117 @@ function marqueurs_creneaux(res; fs = FS)
             ["R$(e.region) · v$(e.visite)" for e in res.journal])
 end
 
-"""Tout ce qui a été écrit : galvos, puissances, port 0, code de région."""
-function tracer_demande(fichier::AbstractString, res; t0 = -Inf, t1 = Inf,
-                        sous_titre = "", fs = FS)
-    t = collect(0:length(res.x)-1) ./ fs
-    bitv = k -> Float64.((res.d .>> k) .& 0x01)
-    code = Float64.(res.d .>> 4)
-    panneaux = [
-        panneau("Galvo X", [serie("galvo X", t, res.x, PALETTE.galvo_x; mode = :escalier)]; unite = "V"),
-        panneau("Galvo Y", [serie("galvo Y", t, res.y, PALETTE.galvo_y; mode = :escalier)]; unite = "V"),
-        panneau("Puissance 850 nm (commande)",
-                [serie("P850", t, res.p850, PALETTE.p850; mode = :escalier)]; unite = "V", hauteur = 110),
-        panneau("Pockels 1064 nm (commande)",
-                [serie("P1064", t, res.p1064, PALETTE.p1064; mode = :escalier)]; unite = "V", hauteur = 110),
-        panneau("Port 0 — portes et impulsions",
-                [serie("porte 850 · P0.0", t, bitv(B_850), PALETTE.porte; mode = :escalier),
-                 serie("porte 1064 · P0.1", t, bitv(B_1064), PALETTE.porte; mode = :escalier),
-                 serie("début séquence · P0.2", t, bitv(B_SEQ), PALETTE.porte; mode = :escalier),
-                 serie("début région · P0.3", t, bitv(B_REG), PALETTE.porte; mode = :escalier)];
-                numerique = true, hauteur = 124),
-        panneau("Code de région · P0.4 à P0.7 (0 = région 1)",
-                [serie("code", t, code, PALETTE.code; mode = :escalier)]; unite = "code", entier = true, hauteur = 96),
-    ]
-    mq, et = marqueurs_creneaux(res; fs)
-    return figure_svg(fichier, "Demandé — ce qui a été écrit sur les sorties", sous_titre, panneaux;
-                      t0, t1, marqueurs = mq, etiquettes = et)
-end
-
-"""Tout ce que la 6321 a relu, échantillon par échantillon."""
-function tracer_recu(fichier::AbstractString, res; t0 = -Inf, t1 = Inf,
-                     sous_titre = "", fs = FS)
-    m = res.mesure
-    t = collect(0:size(m, 1)-1) ./ fs
-    panneaux = [
-        panneau("AI 0 — galvo X relu", [serie("AI 0", t, m[:, 1], PALETTE.galvo_x; mode = :points)]; unite = "V"),
-        panneau("AI 1 — porte 850 nm relue (P0.0)",
-                [serie("AI 1", t, m[:, 2], PALETTE.porte; mode = :points)]; unite = "V", hauteur = 110),
-        panneau("AI 2 — puissance 850 nm relue",
-                [serie("AI 2", t, m[:, 3], PALETTE.p850; mode = :points)]; unite = "V", hauteur = 110),
-        panneau("AI 3 — Pockels 1064 nm relue",
-                [serie("AI 3", t, m[:, 4], PALETTE.p1064; mode = :points)]; unite = "V", hauteur = 110),
-    ]
-    mq, et = marqueurs_creneaux(res; fs)
-    return figure_svg(fichier, "Reçu — ce que la 6321 a relu", sous_titre, panneaux;
-                      t0, t1, marqueurs = mq, etiquettes = et)
-end
+"""Niveau haut d'une ligne numérique relue, pour superposer sans écart vertical."""
+niveau_haut(v) = maximum(v) > 1.0 ? maximum(v) : 1.0
 
 """
-    enregistrer_essai(res; nom, dossier="resultats", infos="", zooms=[])
+    panneaux_essai(res, quoi; decalage=0)
 
-Écrit, avec un horodatage commun :
-- `…_demande.csv` et `…_recu.csv` : les données brutes ;
-- `…_demande.svg` et `…_recu.svg` : les tracés sur la même fenêtre de temps ;
-- pour chaque `(t0, t1)` de `zooms`, une paire de tracés agrandis.
+Construit les panneaux d'un essai. `quoi` vaut `:demande`, `:recu` ou
+`:comparaison`. Les trois donnent exactement la même disposition — même ordre,
+mêmes hauteurs, mêmes libellés — puisqu'ils sortent de la même fonction.
+`decalage` avance la relecture de N échantillons, pour comparer sans le retard
+de conversion.
+"""
+function panneaux_essai(res, quoi::Symbol; fs = FS, signaux = SIGNAUX, decalage::Integer = 0)
+    t_ecrit = collect(0:length(res.x)-1) ./ fs
+    t_lu = collect(0:size(res.mesure, 1)-1) ./ fs .- decalage / fs
+    rien = Float64[]
+    panneaux = Any[]
+
+    for s in signaux
+        s.bit === nothing || continue
+        lu = haskey(res.colonne, s.cle)
+        series = Any[]
+        if quoi !== :recu
+            push!(series, serie(quoi === :comparaison ? "demandé" : s.nom, t_ecrit,
+                                valeurs_demandees(res, s), couleur_signal(s);
+                                mode = :escalier, epaisseur = 1.4))
+        end
+        if quoi !== :demande
+            push!(series, serie(quoi === :comparaison ? "relu" : "AI $(s.ai)",
+                                lu ? t_lu : rien,
+                                lu ? res.mesure[:, res.colonne[s.cle]] : rien,
+                                quoi === :comparaison ? PALETTE.relu : couleur_signal(s);
+                                mode = :points, epaisseur = 1.2))
+        end
+        push!(panneaux, panneau("$(s.nom) — $(s.sortie)" * (lu ? " → AI $(s.ai)" : ""),
+                                series; unite = "V",
+                                hauteur = s.cle in (:galvo_x, :galvo_y) ? 150 : 115))
+    end
+
+    numeriques = [s for s in signaux if s.bit !== nothing]
+    noms = ["$(s.nom) · $(s.sortie)" * (haskey(res.colonne, s.cle) ? " → AI $(s.ai)" : "")
+            for s in numeriques]
+    lignes = Any[]
+    for (j, s) in enumerate(numeriques)
+        lu = haskey(res.colonne, s.cle)
+        if quoi !== :recu
+            push!(lignes, serie("demandé", t_ecrit, valeurs_demandees(res, s),
+                                couleur_signal(s); mode = :escalier, epaisseur = 1.3, ligne = j))
+        end
+        if quoi !== :demande && lu
+            v = res.mesure[:, res.colonne[s.cle]]
+            # En comparaison, la relecture est ramenée entre 0 et 1 par son propre
+            # niveau haut : les deux courbes se superposent alors exactement si le
+            # timing suit, et seul un écart de temps se voit.
+            push!(lignes, serie("relu", t_lu, quoi === :comparaison ? v ./ niveau_haut(v) : v,
+                                quoi === :comparaison ? PALETTE.relu : couleur_signal(s);
+                                mode = :points, epaisseur = 1.1, ligne = j))
+        end
+    end
+    titre_num = quoi === :recu ? "Port 0 — les huit lignes relues (une rangée par ligne, plage 0 à 5 V)" :
+                quoi === :comparaison ? "Port 0 — les huit lignes, demandé et relu superposés" :
+                "Port 0 — les huit lignes écrites"
+    push!(panneaux, panneau(titre_num,
+                            isempty(lignes) ? Any[serie("", rien, rien, PALETTE.porte)] : lignes;
+                            numerique = true, hauteur = 30 * length(numeriques) + 8,
+                            etiquettes = noms,
+                            plage_ligne = quoi === :recu ? 5.0 : 1.0))
+    return panneaux
+end
+
+const TITRES_ESSAI = (demande = "Demandé — ce qui a été écrit sur les sorties",
+                      recu = "Reçu — ce que la 6321 a relu",
+                      comparaison = "Comparaison — demandé et relu superposés")
+
+function tracer_essai(fichier::AbstractString, res, quoi::Symbol; t0 = -Inf, t1 = Inf,
+                      sous_titre = "", fs = FS, signaux = SIGNAUX, decalage::Integer = 0)
+    mq, et = marqueurs_creneaux(res; fs)
+    return figure_svg(fichier, getfield(TITRES_ESSAI, quoi), sous_titre,
+                      panneaux_essai(res, quoi; fs, signaux, decalage);
+                      t0, t1, marqueurs = mq, etiquettes = et)
+end
+
+tracer_demande(f, res; kw...)     = tracer_essai(f, res, :demande; kw...)
+tracer_recu(f, res; kw...)        = tracer_essai(f, res, :recu; kw...)
+tracer_comparaison(f, res; kw...) = tracer_essai(f, res, :comparaison; kw...)
+
+"""
+    enregistrer_essai(res; nom, dossier="resultats", infos="", zooms=[], decalage=0, donnees=true)
+
+Écrit, avec un horodatage commun : `…_demande.csv` et `…_recu.csv` (les données
+brutes, si `donnees`), puis `…_demande.svg`, `…_recu.svg` et
+`…_comparaison.svg` sur toute la durée, et les mêmes trois tracés pour chaque
+`(t0, t1)` de `zooms`.
 """
 function enregistrer_essai(res; nom = "essai", dossier = "resultats", infos = "",
-                           zooms = Tuple{Float64, Float64}[])
+                           zooms = Tuple{Float64, Float64}[], decalage::Integer = 0,
+                           donnees::Bool = true)
     mkpath(dossier)
     base = joinpath(dossier, string(nom, "_", Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")))
     fin = (size(res.mesure, 1) - 1) / FS
     fichiers = String[]
-    push!(fichiers, enregistrer_demande(base * "_demande.csv", res))
-    push!(fichiers, enregistrer_recu(base * "_recu.csv", res))
-    push!(fichiers, tracer_demande(base * "_demande.svg", res; t1 = fin, sous_titre = infos))
-    push!(fichiers, tracer_recu(base * "_recu.svg", res; t1 = fin, sous_titre = infos))
-    for (j, (a, b)) in enumerate(zooms)
-        push!(fichiers, tracer_demande(base * "_zoom$(j)_demande.svg", res; t0 = a, t1 = b, sous_titre = infos))
-        push!(fichiers, tracer_recu(base * "_zoom$(j)_recu.svg", res; t0 = a, t1 = b, sous_titre = infos))
+    if donnees
+        push!(fichiers, enregistrer_demande(base * "_demande.csv", res))
+        push!(fichiers, enregistrer_recu(base * "_recu.csv", res))
+    end
+    fenetres = vcat([("", 0.0, fin)], [("_zoom$(j)", z[1], z[2]) for (j, z) in enumerate(zooms)])
+    for (suffixe, a, b) in fenetres
+        for quoi in (:demande, :recu, :comparaison)
+            push!(fichiers, tracer_essai(base * suffixe * "_$(quoi).svg", res, quoi;
+                                         t0 = a, t1 = b, sous_titre = infos, decalage))
+        end
     end
     return fichiers
 end
@@ -409,7 +477,7 @@ end
     tracer_boucle(fichier, jb, R; consignes, t_maintien, t_relache, umax, taus, sous_titre)
 
 Pour chaque région : chlorure (vrai si simulé, mesuré, estimé, consigne) et
-puissance 1064 nm (commandée, et réellement produite d'après AI 3).
+puissance 1064 nm (commandée, et réellement produite d'après la relecture).
 """
 function tracer_boucle(fichier::AbstractString, jb, R::Integer; consignes, t_maintien,
                        t_relache, umax, taus = nothing, sous_titre = "")
@@ -429,7 +497,7 @@ function tracer_boucle(fichier::AbstractString, jb, R::Integer; consignes, t_mai
         push!(panneaux, panneau(titre, chl; unite = "mM", hauteur = 150))
         push!(panneaux, panneau("Région $k — puissance 1064 nm",
             [serie("commandée", t, [e.u_cmd for e in lignes], PALETTE.p1064; mode = :escalier, epaisseur = 1.6),
-             serie("produite (AI 3)", t, [e.u_mes for e in lignes], PALETTE.porte; mode = :marques)];
+             serie("produite (relue)", t, [e.u_mes for e in lignes], PALETTE.porte; mode = :marques)];
             unite = "V", hauteur = 90, yplage = (0.0, umax)))
     end
     return figure_svg(fichier, "Boucle fermée — clamp du chlorure", sous_titre, panneaux;

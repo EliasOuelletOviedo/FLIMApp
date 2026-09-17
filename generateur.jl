@@ -7,6 +7,38 @@ const X = "X6321"
 const S = "S6110"
 const HORLOGE = "/$X/Ctr0InternalOutput"
 
+# ---- Correspondance des voies ---------------------------------------
+# Un seul endroit décrit tous les signaux écrits, dans l'ordre des panneaux
+# des figures, et la voie AI où chacun est relu. `ai = nothing` : signal non
+# relu, son panneau reste vide et marqué « non relu ». `champ` est la voie
+# écrite (pour les analogiques), `bit` la ligne du port 0 (pour les numériques).
+const SIGNAUX = (
+    (cle = :galvo_x,    nom = "Galvo X",               sortie = "6321 AO 0", ai = 0,  champ = :x,     bit = nothing),
+    (cle = :galvo_y,    nom = "Galvo Y",               sortie = "6321 AO 1", ai = 1,  champ = :y,     bit = nothing),
+    (cle = :p850,       nom = "Puissance 850 nm",      sortie = "6110 AO 0", ai = 2,  champ = :p850,  bit = nothing),
+    (cle = :p1064,      nom = "Pockels 1064 nm",       sortie = "6110 AO 1", ai = 3,  champ = :p1064, bit = nothing),
+    (cle = :porte_850,  nom = "Porte 850 nm",          sortie = "P0.0",      ai = 4,  champ = :d,     bit = B_850),
+    (cle = :porte_1064, nom = "Porte 1064 nm",         sortie = "P0.1",      ai = 5,  champ = :d,     bit = B_1064),
+    (cle = :imp_seq,    nom = "Imp. séquence",         sortie = "P0.2",      ai = 6,  champ = :d,     bit = B_SEQ),
+    (cle = :imp_region, nom = "Imp. région",           sortie = "P0.3",      ai = 7,  champ = :d,     bit = B_REG),
+    (cle = :code_b0,    nom = "Code région · bit 0",   sortie = "P0.4",      ai = 8,  champ = :d,     bit = 4),
+    (cle = :code_b1,    nom = "Code région · bit 1",   sortie = "P0.5",      ai = 9,  champ = :d,     bit = 5),
+    (cle = :code_b2,    nom = "Code région · bit 2",   sortie = "P0.6",      ai = 10, champ = :d,     bit = 6),
+    (cle = :code_b3,    nom = "Code région · bit 3",   sortie = "P0.7",      ai = 11, champ = :d,     bit = 7),
+)
+
+"""Voies AI à lire : chaîne DAQmx, colonne de chaque signal, nombre de voies."""
+function voies_lues(signaux = SIGNAUX)
+    lus = sort([s for s in signaux if s.ai !== nothing]; by = s -> s.ai)
+    chaine = join(["$X/ai$(s.ai)" for s in lus], ",")
+    colonne = Dict(s.cle => j for (j, s) in enumerate(lus))
+    return chaine, colonne, length(lus)
+end
+
+"""Ce qui a été écrit pour un signal : volts, ou 0 et 1 pour une ligne du port 0."""
+valeurs_demandees(res, s) = s.bit === nothing ? getfield(res, s.champ) :
+                                                Float64.((res.d .>> s.bit) .& 0x01)
+
 # ---- Sécurité --------------------------------------------------------
 # Rien n'est écrit sans passer par ces limites. Valeurs de bouclage :
 # à remplacer par celles des pilotes réels avant de brancher quoi que ce soit.
@@ -67,23 +99,27 @@ les deux cartes et l'horloge du compteur.
 - `avance` : nombre de créneaux écrits d'avance. Une mesure faite pendant
   une visite agit au plus tôt `cld(avance, R)` visites plus tard.
 
-Renvoie la relecture (N × 4 : galvo X, porte 850, P850, P1064), ce qui a
-été écrit, le journal des créneaux et la durée de chaque préparation.
+Renvoie la relecture `mesure` (une colonne par voie lue) avec `colonne`, qui
+donne la colonne de chaque signal, la cadence de conversion `conv`, exactement
+ce qui a été écrit (`x`, `y`, `p850`, `p1064`, `d`), le journal des créneaux
+et la durée de chaque préparation.
 """
 function jouer_en_continu(R::Integer, cycles::Integer, commande;
-                          avance::Integer = 3, apres_creneau = nothing)
+                          avance::Integer = 3, apres_creneau = nothing,
+                          signaux = SIGNAUX)
     1 <= R <= length(CENTRES) || error("R doit être entre 1 et $(length(CENTRES))")
     Ls   = longueur_creneau()
     nS   = R * cycles
     2 <= avance <= nS || error("avance doit être entre 2 et $nS")
+    voies, colonne, nv = voies_lues(signaux)
     ent  = entree()
     queue = ne(0.2)                          # 200 ms à zéro pour finir
     sor  = sortie(queue)
     Ntot = length(ent.x) + nS * Ls + length(sor.x)
     tampon = length(ent.x) + (avance + 2) * Ls + length(sor.x)
 
-    m = zeros(Ntot, 4)
-    ecrit_x, ecrit_p1064, ecrit_d = Float64[], Float64[], UInt8[]
+    m = zeros(Ntot, nv)
+    ecrit = (x = Float64[], y = Float64[], p850 = Float64[], p1064 = Float64[], d = UInt8[])
     journal = NamedTuple[]
     durees = Float64[]
 
@@ -110,17 +146,19 @@ function jouer_en_continu(R::Integer, cycles::Integer, commande;
                 set_regen_mode(th, Val_DoNotAllowRegen)   # jamais rejouer d'anciennes données
                 cfg_output_buffer(th, tampon)
             end
-            add_ai_voltage(tai, "$X/ai0:3"; termcfg = Val_RSE)
+            add_ai_voltage(tai, voies; termcfg = Val_RSE)      # toutes les voies, dans l'ordre des panneaux
             cfg_sample_clock(tai, FS; source = HORLOGE, mode = Val_ContSamps, nsamp = 4 * tampon)
             add_co_pulse_freq(tco, "$X/ctr0", FS; duty = 0.5)
             cfg_implicit_timing(tco, Val_ContSamps, 1000)
 
             function ecrire(b)
-                n = length(b.x)
-                write_analog(tax, vcat(b.x, b.y); nsamp_per_chan = n)
+                nb = length(b.x)
+                write_analog(tax, vcat(b.x, b.y); nsamp_per_chan = nb)
                 write_do_u8(tdx, b.d)
-                write_analog(tas, vcat(b.p850, b.p1064); nsamp_per_chan = n)
-                append!(ecrit_x, b.x); append!(ecrit_p1064, b.p1064); append!(ecrit_d, b.d)
+                write_analog(tas, vcat(b.p850, b.p1064); nsamp_per_chan = nb)
+                for champ in (:x, :y, :p850, :p1064, :d)          # garder exactement ce qui a été écrit
+                    append!(getfield(ecrit, champ), getfield(b, champ))
+                end
             end
 
             # pré-remplissage : entrée + `avance` créneaux, avant que l'horloge parte
@@ -135,7 +173,7 @@ function jouer_en_continu(R::Integer, cycles::Integer, commande;
             pos = 0
             for s in 0:nS-1
                 n = s == 0 ? length(ent.x) + Ls : Ls
-                m[pos+1:pos+n, :] = read_analog(tai, n, 4; timeout = 5.0 + n / FS)
+                m[pos+1:pos+n, :] = read_analog(tai, n, nv; timeout = 5.0 + n / FS)
                 pos += n
                 apres_creneau === nothing || apres_creneau(s, view(m, pos-Ls+1:pos, :))
 
@@ -152,12 +190,14 @@ function jouer_en_continu(R::Integer, cycles::Integer, commande;
             # lire le retour à zéro et la moitié de la queue, puis couper l'horloge :
             # toutes les sorties restent figées à zéro, sans vider les tampons
             n = length(sor.x) - queue ÷ 2
-            m[pos+1:pos+n, :] = read_analog(tai, n, 4; timeout = 5.0 + n / FS)
+            m[pos+1:pos+n, :] = read_analog(tai, n, nv; timeout = 5.0 + n / FS)
             pos += n
+            conv = get_ai_conv_rate(tai)        # avant de fermer la tâche
             stop_task(tco)
 
-            return (; mesure = m[1:pos, :], x = ecrit_x, p1064 = ecrit_p1064,
-                      d = ecrit_d, journal, durees)
+            return (; mesure = m[1:pos, :], colonne, conv, signaux,
+                      ecrit.x, ecrit.y, ecrit.p850, ecrit.p1064, ecrit.d,
+                      journal, durees)
         end
     catch
         mise_a_zero()
