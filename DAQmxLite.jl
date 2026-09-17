@@ -25,7 +25,7 @@ export ai_once, ai_block, ao_hold
 export Val_Volts, Val_Rising, Val_Falling, Val_FiniteSamps, Val_ContSamps
 export Val_GroupByChannel, Val_GroupByScanNumber
 export Val_ChanPerLine, Val_ChanForAllLines, Val_Cfg_Default
-export Val_Diff, Val_RSE, Val_NRSE, Val_AC, Val_DC
+export Val_Diff, Val_PseudoDiff, Val_RSE, Val_NRSE, Val_AC, Val_DC
 
 const LIB = "nicaiu"
 const TaskHandle = Ptr{Nothing}
@@ -42,7 +42,7 @@ const Val_ChanPerLine       = Int32(0)
 const Val_ChanForAllLines   = Int32(1)
 const Val_Cfg_Default       = Int32(-1)
 const Val_Diff              = Int32(10106)
-const Val_PseudoDiff        = Int32(12529)
+const Val_PseudoDiff        = Int32(12529)   # seul mode accepté par la 6110
 const Val_RSE               = Int32(10083)
 const Val_NRSE              = Int32(10078)
 const Val_AC                = Int32(10045)
@@ -339,6 +339,30 @@ function get_samp_clk_rate(th)
     chk(ccall((:DAQmxGetSampClkRate, LIB), Int32,
               (TaskHandle, Ptr{Float64}), th, v))
     return v[]
+end
+
+export set_ai_conv_rate, get_ai_conv_rate, set_ai_delay
+
+const Val_Seconds = Int32(10364)
+
+"""Cadence du convertisseur multiplexé : fixe l'écart entre deux voies d'un même échantillon."""
+set_ai_conv_rate(th, hz::Real) =
+    chk(ccall((:DAQmxSetAIConvRate, LIB), Int32,
+              (TaskHandle, Float64), th, Float64(hz)))
+
+function get_ai_conv_rate(th)
+    v = Ref{Float64}(0.0)
+    chk(ccall((:DAQmxGetAIConvRate, LIB), Int32,
+              (TaskHandle, Ptr{Float64}), th, v))
+    return v[]
+end
+
+"""Retard entre le front d'horloge et la première conversion, en secondes."""
+function set_ai_delay(th, secondes::Real)
+    chk(ccall((:DAQmxSetDelayFromSampClkDelayUnits, LIB), Int32,
+              (TaskHandle, Int32), th, Val_Seconds))
+    chk(ccall((:DAQmxSetDelayFromSampClkDelay, LIB), Int32,
+              (TaskHandle, Float64), th, Float64(secondes)))
 end
 
 end # module
