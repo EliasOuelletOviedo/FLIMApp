@@ -53,3 +53,12 @@ end
 # 4. Marge de temps réel
 @printf("\nPréparation + écriture d'un créneau : max %.1f ms (le créneau dure %.0f ms)\n",
         1000 * maximum(res.durees), 1000 * Ls / FS)
+
+# 5. Fichiers : exactement ce qui a été demandé, exactement ce qui a été reçu
+include("traces.jl")
+infos = @sprintf("Test 10 — %d régions × %d cycles — %d Hz — avance %d", R, CYCLES, FS, AVANCE)
+fichiers = enregistrer_essai(res; nom = "test10", infos,
+                             zooms = [(0.0, 0.5),          # entrée et deux premiers créneaux
+                                      (0.2375, 0.2475)])   # 100 échantillons autour d'une frontière
+println("\nFichiers enregistrés :")
+foreach(f -> println("  ", f), fichiers)
