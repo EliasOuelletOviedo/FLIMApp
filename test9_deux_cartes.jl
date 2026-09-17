@@ -6,11 +6,14 @@ include("verif.jl")
 
 const X = "X6321"
 const S = "S6110"
-const HORLOGE = "/$X/ai/SampleClock"   # une seule horloge pour les deux cartes
+# Un train d'impulsions carré produit par le compteur 0 de la 6321 sert
+# d'horloge à toutes les tâches, sur les deux cartes. Ses impulsions de
+# 50 µs sont détectées sans ambiguïté par la 6110, qui exige au moins 10 ns.
+const HORLOGE = "/$X/Ctr0InternalOutput"
 
 function jouer_deux_cartes(s)
     N = length(s.x)
-    withtasks("ao_x", "do_x", "ao_s", "ai_x") do tax, tdx, tas, tai
+    withtasks("ao_x", "do_x", "ao_s", "ai_x", "horloge") do tax, tdx, tas, tai, tco
         # 6321 : galvos et port 0
         add_ao_voltage(tax, "$X/ao0:1")
         cfg_sample_clock(tax, FS; source = HORLOGE, nsamp = N)
@@ -20,18 +23,21 @@ function jouer_deux_cartes(s)
         cfg_sample_clock(tdx, FS; source = HORLOGE, nsamp = N)
         write_do_u8(tdx, s.d)
 
-        # 6110 : puissances laser, cadencées par l'horloge de la 6321.
-        # Le pilote fait passer ce signal par le câble RTSI déclaré dans MAX.
+        # 6110 : puissances laser, même horloge, transmise par le câble RTSI
         add_ao_voltage(tas, "$S/ao0:1")
         cfg_sample_clock(tas, FS; source = HORLOGE, nsamp = N)
         write_analog(tas, vcat(s.p850, s.p1064); nsamp_per_chan = N)
 
-        # 6321 : relecture des trois signaux, et source de l'horloge
+        # 6321 : relecture des trois signaux, elle aussi esclave de l'horloge
         add_ai_voltage(tai, "$X/ai0:2"; termcfg = Val_RSE)
-        cfg_sample_clock(tai, FS; nsamp = N)
+        cfg_sample_clock(tai, FS; source = HORLOGE, nsamp = N)
 
-        start_task(tax); start_task(tdx); start_task(tas)   # esclaves d'abord
-        start_task(tai)                                     # maître en dernier
+        # l'horloge elle-même : N impulsions, puis retour au repos
+        add_co_pulse_freq(tco, "$X/ctr0", FS; duty = 0.5)
+        cfg_implicit_timing(tco, Val_FiniteSamps, N)
+
+        start_task(tax); start_task(tdx); start_task(tas); start_task(tai)  # esclaves
+        start_task(tco)                                                    # l'horloge part
         m = read_analog(tai, N, 3; timeout = 10.0 + N / FS)
         wait_until_done(tax); wait_until_done(tdx); wait_until_done(tas)
         return m

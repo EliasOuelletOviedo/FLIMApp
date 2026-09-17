@@ -365,4 +365,39 @@ function set_ai_delay(th, secondes::Real)
               (TaskHandle, Float64), th, Float64(secondes)))
 end
 
+# ==== Ajouts : compteur comme horloge partagée, diagnostic ==========
+
+export Val_Hz, Val_Low, add_co_pulse_freq, cfg_implicit_timing, samples_generated
+
+const Val_Hz  = Int32(10373)
+const Val_Low = Int32(10214)
+
+"""
+    add_co_pulse_freq(th, compteur, freq; duty=0.5)
+
+Train d'impulsions carré sur un compteur. Utilisé comme horloge partagée,
+il donne des impulsions longues (50 µs à 10 kHz), que toutes les cartes
+détectent sans ambiguïté.
+"""
+function add_co_pulse_freq(th, compteur::AbstractString, freq::Real;
+                           duty = 0.5, idle = Val_Low, delay = 0.0)
+    chk(ccall((:DAQmxCreateCOPulseChanFreq, LIB), Int32,
+              (TaskHandle, Cstring, Cstring, Int32, Int32, Float64, Float64, Float64),
+              th, compteur, "", Val_Hz, Int32(idle),
+              Float64(delay), Float64(freq), Float64(duty)))
+end
+
+"""Nombre d'impulsions à produire (mode fini) pour une tâche compteur."""
+cfg_implicit_timing(th, mode, nsamp::Integer) =
+    chk(ccall((:DAQmxCfgImplicitTiming, LIB), Int32,
+              (TaskHandle, Int32, UInt64), th, Int32(mode), UInt64(nsamp)))
+
+"""Échantillons réellement générés jusqu'ici par une tâche de sortie."""
+function samples_generated(th)
+    v = Ref{UInt64}(0)
+    chk(ccall((:DAQmxGetWriteTotalSampPerChanGenerated, LIB), Int32,
+              (TaskHandle, Ptr{UInt64}), th, v))
+    return Int(v[])
+end
+
 end # module
