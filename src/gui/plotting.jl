@@ -1,13 +1,20 @@
 """
 plotting.jl
 
-Plot-axis autoscaling and plot-series lookup for the FLIM GUI: computing
-axis limits from the current data window, mapping a plot-selection label to
-its underlying observables, and the protocol-setpoint highlight overlay.
+Plot rendering for the FLIM GUI (main thread only). `render_plot!` creates a
+plot slot's curves once, each bound to the history it shows (`SeriesLine`,
+gui/app_run.jl); the refresh tick (gui/refresh.jl) then refills those
+curves' point buffers in place — windowed to the time range and decimated
+to `max_points_per_line` — with one `notify` per curve per tick, and
+rescales the axes at most once per `autoscale_interval_s`. No plot object
+is created or deleted outside `render_plot!` (a plot-type or channel-toggle
+change).
 """
 
 using GLMakie
 using Observables
+
+const PLOT_OPTIONS = ["Histogram", "Photon counts", "Lifetime", "Ion concentration", "Command", "Readback"]
 
 # -----------------------------------------------------------------------------
 # Histogram plot normalization
@@ -51,13 +58,11 @@ end
 """
     shown_channel_series(app_run, show_ch1, show_ch2)
 
-The standard "for each shown channel" iteration used by the ROI-split
-draw_*_plot! functions below (Photon counts/Lifetime/Ion concentration):
 `(roi_series_vector, color)` pairs for whichever of the two channels its
 toggle currently shows (channel 1 in `PLOT_COLOR_CH1`, channel 2 in
 `PLOT_COLOR_CH2`) — `roi_series_vector` is that channel's
-`Vector{RoiChannelSeries}` (`app_run.ch1_rois`/`ch2_rois`), one entry per
-drawn ROI (or a single entry when none are drawn).
+`Vector{RoiChannelSeries}`, one entry per drawn ROI (or a single entry
+when results aren't split per ROI).
 """
 function shown_channel_series(app_run, show_ch1::Bool, show_ch2::Bool)
     pairs = Tuple{Vector{RoiChannelSeries}, typeof(PLOT_COLOR_CH1)}[]
@@ -70,9 +75,7 @@ end
     shown_snapshot_series(app_run, show_ch1, show_ch2)
 
 Like `shown_channel_series`, but for the Histogram plot's "latest frame"
-snapshot (`ChannelSeries`, not ROI-split — see its docstring in
-data_types.jl for why): `(series, color)` pairs for whichever of the two
-channels its toggle currently shows.
+snapshot (`ChannelSeries`, not ROI-split).
 """
 function shown_snapshot_series(app_run, show_ch1::Bool, show_ch2::Bool)
     pairs = Tuple{ChannelSeries, typeof(PLOT_COLOR_CH1)}[]
@@ -102,30 +105,69 @@ function normalized_irf_from_fit(fit::AbstractVector{<:Real})
     return out
 end
 
-"""
-    draw_histogram_plot!(axis, app_run, show_ch1, show_ch2)
+# -----------------------------------------------------------------------------
+# Windowing and bound curves
+# -----------------------------------------------------------------------------
 
-Draw the Histogram plot's series onto `axis`: each shown channel's counts
-as semi-transparent bars plus its fit as a line on top (channel 1 in
-`PLOT_COLOR_CH1`, channel 2 in `PLOT_COLOR_CH2`), all normalized (see the
-functions above) so shapes are comparable regardless of photon counts. IRF
-is drawn once regardless of the toggles — one instrument response, not
-per-channel. Shared by the Menu-selection handler (handlers_layout.jl) and
-the initial-selection draw at GUI construction time (GUI.jl) via
-`render_plot!` — both need the exact same rendering, so it lives
-here once instead of as two copies that can drift out of sync.
 """
-function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
-    for (series, color) in shown_snapshot_series(app_run, show_ch1, show_ch2)
-        counts_normalized = lift(normalize_counts_to_fit, series.histogram, series.fit)
-        fit_normalized = lift(normalize_to_own_max, series.fit)
-        barplot!(axis, app_run.hist_time, counts_normalized, color=(color, 0.1), gap=0.0)
-        lines!(axis, app_run.hist_time, fit_normalized, color=color, linewidth=PLOT_LINEWIDTH)
+    windowed_slice(xs::AbstractVector{Float64}, ys::AbstractVector{Float64}, time_range::Real)
+
+Return the common-length suffix of `xs`/`ys` covering the last `time_range`
+seconds of `xs`. `xs` is non-decreasing (running frame timestamps), so the
+window boundary is found by binary search.
+"""
+function windowed_slice(xs::AbstractVector{Float64}, ys::AbstractVector{Float64}, time_range::Real)
+    n = min(length(xs), length(ys))
+    n == 0 && return (Float64[], Float64[])
+
+    xs_n = view(xs, 1:n)
+    ys_n = view(ys, 1:n)
+    cutoff = xs_n[n] - Float64(time_range)
+    start_idx = searchsortedfirst(xs_n, cutoff)
+
+    return (xs_n[start_idx:n], ys_n[start_idx:n])
+end
+
+"""
+    fill_points!(points, xs, ys, window_s, max_points)
+
+Refill `points` in place from the common-length prefix of `xs`/`ys`:
+only the last `window_s` seconds (all of it if `window_s` is `Inf`), at
+most `max_points` points (evenly decimated, last point always kept).
+"""
+function fill_points!(points::Vector{Point2f}, xs::AbstractVector{Float64}, ys::AbstractVector{Float64}, window_s::Float64, max_points::Int)
+    n = min(length(xs), length(ys))
+    if n == 0
+        empty!(points)
+        return points
     end
 
-    irf_normalized = lift(normalized_irf_from_fit, app_run.ch1.fit)
-    lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
+    start = isfinite(window_s) ? searchsortedfirst(view(xs, 1:n), xs[n] - window_s) : 1
+    count = n - start + 1
+    stride = max(1, cld(count, max_points))
+    m = cld(count, stride)
+    last_included = start + (m - 1) * stride == n
+    resize!(points, last_included ? m : m + 1)
 
+    j = 0
+    @inbounds for i in start:stride:n
+        j += 1
+        points[j] = Point2f(xs[i], ys[i])
+    end
+    last_included || (points[end] = Point2f(xs[n], ys[n]))
+    return points
+end
+
+"""
+    series_line!(axis, plot, xs, ys; kwargs...)
+
+Draw one curve bound to the history `xs`/`ys` and register it in `plot`, so
+the refresh tick keeps it current.
+"""
+function series_line!(axis, plot::PlotSlot, xs::Vector{Float64}, ys::Vector{Float64}; kwargs...)
+    points = Observable(Point2f[])
+    lines!(axis, points; kwargs...)
+    push!(plot.series_lines, SeriesLine(points, xs, ys))
     return nothing
 end
 
@@ -170,179 +212,181 @@ function protocol_setpoint_spans(
     return (starts, ends)
 end
 
-function add_setpoint_highlight!(ax, app_run)
-    spans = lift(app_run.timestamps, app_run.protocol_setpoint) do ts, sp
-        starts, ends = protocol_setpoint_spans(ts, sp)
-        if isempty(starts)
-            return ([NaN], [NaN])
-        end
-        return (starts, ends)
+function add_setpoint_highlight!(ax, plot::PlotSlot)
+    spans = SetpointSpans(Observable([NaN]), Observable([NaN]))
+    vspan!(ax, spans.starts, spans.ends, color = (PLOT_COLOR_REF, 0.05))
+    plot.spans = spans
+    return nothing
+end
+
+# -----------------------------------------------------------------------------
+# Plot types
+# -----------------------------------------------------------------------------
+
+"""
+    draw_histogram_plot!(axis, app_run, show_ch1, show_ch2)
+
+Each shown channel's counts as semi-transparent bars plus its fit as a line
+on top, all normalized (see above) so shapes are comparable regardless of
+photon counts; the IRF drawn once regardless of the toggles. Driven by the
+fixed-size `ChannelSeries` Observables the refresh tick overwrites.
+"""
+function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
+    for (series, color) in shown_snapshot_series(app_run, show_ch1, show_ch2)
+        counts_normalized = lift(normalize_counts_to_fit, series.histogram, series.fit)
+        fit_normalized = lift(normalize_to_own_max, series.fit)
+        barplot!(axis, app_run.hist_time, counts_normalized, color=(color, 0.1), gap=0.0)
+        lines!(axis, app_run.hist_time, fit_normalized, color=color, linewidth=PLOT_LINEWIDTH)
     end
 
-    span_starts = lift(x -> x[1], spans)
-    span_ends = lift(x -> x[2], spans)
-    vspan!(ax, span_starts, span_ends, color = (PLOT_COLOR_REF, 0.05))
+    irf_normalized = lift(normalized_irf_from_fit, app_run.ch1.fit)
+    lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
 
     return nothing
 end
 
 """
-    draw_lifetime_plot!(axis, app, app_run, show_ch1, show_ch2)
+    draw_roi_metric_plot!(axis, plot, app_run, raw_field, smooth_field, show_ch1, show_ch2)
 
-Draw the Lifetime plot's series onto `axis`: the protocol-setpoint
-highlight and trace (channel-agnostic — it's the PID target, not measured
-data, so it's drawn regardless of the toggles), plus each shown channel's
-raw/smoothed lifetime, one line pair per ROI (`app_run.rois`) — all of one
-channel's ROI lines share that channel's color (channel 1
-`PLOT_COLOR_CH1`, channel 2 `PLOT_COLOR_CH2`), superimposed with no legend,
-so a single-ROI (or no-ROI) run looks exactly as it did before this
-existed. Shared by the Menu-selection handler (handlers_layout.jl) and the
-initial-selection draw at GUI construction time (GUI.jl) via
-`render_plot!` — see `draw_histogram_plot!` above for why this
-needs to be one function, not two copies.
+Photon counts / Lifetime / Ion concentration: each shown channel's raw
+(faint) and smoothed trace, one pair per ROI, all of one channel's ROIs in
+that channel's color, superimposed with no legend.
 """
-function draw_lifetime_plot!(axis, app, app_run, show_ch1::Bool, show_ch2::Bool)
-    add_setpoint_highlight!(axis, app_run)
-    protocol_x, protocol_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.protocol_setpoint)
-    lines!(axis, protocol_x, protocol_y, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
-
+function draw_roi_metric_plot!(axis, plot::PlotSlot, app_run, raw_field::Symbol, smooth_field::Symbol, show_ch1::Bool, show_ch2::Bool)
     for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
         for series in roi_series
-            raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, series.lifetime)
-            smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, series.lifetime_smooth)
-            lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
-            lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
+            series_line!(axis, plot, series.timestamps, getfield(series, raw_field); color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
+            series_line!(axis, plot, series.timestamps, getfield(series, smooth_field); color=color, linewidth=PLOT_LINEWIDTH)
         end
     end
-
     return nothing
 end
 
 """
-    draw_ion_concentration_plot!(axis, app, app_run, show_ch1, show_ch2)
+    draw_readback_plot!(axis, plot, app_run)
 
-Draw the Ion concentration plot's series onto `axis`: each shown channel's
-raw concentration and its smoothed trace, one line pair per ROI — same
-per-ROI superimposed-same-color-no-legend treatment as
-`draw_lifetime_plot!` (see its docstring), using the exact same smoothing
-(kalman_update!, see smoothing.jl). Shared by the Menu-selection
-handler and the initial-selection draw for the same reason as
-`draw_lifetime_plot!`.
+The last slot the DAQ loop played, as read back by the cards: one line per
+readback signal (config/bench.toml), time from the start of the slot.
 """
-function draw_ion_concentration_plot!(axis, app, app_run, show_ch1::Bool, show_ch2::Bool)
-    add_setpoint_highlight!(axis, app_run)
-
-    for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
-        for series in roi_series
-            raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, series.concentration)
-            smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, series.concentration_smooth)
-            lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
-            lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
-        end
+function draw_readback_plot!(axis, plot::PlotSlot, app_run)
+    signals = app_run.config.readback_signals
+    colors = Makie.wong_colors()
+    for (c, name) in enumerate(signals)
+        points = Observable(Point2f[])
+        lines!(axis, points; color=colors[mod1(c, length(colors))], linewidth=PLOT_LINEWIDTH, label=name)
+        push!(plot.readback_lines, ReadbackLine(points, c))
     end
-
+    plot.legend = axislegend(axis; position=:rt, nbanks=2, labelsize=9, framevisible=false, patchsize=(10, 5), rowgap=0)
     return nothing
 end
 
 """
-    draw_photon_counts_plot!(axis, app, app_run, show_ch1, show_ch2)
-
-Draw the Photon counts plot's series onto `axis`: each shown channel's raw
-photon-count trace and its smoothed trace, one line pair per ROI — same
-per-ROI superimposed-same-color-no-legend treatment as
-`draw_lifetime_plot!` (see its docstring), using the exact same smoothing
-(kalman_update!, see smoothing.jl). Shared by the Menu-selection
-handler and the initial-selection draw for the same reason as
-`draw_lifetime_plot!`.
-"""
-function draw_photon_counts_plot!(axis, app, app_run, show_ch1::Bool, show_ch2::Bool)
-    add_setpoint_highlight!(axis, app_run)
-
-    for (roi_series, color) in shown_channel_series(app_run, show_ch1, show_ch2)
-        for series in roi_series
-            raw_x, raw_y = plot_xy_observables(app, app_run, series.timestamps, series.photons)
-            smooth_x, smooth_y = plot_xy_observables(app, app_run, series.timestamps, series.photons_smooth)
-            lines!(axis, raw_x, raw_y, color=(color, 0.25), linewidth=PLOT_LINEWIDTH)
-            lines!(axis, smooth_x, smooth_y, color=color, linewidth=PLOT_LINEWIDTH)
-        end
-    end
-
-    return nothing
-end
-
-"""
-    render_plot!(app, app_run, blocks, plot_slot::Symbol)
+    render_plot!(app, app_run, blocks, plot_slot::Symbol; selection=nothing, show_channels=nothing)
 
 Render whichever series `app.layout.plot1`/`.plot2` currently selects onto
-`plot_slot`'s axis (`:plot1` or `:plot2`), gated by that slot's own
-`plot1_ch1`/`plot1_ch2`/`plot2_ch1`/`plot2_ch2` toggles. This is the single
-place that knows how to render a plot slot — the Menu `on(selection)`
-handler and the channel-toggle `on(active)` handler (both in
-handlers_layout.jl) and the initial render at GUI construction time
-(GUI.jl's `draw_initial_plots!`) all call this instead of each
-keeping its own copy, for the same reason `draw_histogram_plot!` etc. are
-shared functions above.
+`plot_slot`'s axis (`:plot1` or `:plot2`), gated by that slot's own channel
+toggles: clears the axis, creates its curves once with their bindings, fills
+them right away and sets the axis limits. The single place that knows how
+to render a plot slot — the Menu and toggle handlers (handlers_layout.jl),
+the initial draw (GUI.jl) and START/CLEAR (runtime.jl/handlers.jl, after
+the histories are replaced) all call this. `selection`/`show_channels`
+override the layout settings without changing them (GUI warm-up, app.jl).
 """
-function render_plot!(app, app_run, blocks, plot_slot::Symbol)
+function render_plot!(app, app_run, blocks, plot_slot::Symbol;
+                      selection::Union{Nothing, AbstractString} = nothing,
+                      show_channels::Union{Nothing, Tuple{Bool, Bool}} = nothing)
     if plot_slot == :plot1
         axis = blocks.plot_1_axis
-        selection = app.layout.plot1
-        show_ch1 = app.layout.plot1_ch1
-        show_ch2 = app.layout.plot1_ch2
+        selection = something(selection, app.layout.plot1)
+        show_ch1, show_ch2 = something(show_channels, (app.layout.plot1_ch1, app.layout.plot1_ch2))
         axis.title[] = "Plot 1\n($(selection))"
     else
         axis = blocks.plot_2_axis
-        selection = app.layout.plot2
-        show_ch1 = app.layout.plot2_ch1
-        show_ch2 = app.layout.plot2_ch2
+        selection = something(selection, app.layout.plot2)
+        show_ch1, show_ch2 = something(show_channels, (app.layout.plot2_ch1, app.layout.plot2_ch2))
         axis.title[] = "Plot 2\n($(selection))"
     end
 
+    previous = get(app_run.display.plots, plot_slot, nothing)
+    previous !== nothing && previous.legend !== nothing && delete!(previous.legend)
     empty!(axis)
+    plot = PlotSlot()
+    plot.selection = selection
+    app_run.display.plots[plot_slot] = plot
 
     if selection == "Command"
-        add_setpoint_highlight!(axis, app_run)
-
-        cmd1_x, cmd1_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.command1)
-        cmd2_x, cmd2_y = plot_xy_observables(app, app_run, app_run.timestamps, app_run.command2)
-        lines!(axis, cmd1_x, cmd1_y, color=PLOT_COLOR_CH1, linewidth=PLOT_LINEWIDTH)
-        lines!(axis, cmd2_x, cmd2_y, color=PLOT_COLOR_CH2, linewidth=PLOT_LINEWIDTH)
+        add_setpoint_highlight!(axis, plot)
+        series_line!(axis, plot, app_run.timestamps, app_run.command1; color=PLOT_COLOR_CH1, linewidth=PLOT_LINEWIDTH)
+        series_line!(axis, plot, app_run.timestamps, app_run.command2; color=PLOT_COLOR_CH2, linewidth=PLOT_LINEWIDTH)
     elseif selection == "Lifetime"
-        draw_lifetime_plot!(axis, app, app_run, show_ch1, show_ch2)
+        add_setpoint_highlight!(axis, plot)
+        # The protocol setpoint is the PID target, not measured data: drawn
+        # regardless of the channel toggles.
+        series_line!(axis, plot, app_run.timestamps, app_run.protocol_setpoint; color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
+        draw_roi_metric_plot!(axis, plot, app_run, :lifetime, :lifetime_smooth, show_ch1, show_ch2)
     elseif selection == "Histogram"
         draw_histogram_plot!(axis, app_run, show_ch1, show_ch2)
     elseif selection == "Ion concentration"
-        draw_ion_concentration_plot!(axis, app, app_run, show_ch1, show_ch2)
+        add_setpoint_highlight!(axis, plot)
+        draw_roi_metric_plot!(axis, plot, app_run, :concentration, :concentration_smooth, show_ch1, show_ch2)
     elseif selection == "Photon counts"
-        draw_photon_counts_plot!(axis, app, app_run, show_ch1, show_ch2)
+        add_setpoint_highlight!(axis, plot)
+        draw_roi_metric_plot!(axis, plot, app_run, :photons, :photons_smooth, show_ch1, show_ch2)
+    elseif selection == "Readback"
+        draw_readback_plot!(axis, plot, app_run)
     end
 
-    if !app_run.running[]
-        autolimits!(axis)
-        lim = axis.finallimits[]
-        xmax = lim.origin[1] + lim.widths[1]
-        xlims!(axis, 0.0, max(Float64(xmax), 0.0))
-    else
-        # Running (including paused): pin the axis to the rolling window now,
-        # via the same function consumer_loop calls on every publish tick. The
-        # drawn lines are already clipped to the last time_range seconds
-        # (plot_xy_observables), but the axis *limits* still need setting so a
-        # mid-run plot-type switch shows that window immediately rather than
-        # whatever autolimits makes of the just-drawn data. While running this
-        # self-heals within one publish tick (~100ms); while paused,
-        # consumer_loop is blocked and nothing else would ever re-pin it.
-        autoscale_plot!(app, app_run, axis, selection, show_ch1, show_ch2)
+    refresh_plot_slot!(app, app_run, plot)
+    autoscale_plot_slot!(app, app_run, axis, plot, show_ch1, show_ch2)
+    return nothing
+end
+
+"""
+    refresh_plot_slot!(app, app_run, plot)
+
+Refill every curve of `plot` from its history (refresh tick and
+`render_plot!`): the last `time_range` seconds while running, the whole run
+once stopped.
+"""
+function refresh_plot_slot!(app, app_run, plot::PlotSlot)
+    window_s = app_run.running[] ? Float64(app.layout.time_range) : Inf
+    max_points = app_run.config.max_points_per_line
+
+    for line in plot.series_lines
+        fill_points!(line.points[], line.xs, line.ys, window_s, max_points)
+        notify(line.points)
+    end
+
+    if plot.spans !== nothing
+        n = min(length(app_run.timestamps), length(app_run.protocol_setpoint))
+        start = isfinite(window_s) && n > 0 ? searchsortedfirst(view(app_run.timestamps, 1:n), app_run.timestamps[n] - window_s) : 1
+        starts, ends = protocol_setpoint_spans(view(app_run.timestamps, start:n), view(app_run.protocol_setpoint, start:n))
+        if isempty(starts)
+            starts, ends = [NaN], [NaN]
+        end
+        plot.spans.starts.val = starts
+        plot.spans.ends[] = ends   # one notify: vspan reads both
+    end
+
+    if !isempty(plot.readback_lines)
+        state = app_run.display
+        for line in plot.readback_lines
+            points = line.points[]
+            n = line.signal <= size(state.readback_data, 1) ? state.readback_points : 0
+            resize!(points, n)
+            @inbounds for j in 1:n
+                points[j] = Point2f((j - 1) * state.readback_dt_s, state.readback_data[line.signal, j])
+            end
+            notify(line.points)
+        end
     end
 
     return nothing
 end
 
 # -----------------------------------------------------------------------------
-# axis autoscaling
+# axis autoscaling (at most once per autoscale_interval_s, see refresh.jl)
 # -----------------------------------------------------------------------------
-#
-# Called directly from consumer_loop (runtime.jl) on each published update,
-# via autoscale_plot! below — there is no separate autoscaler task.
 
 """
     autoscale_values!(ax)
@@ -409,17 +453,9 @@ function autoscale_values!(app, ax, xs::AbstractVector, ys::AbstractVector; pad_
 
     if xmax - xmin > time_range
         xmin = xmax - time_range
-        # reroll y-range for new xmin boundary
-        in_win = (xs .>= xmin) .& (xs .<= xmax)
-        if any(in_win)
-            ymin = minimum(ys[in_win])
-        else
-            ymin = minimum(ys)
-        end
     end
 
-    # compute y-range using only points inside the current x-window;
-    # this will be updated again if we adjust the xmin limit below
+    # compute y-range using only points inside the current x-window
     in_win = (xs .>= xmin) .& (xs .<= xmax)
     if any(in_win)
         ymin, ymax = minimum(ys[in_win]), maximum(ys[in_win])
@@ -445,66 +481,9 @@ function autoscale_values!(app, ax, xs::AbstractVector, ys::AbstractVector; pad_
 end
 
 """
-    plot_xy_observables(app, app_run, x_obs, y_obs)
-
-Pair of lifted observables feeding one plotted line. Always trims to the
-common-length prefix of `x_obs`/`y_obs` (so plotting never sees a
-mismatched-length series while a task is mid-append). While an acquisition
-is running it further clips to the last `time_range` seconds
-(`windowed_slice`), so per-frame render/allocation cost stays bounded no
-matter how long the session runs instead of growing with the full history;
-when stopped it returns the whole series, so the final view shows the entire
-run (matching `render_plot!`'s full-history autolimits on stop).
-"""
-function plot_xy_observables(app, app_run, x_obs::Observable{Vector{Float64}}, y_obs::Observable{Vector{Float64}})
-    paired = lift(x_obs, y_obs) do xs, ys
-        n = min(length(xs), length(ys))
-        n == 0 && return (Float64[], Float64[])
-        if app_run.running[]
-            return windowed_slice(xs, ys, app.layout.time_range)
-        end
-        return (xs[1:n], ys[1:n])
-    end
-    return lift(v -> v[1], paired), lift(v -> v[2], paired)
-end
-
-"""
-    windowed_slice(xs::AbstractVector{Float64}, ys::AbstractVector{Float64}, time_range::Real)
-
-Return the common-length suffix of `xs`/`ys` covering the last `time_range`
-seconds of `xs`.
-
-`xs` here is always `app_run.timestamps[]`: a running total incremented by
-each frame's duration (`run_acquisition_loop!` in acquisition.jl), so it is
-non-decreasing for the lifetime of one acquisition run — that lets
-`searchsortedfirst` locate the window boundary in O(log N) via binary
-search instead of an O(N) scan. This matters because `lookup_plot_series`/
-`autoscale_plot!` run on every published update (up to 10 Hz) for
-as long as an acquisition runs: without windowing first, they scanned and
-`vcat`-copied the *entire* session history every call, which measured
-~13 ms/call once a long real-time run had accumulated ~500k samples —
-degrading the whole GUI over the course of a session even though only the
-last `time_range` seconds are ever shown.
-"""
-function windowed_slice(xs::AbstractVector{Float64}, ys::AbstractVector{Float64}, time_range::Real)
-    n = min(length(xs), length(ys))
-    n == 0 && return (Float64[], Float64[])
-
-    xs_n = view(xs, 1:n)
-    ys_n = view(ys, 1:n)
-    cutoff = xs_n[n] - Float64(time_range)
-    start_idx = searchsortedfirst(xs_n, cutoff)
-
-    return (xs_n[start_idx:n], ys_n[start_idx:n])
-end
-
-"""
     accumulate_windowed!(xs_acc, ys_acc, timestamps, values, time_range)
 
-Append `windowed_slice(timestamps, values, time_range)` onto `xs_acc`/
-`ys_acc` in place. Small helper for `lookup_plot_series` below, so
-gating a series on `show_ch1`/`show_ch2` is a one-line `show_chN && ...`
-instead of a branch per plot label.
+Append `windowed_slice(timestamps, values, time_range)` onto `xs_acc`/`ys_acc`.
 """
 function accumulate_windowed!(xs_acc::Vector{Float64}, ys_acc::Vector{Float64}, timestamps::AbstractVector{Float64}, values::AbstractVector{Float64}, time_range)
     ts_w, val_w = windowed_slice(timestamps, values, time_range)
@@ -516,17 +495,10 @@ end
 """
     lookup_plot_series(app_run, plot_label, time_range, show_ch1, show_ch2)
 
-Return x/y vectors for one plot label, restricted to the last `time_range`
-seconds (see `windowed_slice`) and to whichever channel(s)/ROIs are shown
-(each ROI's own `timestamps`, per `RoiChannelSeries`, is used to window its
-own series — they aren't aligned to a single shared x-axis any more).
-Labels supported: `Histogram`, `Photon counts`, `Lifetime`, `Ion concentration`, `Command`.
-`Histogram` and `Command` ignore `show_ch1`/`show_ch2` — Histogram returns
-the raw (un-windowed) channel-1 series regardless (autoscaling only, not
-used for drawing), and Command always shows both controller outputs (see
-`RoiChannelSeries`'s docstring in data_types.jl for why Command isn't
-ROI-split like the other three: it drives real hardware output, not just
-this plot).
+x/y values one plot label shows over the last `time_range` seconds, for
+autoscaling: whichever channel(s)/ROIs are shown (each ROI windowed on its
+own timestamps). `Command` ignores the channel toggles (it always shows
+both controller outputs).
 """
 function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, show_ch2::Bool)
     if plot_label == "Histogram"
@@ -539,94 +511,49 @@ function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, sho
 
     if plot_label == "Photon counts"
         for (roi_series, _) in shown, series in roi_series
-            ts = series.timestamps[]
-            accumulate_windowed!(xs, ys, ts, series.photons[], time_range)
-            accumulate_windowed!(xs, ys, ts, series.photons_smooth[], time_range)
+            accumulate_windowed!(xs, ys, series.timestamps, series.photons, time_range)
+            accumulate_windowed!(xs, ys, series.timestamps, series.photons_smooth, time_range)
         end
-        return (xs, ys)
-    end
-
-    if plot_label == "Lifetime"
+    elseif plot_label == "Lifetime"
         for (roi_series, _) in shown, series in roi_series
-            ts = series.timestamps[]
-            accumulate_windowed!(xs, ys, ts, series.lifetime[], time_range)
-            accumulate_windowed!(xs, ys, ts, series.lifetime_smooth[], time_range)
+            accumulate_windowed!(xs, ys, series.timestamps, series.lifetime, time_range)
+            accumulate_windowed!(xs, ys, series.timestamps, series.lifetime_smooth, time_range)
         end
-        accumulate_windowed!(xs, ys, app_run.timestamps[], app_run.protocol_setpoint[], time_range)
-        return (xs, ys)
-    end
-
-    if plot_label == "Ion concentration"
+        accumulate_windowed!(xs, ys, app_run.timestamps, app_run.protocol_setpoint, time_range)
+    elseif plot_label == "Ion concentration"
         for (roi_series, _) in shown, series in roi_series
-            ts = series.timestamps[]
-            accumulate_windowed!(xs, ys, ts, series.concentration[], time_range)
-            accumulate_windowed!(xs, ys, ts, series.concentration_smooth[], time_range)
+            accumulate_windowed!(xs, ys, series.timestamps, series.concentration, time_range)
+            accumulate_windowed!(xs, ys, series.timestamps, series.concentration_smooth, time_range)
         end
-        return (xs, ys)
+    elseif plot_label == "Command"
+        accumulate_windowed!(xs, ys, app_run.timestamps, app_run.command1, time_range)
+        accumulate_windowed!(xs, ys, app_run.timestamps, app_run.command2, time_range)
     end
 
-    if plot_label == "Command"
-        ts = app_run.timestamps[]
-        accumulate_windowed!(xs, ys, ts, app_run.command1[], time_range)
-        accumulate_windowed!(xs, ys, ts, app_run.command2[], time_range)
-        return (xs, ys)
-    end
-
-    return (Float64[], Float64[])
+    return (xs, ys)
 end
 
 """
-    notify_channel_series!(series::ChannelSeries)
+    autoscale_plot_slot!(app, app_run, axis, plot, show_ch1, show_ch2)
 
-Notify one channel's "latest frame" snapshot observables (histogram/fit/counts).
+Set `axis`'s limits for what `plot` shows: the rolling `time_range` window
+while running, the whole run once stopped.
 """
-function notify_channel_series!(series::ChannelSeries)
-    notify(series.histogram)
-    notify(series.fit)
-    notify(series.counts)
-    return nothing
-end
+function autoscale_plot_slot!(app, app_run, axis, plot::PlotSlot, show_ch1::Bool, show_ch2::Bool)
+    label = plot.selection
 
-"""
-    notify_roi_series!(series::RoiChannelSeries)
-
-Notify one ROI's per-channel time-series observables (timestamps, photons,
-lifetime, concentration, and their smoothed counterparts).
-"""
-function notify_roi_series!(series::RoiChannelSeries)
-    notify(series.timestamps)
-    notify(series.photons)
-    notify(series.photons_smooth)
-    notify(series.lifetime)
-    notify(series.lifetime_smooth)
-    notify(series.concentration)
-    notify(series.concentration_smooth)
-    return nothing
-end
-
-function notify_runtime_observables!(app_run)
-    foreach(notify_roi_series!, roi_channel_series(app_run))
-    notify(app_run.protocol_setpoint)
-    notify(app_run.command1)
-    notify(app_run.command2)
-    notify(app_run.timestamps)
-    notify(app_run.i)
-    return nothing
-end
-
-function autoscale_plot!(app, app_run, axis, plot_label, show_ch1::Bool, show_ch2::Bool)
-    if plot_label == "Histogram"
+    if label == "Histogram"
         autoscale_values!(axis)
-        return nothing
-    end
-
-    xs, ys = lookup_plot_series(app_run, plot_label, app.layout.time_range, show_ch1, show_ch2)
-
-    if plot_label == "Command"
-        autoscale_values!(app, axis, xs)
+    elseif label == "Readback"
+        autolimits!(axis)
+    elseif !app_run.running[]
+        autolimits!(axis)
+        lim = axis.finallimits[]
+        xmax = lim.origin[1] + lim.widths[1]
+        xlims!(axis, 0.0, max(Float64(xmax), 0.0))
     else
-        autoscale_values!(app, axis, xs, ys)
+        xs, ys = lookup_plot_series(app_run, label, app.layout.time_range, show_ch1, show_ch2)
+        label == "Command" ? autoscale_values!(app, axis, xs) : autoscale_values!(app, axis, xs, ys)
     end
-
     return nothing
 end

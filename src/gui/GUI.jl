@@ -142,7 +142,7 @@ function make_control_widgets!(button_grid, panelbtn_grid)
     irf_button    = Button(button_grid[2, 1:2];  PATH_BUTTON_ATTRS...)
     folder_button = Button(button_grid[3, 1:2];  PATH_BUTTON_ATTRS...)
 
-    daq_label = Label(button_grid[4, 1], daq_status_text(nothing); merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
+    daq_label = Label(button_grid[4, 1], loop_status_text(LoopStatus(LOOP_DISCONNECTED, "")); merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
     connect = Button(button_grid[4, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
 
     label = Label(button_grid[5, 1], "Frequency: -- Hz\nFile: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)

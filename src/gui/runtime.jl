@@ -1,12 +1,15 @@
 """
 runtime.jl
 
-Background task lifecycle for the FLIM application: the consumer/info tasks
-started on acquisition, and the START/PAUSE/RESUME/STOP button handlers that
-launch and tear them down together with the acquisition worker task
-(acquisition.jl), autoscaling (plotting.jl), and DAQ outputs (daq.jl).
+START/PAUSE/RESUME/STOP for the FLIM GUI (main thread). The handlers do no
+work themselves (plan §2): they set flags, drop a command for the DAQ loop,
+spawn the analysis worker, or push slow work off the render loop — then
+return. Everything that comes back from those threads arrives through the
+refresh tick (gui/refresh.jl), which also closes the run once the worker
+and the scan have both stopped (`finalize_run!`).
 
-Tasks are launched by start_pressed() and terminated by stop_pressed().
+Also the per-frame accumulation the refresh tick applies to the GUI-side
+histories (`accumulate_frame!`).
 """
 
 using GLMakie
@@ -14,23 +17,44 @@ using Observables
 using DataFrames
 using Base.Threads
 
+# -----------------------------------------------------------------------------
+# GUI-side histories
+# -----------------------------------------------------------------------------
+
 """
     accumulate_roi_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
 
 Append one frame's scalar results (photons, lifetime, concentration and
 their smoothed values) plus its own timestamp onto one ROI's per-channel
-time-series observables. Which `RoiChannelSeries` a frame is routed to is
-decided by the caller (`consumer_loop`'s round-robin `mod1(slot, N)` over
-`app_run.ch1_rois`/`ch2_rois`), not by this function.
+history. Which ROI is decided upstream (`assign_roi!`, analysis/acquisition.jl).
 """
 function accumulate_roi_sample!(app, series::RoiChannelSeries, frame::ChannelFrame, timestamp::Float64)
-    push!(series.timestamps[], timestamp)
-    push!(series.photons[], frame.photons)
+    push!(series.timestamps, timestamp)
+    push!(series.photons, frame.photons)
     append_smooth_value!(app, series.photons, series.photons_smooth, series.timestamps, series.photons_kalman)
-    push!(series.lifetime[], frame.lifetime)
+    push!(series.lifetime, frame.lifetime)
     append_smooth_value!(app, series.lifetime, series.lifetime_smooth, series.timestamps, series.lifetime_kalman)
-    push!(series.concentration[], frame.concentration)
+    push!(series.concentration, frame.concentration)
     append_smooth_value!(app, series.concentration, series.concentration_smooth, series.timestamps, series.concentration_kalman)
+    return nothing
+end
+
+"""
+    accumulate_frame!(app, app_run, record::FrameRecord)
+
+Append one analyzed file to the GUI-side histories: its ROI's per-channel
+series and the global per-frame series.
+"""
+function accumulate_frame!(app, app_run, record::FrameRecord)
+    sample = record.sample
+    index = clamp(record.roi_index, 1, length(app_run.ch1_rois))
+    accumulate_roi_sample!(app, app_run.ch1_rois[index], sample.ch1, sample.timestamps)
+    accumulate_roi_sample!(app, app_run.ch2_rois[index], sample.ch2, sample.timestamps)
+    push!(app_run.protocol_setpoint, sample.protocol_setpoint)
+    push!(app_run.command1, sample.command1)
+    push!(app_run.command2, sample.command2)
+    push!(app_run.timestamps, sample.timestamps)
+    app_run.i = Int(sample.frame_index)
     return nothing
 end
 
@@ -38,8 +62,7 @@ end
     publish_frame!(series::ChannelSeries, frame::ChannelFrame)
 
 Publish one frame's histogram/fit/counts onto one channel's "latest value"
-observables (the throttled GUI-facing update, as opposed to the per-frame
-time-series accumulation above).
+Observables (Histogram plot).
 """
 function publish_frame!(series::ChannelSeries, frame::ChannelFrame)
     series.histogram[] = frame.histogram
@@ -49,243 +72,24 @@ function publish_frame!(series::ChannelSeries, frame::ChannelFrame)
 end
 
 """
-    consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback")
+    recompute_roi_smooth!(app, series::RoiChannelSeries)
 
-Consumes data from the channel and updates the app_run observables.
-Notifications are throttled to approximately `rate` Hz to avoid overwhelming
-the GUI with too frequent updates.
+Recompute one ROI's smoothed photon-count, lifetime, and concentration
+series (`recompute_smooth_series!`, smoothing.jl) after a smoothing-level
+change (handlers_layout.jl). The caller marks the display dirty.
 """
-function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback")
-    last_publish_time = time()
-    publish_interval_s = 1.0 / rate
-    plot_1_axis = blocks.plot_1_axis
-    plot_2_axis = blocks.plot_2_axis
-    publish_live_updates = acquisition_mode != "Save"
-    last_sample = nothing
-    is_realtime_mode = acquisition_mode == "Realtime"
-    warned_missing_file_sequence_number = Ref(false)
-
-    # Real-time missed-file repair. The source acquisition sometimes writes
-    # no file at all for a ROI's scan, and because it numbers files as they
-    # are written that hole leaves no trace in the numbering — so every
-    # later file lands one ROI off, permanently. `RoiSlotTracker`
-    # (acquisition.jl) recovers the real scan slot from the delay between
-    # files instead, seeded with the period the DAQ scan waveform was built
-    # with (`app.protocol.scan_time + .shift_time`, read once here: that's
-    # the waveform started at START, which a later edit to the textbox does
-    # not rebuild).
-    #
-    # Real-time only. Playback paces files on its own synthetic schedule and
-    # Save runs them as fast as it can, so in neither mode does the delay
-    # between reads carry any information about the acquisition's cadence.
-    roi_slot_tracker = RoiSlotTracker(roi_scan_period_s(app.protocol))
-    warned_ambiguous_roi_gap = Ref(false)
-    realtime_frame_df = DataFrame(
-        frame_idx=UInt32[],
-        source_file=String[],
-        roi_index=Int[],
-        timestamp=Float64[],
-        photons_ch1=Float64[],
-        command1=Float64[],
-        command2=Float64[],
-        lifetime_ch1=Float64[],
-        concentration_ch1=Float64[],
-        protocol_setpoint=Float64[],
-        histogram_ch1=Vector{Float64}[],
-        fit_ch1=Vector{Float64}[],
-        photons_ch2=Float64[],
-        lifetime_ch2=Float64[],
-        concentration_ch2=Float64[],
-        histogram_ch2=Vector{Float64}[],
-        fit_ch2=Vector{Float64}[]
-    )
-
-    try
-        for sample in app_run.channel
-            while app_run.running[] && app_run.paused[]
-                sleep(0.02)
-            end
-
-            if !app_run.running[]
-                break
-            end
-
-            last_sample = sample
-
-            # Round-robin file->ROI assignment: file 1 -> ROI 1, file 2 ->
-            # ROI 2, ..., file N+1 -> ROI 1 again. n_rois is fixed for the
-            # whole run by rebuild_roi_series! (start_pressed) and
-            # is always >= 1 (a run with zero ROIs drawn keeps today's
-            # single-series behavior via that one-element vector).
-            #
-            # Keyed on the file's OWN embedded sequence number
-            # (file_sequence_number, parsed from its filename), not this
-            # app's read-count (frame_index) — see AcquisitionSample's
-            # docstring (data_types.jl): a file that never reaches this app
-            # is invisible to frame_index, which would then silently
-            # misassign every later file to the wrong ROI for the rest of
-            # the run. Keying on the filename's own number instead just
-            # leaves that one ROI's turn empty for that cycle. Falls back to
-            # frame_index (with a one-time warning) only if the filename has
-            # no parseable trailing number at all.
-            #
-            # In Real-time mode that number is then corrected against the
-            # measured delay between files (next_roi_slot!), which is the
-            # only thing that can see a scan the source never wrote a file
-            # for — that hole consumes no sequence number, so the numbering
-            # alone reports business as usual right through it.
-            n_rois = length(app_run.ch1_rois)
-            sequence_number = sample.file_sequence_number
-            if sequence_number === nothing
-                if !warned_missing_file_sequence_number[]
-                    @warn "File name has no parseable sequence number; falling back to read-count for ROI assignment (this can drift out of sync after a skipped file)" source_file=sample.source_file
-                    warned_missing_file_sequence_number[] = true
-                end
-                sequence_number = Int(sample.frame_index)
-            end
-
-            if is_realtime_mode && n_rois > 1
-                slot, skipped, ambiguous = next_roi_slot!(roi_slot_tracker, sample.file_time, sequence_number)
-
-                if skipped > 0
-                    @warn "Gap between acquisition files spans more than one ROI scan; assuming the source wrote no file for it and advancing ROI assignment to stay aligned" source_file=sample.source_file skipped_scans=skipped file_period_s=round(roi_slot_tracker.period_est_s, digits=3) roi_index=mod1(slot, n_rois)
-                elseif ambiguous && !warned_ambiguous_roi_gap[]
-                    @warn "Delay between acquisition files doesn't line up with the expected scan period; ROI assignment may drift — check Scan time / Shift time against the actual acquisition" source_file=sample.source_file expected_period_s=round(roi_slot_tracker.period_est_s, digits=3)
-                    warned_ambiguous_roi_gap[] = true
-                end
-
-                sequence_number = slot
-            end
-
-            roi_idx = mod1(sequence_number, n_rois)
-
-            if is_realtime_mode
-                push!(realtime_frame_df, (
-                    frame_idx=sample.frame_index,
-                    source_file=String(sample.source_file),
-                    roi_index=roi_idx,
-                    timestamp=Float64(sample.timestamps),
-                    photons_ch1=Float64(sample.ch1.photons),
-                    command1=Float64(sample.command1),
-                    command2=Float64(sample.command2),
-                    lifetime_ch1=Float64(sample.ch1.lifetime),
-                    concentration_ch1=Float64(sample.ch1.concentration),
-                    protocol_setpoint=Float64(sample.protocol_setpoint),
-                    histogram_ch1=copy(sample.ch1.histogram),
-                    fit_ch1=copy(sample.ch1.fit),
-                    photons_ch2=Float64(sample.ch2.photons),
-                    lifetime_ch2=Float64(sample.ch2.lifetime),
-                    concentration_ch2=Float64(sample.ch2.concentration),
-                    histogram_ch2=copy(sample.ch2.histogram),
-                    fit_ch2=copy(sample.ch2.fit)
-                ))
-            end
-
-            accumulate_roi_sample!(app, app_run.ch1_rois[roi_idx], sample.ch1, sample.timestamps)
-            accumulate_roi_sample!(app, app_run.ch2_rois[roi_idx], sample.ch2, sample.timestamps)
-            push!(app_run.protocol_setpoint[], sample.protocol_setpoint)
-            push!(app_run.command1[], sample.command1)
-            push!(app_run.command2[], sample.command2)
-            push!(app_run.timestamps[], sample.timestamps)
-            app_run.i[] = sample.frame_index
-
-            now_s = time()
-
-            if publish_live_updates && now_s - last_publish_time >= publish_interval_s
-                publish_frame!(app_run.ch1, sample.ch1)
-                publish_frame!(app_run.ch2, sample.ch2)
-
-                notify_runtime_observables!(app_run)
-
-                last_publish_time = now_s
-
-                autoscale_plot!(app, app_run, plot_1_axis, app.layout.plot1, app.layout.plot1_ch1, app.layout.plot1_ch2)
-                autoscale_plot!(app, app_run, plot_2_axis, app.layout.plot2, app.layout.plot2_ch1, app.layout.plot2_ch2)
-            end
-        end
-
-        # Publish the final frame once the loop ends, so the plots show the
-        # last processed data even if it arrived between throttled updates.
-        if last_sample !== nothing
-            publish_frame!(app_run.ch1, last_sample.ch1)
-            publish_frame!(app_run.ch2, last_sample.ch2)
-
-            notify_runtime_observables!(app_run)
-
-            save_completed = isfinite(app_run.save_progress[]) && app_run.save_progress[] >= 100.0
-            if save_completed
-                autolimits!(plot_1_axis)
-                autolimits!(plot_2_axis)
-                lim1 = plot_1_axis.finallimits[]
-                lim2 = plot_2_axis.finallimits[]
-                xmax1 = lim1.origin[1] + lim1.widths[1]
-                xmax2 = lim2.origin[1] + lim2.widths[1]
-                xlims!(plot_1_axis, 0.0, max(Float64(xmax1), 0.0))
-                xlims!(plot_2_axis, 0.0, max(Float64(xmax2), 0.0))
-            else
-                autoscale_plot!(app, app_run, plot_1_axis, app.layout.plot1, app.layout.plot1_ch1, app.layout.plot1_ch2)
-                autoscale_plot!(app, app_run, plot_2_axis, app.layout.plot2, app.layout.plot2_ch1, app.layout.plot2_ch2)
-            end
-        end
-
-        if !app_run.running[]
-            app_run.save_progress[] = NaN
-        end
-
-        if is_realtime_mode && nrow(realtime_frame_df) > 0
-            save_realtime_capture!(app, app_run, realtime_frame_df)
-        end
-
-        blocks.start_button.label[] = "START"
-        blocks.stop_button.label[] = "CLEAR"
-    catch e
-        @error "Consumer error" e
-    end
-end
-
-function infos_loop(app_run, info_label; rate=1.0)
-    last_i = app_run.i[]
-    last_t = time()
-    dt = 1/float(rate)
-    freq_ema = NaN   # smoothed frame rate (Hz), EMA of the instantaneous rate
-    while app_run.running[]
-        if app_run.paused[]
-            sleep(min(dt, 0.05))
-            continue
-        end
-
-        sleep(dt)
-        try
-            i = app_run.i[]
-            now = time()
-            elapsed = now - last_t
-            if i != last_i && elapsed > 0
-                # Rate over the true elapsed time (not the nominal dt), smoothed
-                # so the readout doesn't jump with each integer frame-count tick.
-                inst = (i - last_i) / elapsed
-                freq_ema = isfinite(freq_ema) ? 0.6 * freq_ema + 0.4 * inst : inst
-                info_label.text[] = "Frequency: $(round(freq_ema, digits=1)) Hz\nFile: $i"
-                last_i = i
-                last_t = now
-            end
-        catch e
-            @warn "Infos loop error" e
-        end
-    end
+function recompute_roi_smooth!(app, series::RoiChannelSeries)
+    recompute_smooth_series!(app, series.photons, series.photons_smooth, series.timestamps, series.photons_kalman)
+    recompute_smooth_series!(app, series.lifetime, series.lifetime_smooth, series.timestamps, series.lifetime_kalman)
+    recompute_smooth_series!(app, series.concentration, series.concentration_smooth, series.timestamps, series.concentration_kalman)
     return nothing
 end
-
-# -----------------------------------------------------------------------------
-# button handlers
-# -----------------------------------------------------------------------------
 
 """
     reset_channel_series!(series::ChannelSeries)
 
-Clear one channel's "latest frame" counter ahead of a fresh acquisition
-run (histogram/fit are left as-is — callers that want them blanked, e.g.
-clear_runtime_plots! in handlers.jl, NaN-fill them separately). Does not
-notify — callers batch their own notifications.
+Clear one channel's "latest frame" counter ahead of a fresh run
+(histogram/fit are left as-is — `clear_runtime_plots!` NaN-fills them).
 """
 function reset_channel_series!(series::ChannelSeries)
     series.counts[] = 0.0
@@ -293,40 +97,13 @@ function reset_channel_series!(series::ChannelSeries)
 end
 
 """
-    reset_roi_series!(series::RoiChannelSeries)
-
-Clear one ROI's per-channel time-series observables ahead of a fresh
-acquisition run. Does not notify — callers batch their own notifications.
-"""
-function reset_roi_series!(series::RoiChannelSeries)
-    empty!(series.timestamps[])
-    empty!(series.photons[])
-    empty!(series.photons_smooth[])
-    empty!(series.lifetime[])
-    empty!(series.lifetime_smooth[])
-    empty!(series.concentration[])
-    empty!(series.concentration_smooth[])
-    return nothing
-end
-
-"""
     rebuild_roi_series!(app, app_run)
 
-Resize `app_run.ch1_rois`/`ch2_rois` to match the current number of drawn
-ROIs (`app_run.rois[]`) — but only when the ROI toggle (`app.roi.active`,
-set in the Protocol panel, handlers_protocol.jl) is on; otherwise always
-resize to 1, so multi-ROI splitting only kicks in when the user has
-explicitly enabled it, regardless of how many ROIs happen to be drawn.
-Discards all previously accumulated per-ROI data. Called ahead of a fresh
-acquisition run (`start_pressed`) and by the CLEAR button
-(`clear_runtime_plots!`, handlers.jl) — either could follow a change to the
-drawn ROI set or the toggle, and the round-robin routing in
-`consumer_loop` (`mod1(slot, length(app_run.ch1_rois))`) needs the
-two vectors to always be the same, non-zero length. Callers must re-render
-both plot slots (`render_plot!`, plotting.jl) afterward: this
-replaces the `Observable`s themselves (not just their contents), so any
-existing `lines!` plot objects on the axes are left pointing at
-now-orphaned data.
+Replace `app_run.ch1_rois`/`ch2_rois` with fresh, empty histories: one per
+drawn ROI (`app_run.rois[]`) when ROI mode (`app.roi.active`) is on, a
+single one otherwise. Index `k` holds drawn ROI `k`'s results. Callers must
+re-render both plot slots (`render_plot!`) afterwards: the curves are bound
+to the old vectors.
 """
 function rebuild_roi_series!(app, app_run)
     n = app.roi.active ? max(1, length(app_run.rois[])) : 1
@@ -338,16 +115,18 @@ end
 """
     reset_acquisition_state!(app, app_run)
 
-Clear all time-series observables and counters ahead of a fresh acquisition run.
+Clear every GUI-side history and counter ahead of a fresh run. The global
+histories are emptied in place (plot bindings keep them); the per-ROI ones
+are rebuilt (see `rebuild_roi_series!`).
 """
 function reset_acquisition_state!(app, app_run)
     foreach(reset_channel_series!, channel_series(app_run))
     rebuild_roi_series!(app, app_run)
-    empty!(app_run.protocol_setpoint[])
-    empty!(app_run.command1[])
-    empty!(app_run.command2[])
-    empty!(app_run.timestamps[])
-    app_run.i[] = 0
+    empty!(app_run.protocol_setpoint)
+    empty!(app_run.command1)
+    empty!(app_run.command2)
+    empty!(app_run.timestamps)
+    app_run.i = 0
     app_run.save_progress[] = NaN
     return nothing
 end
@@ -368,95 +147,82 @@ function initial_guess_for_lifetimes(selected_lifetimes::AbstractString)::Vector
     end
 end
 
+# -----------------------------------------------------------------------------
+# START
+# -----------------------------------------------------------------------------
+
 """
-    spawn_acquisition_worker!(app_run, selected_mode, layout, controller, initial_guess, protocol_config)
+    spawn_acquisition_worker!(app_run, selected_mode, out, initial_guess)
 
-Launch the background worker task for the selected acquisition mode
-(Playback/Realtime/Save, defaulting to Playback for an unrecognized mode)
-and store it on `app_run.worker_task`.
-
-Launched with `Threads.@spawn`, not `@async`: the worker loop is CPU-bound
-(the MLE fit dominates its frame time, measured ~88% of a loop iteration),
-and `@async` tasks are sticky to the thread they were spawned from — with
-GLMakie's event loop and `consumer_task`/`output_task`/`infos_task` all
-pinned to the main thread via `@async` (see `start_pressed` below), a
-CPU-bound `@async` worker would block GUI redraw/input for the duration of
-every fit. `Threads.@spawn` lets the scheduler run the worker on a
-different OS thread when one is available, so the GUI stays responsive
-even while a fit is in flight. This is pure Julia (`Base.Threads`) with no
-OS-specific code, so it behaves identically on macOS and Windows; it only
-*helps* when Julia is started with more than one thread (`julia -t auto`),
-which `start_pressed` checks for and warns about below. With a single
-thread it degrades gracefully to the same cooperative scheduling as
-`@async` — never worse, just not better.
-
-`consumer_task` (and `output_task`/`infos_task`) must stay on `@async`:
-they touch `Observable`s and the GLMakie figure directly, which are not
-safe to mutate concurrently from multiple threads.
+Launch the analysis worker for the selected mode (Playback/Realtime/Save,
+Playback for an unrecognized mode) on its own thread and store it on
+`app_run.worker_task`. `Threads.@spawn`, not `@async`: the worker is
+CPU-bound (the MLE fit dominates its frame time), and it never touches the
+GUI — its results reach it through the exchanges.
 """
-function spawn_acquisition_worker!(app_run, selected_mode, layout, controller, initial_guess, protocol_config)
-    if selected_mode == "Playback"
-        app_run.worker_task = Threads.@spawn start_playback(
-            app_run.channel,
-            app_run.running,
-            layout,
-            controller;
-            initial_guess=initial_guess,
-            protocol=protocol_config,
-            paused=app_run.paused,
-            target_frequency=app_run.target_frequency
-        )
-    elseif selected_mode == "Realtime"
-        app_run.worker_task = Threads.@spawn start_realtime(
-            app_run.channel,
-            app_run.running,
-            layout,
-            controller;
-            initial_guess=initial_guess,
-            protocol=protocol_config,
-            paused=app_run.paused
-        )
+function spawn_acquisition_worker!(app_run, selected_mode, out::AnalysisOutput, initial_guess)
+    running, paused = app_run.running, app_run.paused
+    app_run.worker_task = if selected_mode == "Realtime"
+        Threads.@spawn start_realtime(out, running; initial_guess=initial_guess, paused=paused)
     elseif selected_mode == "Save"
-        app_run.save_progress[] = 0.0
-
-        save_progress_cb = function (pct)
-            app_run.save_progress[] = Float64(pct)
-            return nothing
-        end
-
-        app_run.worker_task = Threads.@spawn start_save(
-            app_run.channel,
-            app_run.running,
-            layout,
-            controller;
-            initial_guess=initial_guess,
-            protocol=protocol_config,
-            paused=app_run.paused,
-            progress_cb=save_progress_cb
-        )
+        Threads.@spawn start_save(out, running; initial_guess=initial_guess, paused=paused)
     else
-        @warn "Unknown acquisition mode selected; falling back to Playback" selected_mode=selected_mode
-        app_run.worker_task = Threads.@spawn start_playback(
-            app_run.channel,
-            app_run.running,
-            layout,
-            controller;
-            initial_guess=initial_guess,
-            protocol=protocol_config,
-            paused=app_run.paused,
-            target_frequency=app_run.target_frequency
-        )
+        selected_mode == "Playback" || @warn "Unknown acquisition mode selected; falling back to Playback" selected_mode=selected_mode
+        Threads.@spawn start_playback(out, running; initial_guess=initial_guess, paused=paused,
+                                      target_frequency=app_run.target_frequency)
     end
-
     return nothing
+end
+
+"""
+    scan_request(app, app_run, order)::ScanRequest
+
+Snapshot of everything the DAQ loop needs for this run's slots.
+"""
+function scan_request(app, app_run, order::Vector{Int})::ScanRequest
+    return ScanRequest(
+        copy(app_run.rois[]), copy(order), app.roi.active,
+        app.roi.v_min_x, app.roi.v_max_x, app.roi.v_min_y, app.roi.v_max_y,
+        app.protocol.points_per_roi, app.protocol.spiral_turns,
+        app.protocol.scan_time, app.protocol.shift_time,
+        app_run.imported_image_size
+    )
+end
+
+"""
+    run_info(app, app_run, mode, order)::Dict{String, Any}
+
+What the journal writes to the run's run.toml.
+"""
+function run_info(app, app_run, mode::AbstractString, order::Vector{Int})::Dict{String, Any}
+    return Dict{String, Any}(
+        "mode" => String(mode),
+        "data_folder" => get_data_root_path(),
+        "bench_config" => app_run.config.source,
+        "backend" => String(app_run.config.backend),
+        "daq_state_at_start" => string(loop_status(app_run.exchange).state),
+        "rois" => [r.name for r in app_run.rois[]],
+        "roi_visit_order" => order,
+        "roi_active" => app.roi.active,
+        "protocol" => Dict{String, Any}(
+            "active" => app.protocol.active, "repeats" => app.protocol.repeats, "delay" => app.protocol.delay,
+            "scan_time_ms" => app.protocol.scan_time, "shift_time_ms" => app.protocol.shift_time,
+            "points_per_roi" => app.protocol.points_per_roi, "spiral_turns" => app.protocol.spiral_turns
+        ),
+        "controller" => Dict{String, Any}(
+            "P1" => app.controller.P1, "I1" => app.controller.I1, "on1" => app.controller.ch1_on, "inv1" => app.controller.ch1_inv,
+            "P2" => app.controller.P2, "I2" => app.controller.I2, "on2" => app.controller.ch2_on, "inv2" => app.controller.ch2_inv
+        ),
+        "galvo_range_mV" => [app.roi.v_min_x, app.roi.v_max_x, app.roi.v_min_y, app.roi.v_max_y],
+        "image_size" => collect(app_run.imported_image_size)
+    )
 end
 
 """
     abort_start!(app_run, blocks)
 
 Undo the `running`/`paused` flags claimed by `start_pressed` and restore the
-button labels when a start is abandoned after those flags were set (e.g. a
-missing data folder found during the async validation).
+button labels when a start is abandoned (e.g. a missing data folder).
 """
 function abort_start!(app_run, blocks)
     app_run.running[] = false
@@ -469,29 +235,14 @@ end
 """
     start_pressed(app, app_run, blocks)
 
-Handler called when the START button is clicked. After its guard checks and
-claiming `running[]`/`paused[]` synchronously, the rest of the work — the
-ROI galvo scan, setting up the communication channel, resetting all
-time-series observables, and launching four background tasks — happens on
-its own `@async` task that this function does not wait on (see the comment
-above that task in the body for why: this function's own call stack is
-GLMakie's render-loop task, and blocking it blocks rendering).
-
-The four background tasks:
-
-* **worker_task** - the Playback/Realtime/Save acquisition loop (acquisition.jl)
-  that reads data files and pushes samples onto the channel. Launched with
-  `Threads.@spawn` (see `spawn_acquisition_worker!`), since it is
-  CPU-bound (dominated by the MLE fit) and must not block the GUI thread;
-* **consumer_task** - pulls samples from the channel and updates the
-  `app_run` observables so that the plots react. Stays on `@async` (pinned
-  to the thread it's spawned from, i.e. the GUI thread) since it touches
-  `Observable`s/GLMakie, which aren't safe to mutate from multiple threads;
-* **output_task** - periodically writes the PI commands to the DAQ command outputs (daq.jl);
-* **infos_task** - refreshes the status label at 1 Hz.
-
-`blocks` is used to read the selected mode/lifetimes menus and to obtain
-the info label object for `infos_task`.
+START: claim `running[]` synchronously (so a second click is caught), then
+do the rest on an `@async` task this handler doesn't wait on — this
+function runs on GLMakie's render-loop task, and anything that blocks it
+blocks rendering. That task validates the data folder, computes the ROI
+visiting order off the GUI thread (exponential in the ROI count), resets the
+histories, opens the journal run, asks the DAQ loop to start the scan (if
+connected and ready) and spawns the analysis worker. The refresh tick takes
+it from there.
 """
 function start_pressed(app, app_run, blocks)
     if app_run.running[]
@@ -499,15 +250,12 @@ function start_pressed(app, app_run, blocks)
         return
     end
 
-    # A previous run's async teardown (stop_pressed) may still be draining its
-    # tasks; starting now would let that teardown clobber the fresh channel/tasks.
-    if tasks_still_running(app_run)
+    if app_run.run_open
         @info "Previous run is still shutting down; ignoring START"
         show_status!(blocks, "Finishing previous run…")
         return
     end
 
-    # Check if IRF is loaded before starting
     if RUNTIME[].irf === nothing || RUNTIME[].tcspc_window_size === nothing
         @error "Cannot start acquisition: IRF not loaded. Please load an IRF file first."
         show_status!(blocks, "Load an IRF file before starting")
@@ -515,58 +263,17 @@ function start_pressed(app, app_run, blocks)
     end
 
     @info "Starting acquisition"
-
-    # Claimed synchronously, before any of the async work below, so a second
-    # click arriving while that work is still in flight is still correctly
-    # caught by the "already running" guard above instead of racing in as a
-    # second concurrent start. Neither field has any on(...) listener
-    # (they're plain Threads.Atomic{Bool}, not Observable — data_types.jl),
-    # so setting them early has no other side effect.
     app_run.running[] = true
     app_run.paused[] = false
+    ex = app_run.exchange
 
-    # Everything below is real work — building the ROI scan waveform,
-    # scanning the data folder, launching the tasks — so none of it runs
-    # directly in this function's own call stack. start_pressed is invoked
-    # synchronously from GLMakie's own render-loop task: button clicks are dispatched via
-    # GLFW.PollEvents() from inside that loop's while-loop (GLMakie
-    # screen.jl), so this function's call stack *is* that task. Blocking it
-    # — even indirectly, e.g. a wait() on some other task — blocks the
-    # render loop itself; nothing else can step in to draw a frame while
-    # it's suspended waiting. Returning immediately here and doing the real
-    # work on its own task instead — never waited on from this call stack,
-    # same as consumer_task/output_task/infos_task always have been — is
-    # what actually lets rendering keep happening while this runs.
     @async begin
-        # Start the galvo scan (if ROI mode is on and the DAQ connected)
-        # before any file-reading begins, so the first acquired frame
-        # already matches the first ROI in the scan cycle. No-op (see its
-        # own docstring) unless ROI mode is on, the DAQ is connected, and at
-        # least one ROI is drawn.
-        start_roi_scan!(app, app_run)
-
-        # The GUI stays responsive while this task runs, so the user can
-        # click STOP before it finishes — stop_pressed (below) would see
-        # running[] already true and run its shutdown against state
-        # (channel/worker_task/...) this function hasn't created yet. Bail
-        # out here instead of dispatching a worker the user just asked to
-        # stop before it ever started, and zero the outputs again in case
-        # that STOP landed before the scan above was started.
-        if !app_run.running[]
-            @info "Acquisition stopped before it finished starting"
-            app_run.daq === nothing || zero_all_outputs!(app_run.daq)
-            return nothing
-        end
-
         selected_mode = blocks.mode_menu.selection[]
-        if !(selected_mode isa AbstractString)
-            selected_mode = "Playback"
-        end
+        selected_mode isa AbstractString || (selected_mode = "Playback")
 
-        # Validate the data source here, on the GUI thread, so the common
-        # "clicked START but nothing happened" cases surface in the window
-        # instead of only in the worker's console log. Realtime waits for
-        # files to appear, so it just needs the folder to exist.
+        # Surface the common "clicked START but nothing happened" cases in
+        # the window instead of only in the worker's log. Realtime waits
+        # for files to appear, so it just needs the folder to exist.
         data_path = get_data_root_path()
         if !isdir(data_path)
             show_status!(blocks, "Data folder not found")
@@ -580,39 +287,53 @@ function start_pressed(app, app_run, blocks)
         end
 
         selected_lifetimes = blocks.lifetimes_menu.selection[]
-        if !(selected_lifetimes isa AbstractString)
-            selected_lifetimes = "2 lifetimes"
-        end
+        selected_lifetimes isa AbstractString || (selected_lifetimes = "2 lifetimes")
         initial_guess = initial_guess_for_lifetimes(selected_lifetimes)
 
-        # Capacity: the worker (its own thread since Threads.@spawn, see
-        # spawn_acquisition_worker!) blocks on put! once this fills, so a
-        # transient GUI-thread slowdown (a GC pause, a Makie redraw, a
-        # smoothing-slider recompute) directly stalls the fit loop too, not
-        # just the display. 32 gave the worker under 100ms of headroom at
-        # realistic frame rates; 512 costs a few hundred KB more (each sample
-        # holds two Vector{Float64} histograms) and absorbs multi-second GC/JIT
-        # pauses without back-pressuring the worker, while still bounding
-        # worst-case backlog if the consumer falls behind persistently rather
-        # than just transiently.
-        app_run.channel = Channel{AcquisitionSample}(512)
+        rois = app_run.rois[]
+        split_rois = app.roi.active && !isempty(rois)
+        order = split_rois ? fetch(Threads.@spawn roi_visit_order(rois)) : Int[]
+
+        if !app_run.running[]
+            @info "Acquisition stopped before it finished starting"
+            return nothing
+        end
 
         reset_acquisition_state!(app, app_run)
-        # rebuild_roi_series! (inside reset_acquisition_state!)
-        # replaced app_run.ch1_rois/ch2_rois wholesale, so the plot axes must be
-        # rebuilt to draw one line pair per new RoiChannelSeries instance —
-        # see its docstring.
         render_plot!(app, app_run, blocks, :plot1)
         render_plot!(app, app_run, blocks, :plot2)
 
-        sync_runtime_protocol!(app, app_run)
-        protocol_config = app_run.protocol
+        state_display = app_run.display
+        reset_diagnostics!(state_display)
+        state_display.frame_cursor = reset_cursor(ex.frames)
+        state_display.slot_cursor = reset_cursor(ex.slots)
+        state_display.last_frame_count = 0
+        state_display.last_frame_count_time_ns = time_ns()
+        state_display.frame_rate_hz = NaN
+        publish_analysis_settings!(app, app_run; force=true)
+        set_command_values!(ex, NaN, NaN)
 
-        spawn_acquisition_worker!(app_run, selected_mode, app.layout, app.controller, initial_guess, protocol_config)
+        app_run.run_mode = selected_mode
+        app_run.roi_order = order
+        app_run.worker_output = nothing
+        app_run.run_open = true
+        send_journal!(ex.journal, JournalRunStart(time(), run_info(app, app_run, selected_mode, order)))
 
-        app_run.consumer_task = @async consumer_loop(app, app_run, blocks; rate=10, acquisition_mode=selected_mode)
-        app_run.output_task = @async command_output_loop(app_run, blocks; rate=20.0)
-        app_run.infos_task = @async infos_loop(app_run, blocks.info_label; rate=1)
+        state = loop_status(ex).state
+        if state == LOOP_READY
+            ex.stop[] = false
+            send_command!(ex, StartCommand(scan_request(app, app_run, order)))
+        elseif state == LOOP_FAULT
+            show_status!(blocks, "DAQ in fault: acknowledge it (RESET) to drive the outputs")
+            journal_event!(ex.journal, :warn, "run started without the DAQ: loop in fault")
+        elseif state != LOOP_DISCONNECTED
+            journal_event!(ex.journal, :warn, "run started without the DAQ: loop is $(state)")
+        end
+
+        out = AnalysisOutput(ex; roi_order=order, realtime=(selected_mode == "Realtime"),
+                             nominal_period_s=roi_scan_period_s(app.protocol))
+        spawn_acquisition_worker!(app_run, selected_mode, out, initial_guess)
+        return nothing
     end
 
     return nothing
@@ -633,75 +354,33 @@ function resume_pressed(app_run)
 end
 
 """
-    background_tasks(app_run)
-
-The five background-task slots, in the order `stop_pressed` tears them down.
-"""
-background_tasks(app_run) = (app_run.worker_task, app_run.consumer_task,
-                             app_run.autoscaler_task, app_run.infos_task, app_run.output_task)
-
-"""
-    tasks_still_running(app_run)::Bool
-
-True while a previous run's tasks are still shutting down (`stop_pressed`
-waits for them off the render loop, see below). `start_pressed` checks this
-so a restart can't race the async teardown and have its fresh channel/tasks
-clobbered by the tail of the old one.
-"""
-function tasks_still_running(app_run)::Bool
-    return any(t -> t !== nothing && !istaskdone(t), background_tasks(app_run))
-end
-
-"""
     stop_pressed(app_run)
 
-Stop any running acquisition: clear `running`, zero the hardware outputs
-(stopping the ROI scan), and close the channel — all synchronously — then
-`wait` on the background tasks from a detached `@async` task rather than
-inline. The outputs are zeroed even when nothing is running (CLEAR).
-
-`running` drops before the zeroing so `command_output_loop`, which only
-yields in its `sleep`, can't wake up in between and write one last command
-on top of the zeros.
-
-The `wait` is what makes the difference: `stop_pressed` runs on GLMakie's
-render-loop task (it's a button handler), and waiting there for a worker
-mid-fit froze the window until the fit finished. Doing it on a separate
-task keeps rendering live. The task refs are deliberately left in place (not
-nil'd) so `tasks_still_running` can see the teardown is ongoing and block a
-restart until it completes — `start_pressed` overwrites them with the fresh
-run's tasks once they're done.
+STOP (and CLEAR): raise the DAQ loop's stop flag — it sees it within one
+readback block, stops the tasks and zeroes every output (plan §7.4) — and
+clear `running` so the analysis worker ends after its current file. Nothing
+here waits: the refresh tick notices when both have stopped and closes the
+run (`finalize_run!`, gui/refresh.jl).
 """
 function stop_pressed(app_run)
+    request_stop!(app_run.exchange)
+
     if !app_run.running[]
-        app_run.daq === nothing || zero_all_outputs!(app_run.daq)
         app_run.save_progress[] = NaN
         @info "Not running"
         return
     end
 
+    @info "Stopping acquisition"
     app_run.paused[] = false
     app_run.running[] = false
-    app_run.daq === nothing || zero_all_outputs!(app_run.daq)
-
-    @info "Stopping acquisition"
-
-    if app_run.channel !== nothing && isopen(app_run.channel)
-        close(app_run.channel)
-    end
-    app_run.channel = nothing
-    app_run.save_progress[] = NaN
-
-    tasks = background_tasks(app_run)
-    @async for t in tasks
-        if t !== nothing && !istaskdone(t)
-            try
-                wait(t)
-            catch e
-                @warn "Task error during shutdown" e
-            end
-        end
-    end
-
     return nothing
 end
+
+"""
+    tasks_still_running(app_run)::Bool
+
+True while a previous run is still being finalized (worker or scan still
+winding down, journal run open).
+"""
+tasks_still_running(app_run)::Bool = app_run.run_open

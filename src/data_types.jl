@@ -3,19 +3,22 @@ data_types.jl
 
 Core data structures for the FLIM application.
 
-This module defines the primary structures for application state:
-- AppState: Persistent configuration that is serialized to disk
-- AppRun: Runtime transient state with observables and background tasks
-- ChannelFrame / ChannelSeries: one TCSPC channel's per-frame results and
-  runtime observables, so per-channel logic is written once and instantiated
-  per channel instead of duplicated `_ch1`/`_ch2` copies
+This file defines the structures shared across threads:
+- AppState and its settings groups: persistent configuration serialized to disk
+- ChannelFrame / AcquisitionSample: one analyzed file's results, per channel,
+  so per-channel logic is written once and instantiated per channel instead
+  of duplicated `_ch1`/`_ch2` copies
+- KalmanState, RoiCoordinates
+
+The GUI thread's runtime state (AppRun) lives in gui/app_run.jl, the
+exchanges between threads in exchange.jl.
 """
 
 using Observables
 using Base.Threads
 
 # =============================================================================
-# ACQUISITION SAMPLES (worker -> consumer payload)
+# ACQUISITION SAMPLES (analysis worker -> exchanges)
 # =============================================================================
 
 """
@@ -47,9 +50,9 @@ ChannelFrame() = ChannelFrame(Float64[], Float64[], NaN, NaN, NaN)
 """
     AcquisitionSample
 
-One frame's worth of acquisition results, emitted onto the acquisition
-channel by `run_acquisition_loop!` (acquisition.jl) and consumed by
-`consumer_loop` (runtime.jl). A struct rather than a positional tuple —
+One frame's worth of acquisition results, produced by
+`run_acquisition_loop!` (analysis/acquisition.jl) and published by
+`emit_frame!` into the exchanges. A struct rather than a positional tuple —
 too many fields to destructure positionally without risking a
 silently-mismatched order.
 
@@ -77,11 +80,11 @@ ROI 1 -> 4) — every later file then lands on the wrong ROI, permanently.
 couldn't be stat'ed) — when the source actually wrote it, not when this app
 got around to reading it, so it stays meaningful even when the reader is
 backlogged. It's what makes the hole above detectable: consecutive ROI scans
-are `scan_time + shift_time` ms apart by construction (the DAQ scan
-waveform is built from exactly those numbers, roi.jl), so a gap of ~2x that period
-means one scan produced no file. See `RoiSlotTracker`/`next_roi_slot!`
-(acquisition.jl), which `consumer_loop` (runtime.jl) drives to keep
-round-robin ROI assignment aligned through such holes.
+are `scan_time + shift_time` ms apart by construction (the DAQ loop's slots
+are built from exactly those numbers, loop/scan_pattern.jl), so a gap of
+~2x that period means one scan produced no file. See `RoiSlotTracker`/
+`next_roi_slot!` (analysis/acquisition.jl), which `assign_roi!` drives to
+keep round-robin ROI assignment aligned through such holes.
 """
 struct AcquisitionSample
     ch1::ChannelFrame
@@ -235,42 +238,11 @@ function AppState(use_dark::Bool)
 end
 
 # =============================================================================
-# RUNTIME APPLICATION STATE
+# SHARED RUNTIME TYPES
 # =============================================================================
-
-"""
-    ChannelSeries
-
-One TCSPC channel's "latest frame" snapshot: the current histogram, fitted
-decay curve, and photon count, all overwritten (not appended to) each
-published update — used only by the Histogram plot, which shows the most
-recent frame regardless of which ROI it belongs to (see `RoiChannelSeries`
-for the per-ROI accumulated time series that back every other plot).
-`AppRun` holds one instance per channel (`ch1`/`ch2`), so every "do X for
-each channel" site loops over `(app_run.ch1, app_run.ch2)` instead of
-duplicating `_ch1`/`_ch2` code.
-"""
-struct ChannelSeries
-    histogram::Observable{Vector{Float64}}
-    fit::Observable{Vector{Float64}}
-    counts::Observable{Float64}
-end
-
-function ChannelSeries()
-    return ChannelSeries(
-        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(0.0)
-    )
-end
-
-"""
-    channel_series(app_run) -> (ChannelSeries, ChannelSeries)
-
-Both channels' "latest frame" snapshots, in channel order — the idiomatic
-way to iterate "for each channel" over an `AppRun` for Histogram-plot data.
-"""
-channel_series(app_run) = (app_run.ch1, app_run.ch2)
+# Used by more than one thread (analysis worker and GUI). The GUI-only
+# runtime state — AppRun, the per-ROI histories, plot bindings — lives in
+# gui/app_run.jl.
 
 """
     KalmanState
@@ -291,7 +263,7 @@ relative amount of smoothing regardless of how fast frames actually arrive.
 
 One instance per (channel, metric) drives the PID observer
 (`ChannelFitState.pid_kalman`, acquisition.jl) and one per (channel, ROI,
-metric) drives plot smoothing (`RoiChannelSeries`, below) — same filter
+metric) drives plot smoothing (`RoiChannelSeries`, gui/app_run.jl) — same filter
 (`kalman_update!`, smoothing.jl), independent state in each case, since ROI
 mode's per-line smoothing stays independent from the PID's own observer
 (each ROI only sees every Nth frame; the PID observer sees every frame).
@@ -314,68 +286,6 @@ end
 KalmanState() = KalmanState(NaN, 0.0, NaN, 0.0, NaN, NaN, NaN, NaN)
 
 """
-    RoiChannelSeries
-
-One ROI's accumulated runtime time series for one TCSPC channel — the unit
-that gets duplicated once per drawn ROI (`app_run.rois`), per channel, when
-incoming acquisition frames are round-robin assigned to ROIs (see
-`accumulate_roi_sample!` in runtime.jl). Carries its own
-`timestamps` because each ROI only receives every Nth frame (N = number of
-ROIs), so it can't share a single app-wide per-frame x-axis the way the
-original single-series design did.
-
-# Fields
-- `timestamps::Observable{Vector{Float64}}`: this ROI's own frame timestamps
-- `photons::Observable{Vector{Float64}}` / `photons_smooth` / `photons_kalman`: photon-count time series and its live Kalman filter state
-- `lifetime::Observable{Vector{Float64}}` / `lifetime_smooth` / `lifetime_kalman`: fitted-lifetime time series and its live Kalman filter state
-- `concentration::Observable{Vector{Float64}}` / `concentration_smooth` / `concentration_kalman`: ion-concentration time series and its live Kalman filter state
-
-The `_kalman` fields (`KalmanState`) are `smoothing.jl`'s `kalman_update!`
-running state for that metric's `_smooth` series — not plotted directly,
-just carried so `append_smooth_value!` can pick up where the last call left
-off, and reinitialized (not persisted) across a `recompute_smooth_series!`
-replay — see that function's docstring for why that's fine.
-"""
-struct RoiChannelSeries
-    timestamps::Observable{Vector{Float64}}
-    photons::Observable{Vector{Float64}}
-    photons_smooth::Observable{Vector{Float64}}
-    photons_kalman::KalmanState
-    lifetime::Observable{Vector{Float64}}
-    lifetime_smooth::Observable{Vector{Float64}}
-    lifetime_kalman::KalmanState
-    concentration::Observable{Vector{Float64}}
-    concentration_smooth::Observable{Vector{Float64}}
-    concentration_kalman::KalmanState
-end
-
-function RoiChannelSeries()
-    return RoiChannelSeries(
-        Observable(Float64[]),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        KalmanState(),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        KalmanState(),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        KalmanState()
-    )
-end
-
-"""
-    roi_channel_series(app_run)
-
-Every `RoiChannelSeries` currently allocated, across both channels — the
-idiomatic way to iterate "for each (channel, ROI)" over an `AppRun`
-regardless of channel-visibility toggles (used for resetting/notifying/
-recomputing smoothing on all of them at once; see `shown_channel_series` in
-plotting.jl for the toggle-gated, per-plot iteration).
-"""
-roi_channel_series(app_run) = Iterators.flatten((app_run.ch1_rois, app_run.ch2_rois))
-
-"""
     RoiCoordinates
 
 One ROI's boundary — imported from an ImageJ .roi/.zip file or manually
@@ -388,132 +298,4 @@ struct RoiCoordinates
     name::String
     xs::Vector{Float64}
     ys::Vector{Float64}
-end
-
-"""
-    DaqSession
-
-Open NI-DAQmx output session (daq.jl), created by CONNECT and released by
-DISCONNECT. `command_task` is an on-demand AO task on the PI command
-outputs, kept open for the whole session; `scan_tasks` holds the hardware-timed ROI scan tasks (galvo AO, port-0
-lines, and the counter clock pacing them, in that order) while a scan runs,
-empty otherwise. Task handles are DAQmx `TaskHandle`s.
-"""
-mutable struct DaqSession
-    command_task::Ptr{Nothing}
-    scan_tasks::Vector{Ptr{Nothing}}
-end
-
-"""
-    AppRun
-
-Runtime state for the application. This structure holds references to
-background tasks, communication channels, and observables that update
-during execution. It is NOT serialized.
-
-# Fields
-- `channel::Union{Channel{AcquisitionSample}, Nothing}`: worker->consumer data channel
-- `running::Threads.Atomic{Bool}`: flag controlling background task lifetime
-- `paused::Threads.Atomic{Bool}`: flag pausing the background tasks
-- `worker_task::Union{Task, Nothing}`: background worker processing task
-- `consumer_task::Union{Task, Nothing}`: data consumer and GUI update task
-- `autoscaler_task::Union{Task, Nothing}`: periodic axis autoscaling task
-- `infos_task::Union{Task, Nothing}`: periodic info/status update task
-- `output_task::Union{Task, Nothing}`: periodic PI command output task (daq.jl)
-- `daq::Union{DaqSession, Nothing}`: open DAQ session, if any
-- `ch1::ChannelSeries` / `ch2::ChannelSeries`: per-channel "latest frame" snapshot (Histogram plot only)
-- `ch1_rois::Vector{RoiChannelSeries}` / `ch2_rois::Vector{RoiChannelSeries}`: per-channel,
-  per-ROI accumulated time series (every other plot) — always the same
-  length as each other, `max(1, length(rois[]))` as of the last
-  `rebuild_roi_series!` call (`start_pressed`/CLEAR, runtime.jl),
-  but only when the ROI toggle (`app.roi.active`, Protocol panel,
-  handlers_protocol.jl) is on; a single-element vector — reproducing the
-  original un-split single-series behavior — otherwise, regardless of how
-  many ROIs are drawn
-- `protocol_setpoint::Observable{Vector{Float64}}`: time-series of protocol setpoints used by PID
-- `command1::Observable{Vector{Float64}}` / `command2`: time-series of PID command values —
-  NOT split per ROI: these drive real hardware output (daq.jl), not just
-  the "Command" plot, so they stay a single shared series regardless of ROI count
-- `timestamps::Observable{Vector{Float64}}`: time-series timestamps
-- `i::Observable{UInt32}`: current frame/iteration counter
-- `save_progress::Observable{Float64}`: Save-mode progress (percent, `NaN` when idle)
-- `hist_time::Observable{Vector{Int64}}`: histogram time-axis values
-- `protocol::Observable{ProtocolSettings}`: normalized protocol config for the worker
-- `rois::Observable{Vector{RoiCoordinates}}`: currently-drawn ROI boundaries
-  (imported or manually drawn in the ROI popup, roi_popup.jl), shared here
-  so other panels/functions can read the current ROI set without reaching
-  into the popup itself
-- `target_frequency::Threads.Atomic{Float64}`: Playback mode's target frame
-  rate (Hz) — an `Atomic`, not an `Observable`, because `start_playback`
-  (acquisition.jl) reads it every cycle from its own worker thread
-  (`Threads.@spawn`), not the GUI thread; the target-frequency textbox
-  (GUI.jl/handlers.jl) writes to it live, so it takes effect mid-run
-- `imported_image_size::Tuple{Int,Int}`: `(width, height)` in pixels of the
-  most recently imported ROI-popup image (roi_popup.jl's `im_import_button`
-  handler) — `rois[]`'s coordinates are in this image's own pixel space.
-  Read by `roi_scan_segments` (roi.jl) to correct for an image shorter
-  than the galvo voltage calibration reference (see its docstring).
-  Defaults to `(1024, 1024)`, matching that calibration reference, so a run
-  started before any image has been imported this session behaves as if no
-  correction were needed.
-"""
-mutable struct AppRun
-    channel::Union{Channel{AcquisitionSample}, Nothing}
-    running::Threads.Atomic{Bool}
-    paused::Threads.Atomic{Bool}
-    worker_task::Union{Task, Nothing}
-    consumer_task::Union{Task, Nothing}
-    autoscaler_task::Union{Task, Nothing}
-    infos_task::Union{Task, Nothing}
-    output_task::Union{Task, Nothing}
-    daq::Union{DaqSession, Nothing}
-    ch1::ChannelSeries
-    ch2::ChannelSeries
-    ch1_rois::Vector{RoiChannelSeries}
-    ch2_rois::Vector{RoiChannelSeries}
-    protocol_setpoint::Observable{Vector{Float64}}
-    command1::Observable{Vector{Float64}}
-    command2::Observable{Vector{Float64}}
-    timestamps::Observable{Vector{Float64}}
-    i::Observable{UInt32}
-    save_progress::Observable{Float64}
-    hist_time::Observable{Vector{Int64}}
-    protocol::Observable{ProtocolSettings}
-    rois::Observable{Vector{RoiCoordinates}}
-    target_frequency::Threads.Atomic{Float64}
-    imported_image_size::Tuple{Int,Int}
-end
-
-"""
-    AppRun()
-
-Fresh runtime state: empty observables, all tasks and the channel `nothing`.
-"""
-function AppRun()
-    return AppRun(
-        nothing,
-        Threads.Atomic{Bool}(false),
-        Threads.Atomic{Bool}(false),
-        nothing,
-        nothing,
-        nothing,
-        nothing,
-        nothing,
-        nothing,
-        ChannelSeries(),
-        ChannelSeries(),
-        [RoiChannelSeries()],
-        [RoiChannelSeries()],
-        Observable(Float64[]),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        Observable(Float64[]),
-        Observable{UInt32}(0),
-        Observable(NaN),
-        Observable(collect(1:DEFAULT_HISTOGRAM_RESOLUTION)),
-        Observable(ProtocolSettings()),
-        Observable(RoiCoordinates[]),
-        Threads.Atomic{Float64}(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ),
-        (1024, 1024)
-    )
 end

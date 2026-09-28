@@ -430,4 +430,100 @@ cfg_output_buffer(th, n::Integer) =
     chk(ccall((:DAQmxCfgOutputBuffer, LIB), Int32,
               (TaskHandle, UInt32), th, UInt32(n)))
 
+# ==== Ajouts : boucle en thread de travail ===========================
+
+export read_analog_into!, num_chans, cfg_input_buffer
+export create_watchdog, cfg_watchdog_do_expir_states, control_watchdog
+export Val_High, Val_Tristate, Val_ResetTimer, Val_ClearExpiration
+export CODES_ECHEANCE_MANQUEE, CODES_LECTURE_EN_RETARD
+
+const Val_High            = Int32(10192)
+const Val_Tristate        = Int32(10310)
+const Val_ResetTimer      = Int32(0)
+const Val_ClearExpiration = Int32(1)
+
+"""
+Sortie vidée : la boucle n'a pas écrit assez tôt (-200290 : génération
+arrêtée faute d'échantillons ; -200016 et -200621 : mémoire embarquée vide).
+"""
+const CODES_ECHEANCE_MANQUEE = (Int32(-200290), Int32(-200016), Int32(-200621))
+
+"""Relecture débordée : la boucle n'a pas lu assez tôt."""
+const CODES_LECTURE_EN_RETARD = (Int32(-200279), Int32(-200361))
+
+"""
+    read_analog_into!(th, tampon, premier, nsamp, nlus; timeout=1.0)
+
+Lecture bloquante de `nsamp` échantillons par voie, entrelacés (un
+échantillon de toutes les voies, puis le suivant), écrits dans `tampon` à
+partir de l'indice linéaire `premier`, sans allocation : `nlus` est un
+`Ref{Int32}` fourni par l'appelant. Depuis Julia 1.12 l'appel est
+`gc_safe` : le ramasse-miettes peut tourner pendant l'attente de la carte
+au lieu d'attendre la fin de la lecture (et de figer les autres threads).
+"""
+function read_analog_into! end
+
+@static if VERSION >= v"1.12"
+    function read_analog_into!(th, tampon::Array{Float64}, premier::Integer, nsamp::Integer,
+                               nlus::Base.RefValue{Int32}; timeout = 1.0)
+        nvaleurs = length(tampon) - premier + 1
+        code = GC.@preserve tampon nlus @ccall gc_safe=true LIB.DAQmxReadAnalogF64(
+            th::TaskHandle, Int32(nsamp)::Int32, Float64(timeout)::Float64,
+            UInt32(Val_GroupByScanNumber)::UInt32, pointer(tampon, premier)::Ptr{Float64},
+            UInt32(nvaleurs)::UInt32, nlus::Ptr{Int32}, C_NULL::Ptr{UInt32})::Int32
+        chk(code)
+        return Int(nlus[])
+    end
+else
+    function read_analog_into!(th, tampon::Array{Float64}, premier::Integer, nsamp::Integer,
+                               nlus::Base.RefValue{Int32}; timeout = 1.0)
+        nvaleurs = length(tampon) - premier + 1
+        code = GC.@preserve tampon nlus ccall((:DAQmxReadAnalogF64, LIB), Int32,
+            (TaskHandle, Int32, Float64, UInt32, Ptr{Float64}, UInt32, Ptr{Int32}, Ptr{UInt32}),
+            th, Int32(nsamp), Float64(timeout), UInt32(Val_GroupByScanNumber),
+            pointer(tampon, premier), UInt32(nvaleurs), nlus, C_NULL)
+        chk(code)
+        return Int(nlus[])
+    end
+end
+
+"""Nombre de voies d'une tâche."""
+function num_chans(th)
+    n = Ref{UInt32}(0)
+    chk(ccall((:DAQmxGetTaskNumChans, LIB), Int32, (TaskHandle, Ptr{UInt32}), th, n))
+    return Int(n[])
+end
+
+"""Taille du tampon d'entrée, en échantillons par voie."""
+cfg_input_buffer(th, n::Integer) =
+    chk(ccall((:DAQmxCfgInputBuffer, LIB), Int32,
+              (TaskHandle, UInt32), th, UInt32(n)))
+
+"""
+    create_watchdog(dev, delai) -> TaskHandle
+
+Tâche chien de garde de la carte `dev` : si elle n'est pas réarmée
+(`control_watchdog(th, Val_ResetTimer)`) pendant `delai` secondes, les
+lignes configurées par `cfg_watchdog_do_expir_states` passent à leur état
+d'expiration. Lignes numériques et PFI seulement.
+"""
+function create_watchdog(dev::AbstractString, delai::Real; nom::AbstractString = "chien_de_garde")
+    th = Ref{TaskHandle}(C_NULL)
+    chk(ccall((:DAQmxCreateWatchdogTimerTaskEx, LIB), Int32,
+              (Cstring, Cstring, Ptr{TaskHandle}, Float64),
+              dev, nom, th, Float64(delai)))
+    return th[]
+end
+
+"""États d'expiration, un par ligne de `lignes` (liste séparée par des virgules)."""
+function cfg_watchdog_do_expir_states(th, lignes::AbstractString, etats::Vector{Int32})
+    chk(ccall((:DAQmxCfgWatchdogDOExpirStates, LIB), Int32,
+              (TaskHandle, Cstring, Ptr{Int32}, UInt32),
+              th, lignes, etats, UInt32(length(etats))))
+end
+
+control_watchdog(th, action) =
+    chk(ccall((:DAQmxControlWatchdogTask, LIB), Int32,
+              (TaskHandle, Int32), th, Int32(action)))
+
 end # module

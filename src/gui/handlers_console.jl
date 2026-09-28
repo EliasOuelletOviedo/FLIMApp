@@ -1,8 +1,11 @@
 """
 handlers_console.jl
 
-Console panel (currently a placeholder). Split out of handlers.jl's former
-single make_handlers function.
+Console panel: the live measurements of plan §9 — DAQ loop iteration time
+and deadline margin, display tick interval, garbage-collector pauses,
+journal backlog and dropped entries, memory — refreshed once a second by
+the refresh tick (`diagnostics_text`, refresh.jl), plus a button that
+restarts them.
 """
 
 """
@@ -20,7 +23,21 @@ function console_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::
         app.current_panel = :console
         save_state(app)
 
-        Label(panel_grid[1, 1]; text="CONSOLE")
+        Label(panel_grid[1, 1:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Diagnostics", :fontsize => 16))...)
+        Label(panel_grid[2, 1:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(
+            :text => app_run.display.diagnostics, :fontsize => 10, :justification => :left,
+            :halign => :left, :valign => :top, :word_wrap => true, :tellwidth => false))...)
+        reset_button = Button(panel_grid[3, 1:6]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Reset measurements", :width => nothing))...)
+
+        on(reset_button.clicks) do _
+            reset_diagnostics!(app_run.display)
+            app_run.display.diagnostics[] = diagnostics_text(app_run)
+        end
+
+        app_run.display.diagnostics[] = diagnostics_text(app_run)
+        foreach(n -> colsize!(panel_grid, n, 28), 1:6)
+        colgap!(panel_grid, 8)
+        rowgap!(panel_grid, 1, 8)
     end
 
     return nothing

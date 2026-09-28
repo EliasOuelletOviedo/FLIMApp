@@ -159,7 +159,7 @@ function kalman_update!(state::KalmanState, measurement::Float64, dt::Float64, l
 end
 
 # -----------------------------------------------------------------------------
-# smoothed series helpers (used by consumer_loop / runtime.jl)
+# smoothed series helpers (used by the GUI refresh tick, gui/runtime.jl)
 # -----------------------------------------------------------------------------
 #
 # Generic over which raw/smoothed observable pair (and KalmanState) they
@@ -182,10 +182,12 @@ the hot per-frame path, so a generous margin costs nothing.
 """
 const RECOMPUTE_LOOKBACK_MARGIN = 500
 
-function recompute_smooth_series!(app, source::Observable{Vector{Float64}}, target::Observable{Vector{Float64}}, timestamps::Observable{Vector{Float64}}, kalman::KalmanState)
-    # Snapshot mutable vectors to avoid transient length races with the consumer task.
-    source_values = copy(source[])
-    timestamps_values = copy(timestamps[])
+function recompute_smooth_series!(app, source::Vector{Float64}, target::Vector{Float64}, timestamps::Vector{Float64}, kalman::KalmanState)
+    # GUI thread only (the histories are never touched elsewhere), so no
+    # snapshot is needed; `target` is updated in place because plot
+    # bindings hold it by reference.
+    source_values = source
+    timestamps_values = timestamps
 
     n_source = length(source_values)
     n_timestamps = length(timestamps_values)
@@ -214,11 +216,13 @@ function recompute_smooth_series!(app, source::Observable{Vector{Float64}}, targ
     # before reaching visible data. Only `pos` (the position estimate
     # itself) is worth carrying over, since it's a real prior estimate of
     # the underlying value regardless of which q produced it.
-    target_current = target[]
-    smoothed = length(target_current) == n_timestamps ? copy(target_current) : fill(NaN, n_timestamps)
+    if length(target) != n_timestamps
+        resize!(target, n_timestamps)
+        fill!(target, NaN)
+    end
+    smoothed = target
 
     if n_common == 0
-        target[] = smoothed
         return nothing
     end
 
@@ -247,7 +251,6 @@ function recompute_smooth_series!(app, source::Observable{Vector{Float64}}, targ
         prev_t = t
     end
 
-    target[] = smoothed
     return nothing
 end
 
@@ -260,38 +263,18 @@ must be index-aligned with `source` (same convention as `RoiChannelSeries`)
 — the elapsed time since the previous sample drives the filter's process
 noise (see `kalman_update!`).
 """
-function append_smooth_value!(app, source::Observable{Vector{Float64}}, target::Observable{Vector{Float64}}, timestamps::Observable{Vector{Float64}}, kalman::KalmanState)
-    idx = length(source[])
+function append_smooth_value!(app, source::Vector{Float64}, target::Vector{Float64}, timestamps::Vector{Float64}, kalman::KalmanState)
+    idx = length(source)
     if idx == 0
         return nothing
     end
 
     level = lifetime_smooth_level(app.layout)
-    ts = timestamps[]
-    dt = (idx > 1 && idx <= length(ts)) ? ts[idx] - ts[idx - 1] : NaN
+    dt = (idx > 1 && idx <= length(timestamps)) ? timestamps[idx] - timestamps[idx - 1] : NaN
 
-    y = kalman_update!(kalman, source[][idx], dt, level)
-    push!(target[], y)
+    y = kalman_update!(kalman, source[idx], dt, level)
+    push!(target, y)
 
     return nothing
 end
 
-"""
-    recompute_roi_smooth!(app, series::RoiChannelSeries)
-
-Recompute one ROI's smoothed photon-count, lifetime, and concentration
-series (see `recompute_smooth_series!`) and notify their observables. Uses
-`series`' own `timestamps` (each ROI has its own, since it only receives
-every Nth frame — see `RoiChannelSeries` in data_types.jl), not a shared
-app-wide one. Used when the smoothing level changes (handlers_layout.jl),
-looping every `roi_channel_series(app_run)`.
-"""
-function recompute_roi_smooth!(app, series::RoiChannelSeries)
-    recompute_smooth_series!(app, series.photons, series.photons_smooth, series.timestamps, series.photons_kalman)
-    notify(series.photons_smooth)
-    recompute_smooth_series!(app, series.lifetime, series.lifetime_smooth, series.timestamps, series.lifetime_kalman)
-    notify(series.lifetime_smooth)
-    recompute_smooth_series!(app, series.concentration, series.concentration_smooth, series.timestamps, series.concentration_kalman)
-    notify(series.concentration_smooth)
-    return nothing
-end

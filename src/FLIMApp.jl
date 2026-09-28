@@ -24,76 +24,72 @@ using ZipFile
 # =============================================================================
 # MODULE INITIALIZATION - LOAD IN DEPENDENCY ORDER
 # =============================================================================
+#
+# Files are grouped by the thread that runs them (plan.md §8): gui/ runs on
+# the main thread only, analysis/ on the analysis worker, loop/ on the DAQ
+# loop (the only code that touches the NI cards), journal.jl on the journal
+# thread. Files at the top level are pure or shared definitions; the threads
+# share data only through exchange.jl.
 
-# Configuration must come first (defines constants)
+# --- Shared definitions ------------------------------------------------------
+
+# Paths, physics/UI constants (first: defines constants)
 include("config.jl")
 
-# Data structures depend on config
+# Bench hardware/timing/safety configuration, read from config/bench.toml
+include("bench_config.jl")
+
+# Settings structs, AppState, per-file results
 include("data_types.jl")
 
-# GUI themes (colors and styling; reuses config.jl's DARK_MODE_THEME/LIGHT_MODE_THEME)
-include("gui_themes.jl")
+# The exchanges between threads (depends on data_types.jl, bench_config.jl)
+include("exchange.jl")
 
-# Typed container for the GUI elements shared across handlers and tasks
-include("gui_blocks.jl")
-
-# Shared UI path and picker helpers
-include("path_utils.jl")
-
-# Smoothing/Kalman helpers used by acquisition and runtime
+# Kalman smoothing, protocol schedule math, ROI scan geometry (pure)
 include("smoothing.jl")
-
-# NI-DAQmx bindings (ccall on nicaiu; resolved only when a function is called)
-include("io/DAQmx.jl")
-
-# Hardware output through DAQmx: galvo scan, sync lines, PI commands (depends on data_types.jl)
-include("daq.jl")
-
-# Protocol schedule math (standalone)
 include("protocol.jl")
+include("roi_geometry.jl")
 
-# Plot-axis autoscaling and plot-series lookup (needed by runtime.jl and GUI.jl)
-include("plotting.jl")
-
-# Becker & Hickl .sdt file parser (used by lifetime_analysis.jl's read_sdt_frame)
+# Becker & Hickl .sdt and ImageJ .roi/.zip parsers
 include("io/SdtFile.jl")
-
-# ImageJ .roi/.zip ROI parser (used by roi_popup.jl)
 include("io/ImageJROI.jl")
 
-# Analysis algorithms (lifetime fitting)
-include("lifetime_analysis.jl")
+# --- Journal thread ----------------------------------------------------------
 
-# Acquisition worker tasks (depends on lifetime_analysis, protocol.jl, smoothing.jl)
-include("acquisition.jl")
+include("journal.jl")
 
-# Realtime-capture session saving (depends on data_types.jl, path_utils.jl)
-include("session_save.jl")
+# --- DAQ loop thread -----------------------------------------------------------
 
-# ROI galvo-scan waveform generation (depends on data_types.jl for
-# RoiCoordinates and daq.jl; used by runtime.jl's start_pressed)
-include("roi.jl")
+# NI-DAQmx bindings (ccall on nicaiu; resolved only when a function is called)
+include("loop/DAQmx.jl")
+include("loop/scan_pattern.jl")
+include("loop/safety.jl")
+include("loop/hardware.jl")
+include("loop/daq_loop.jl")
 
-# Background task lifecycle (depends on acquisition/protocol/daq/session_save/plotting/smoothing/roi)
-include("runtime.jl")
+# --- Analysis worker -----------------------------------------------------------
 
-# Protocol popup UI module
-include("protocol_popup.jl")
+include("analysis/lifetime_analysis.jl")
+include("analysis/acquisition.jl")
 
-# ROI popup UI module
-include("roi_popup.jl")
+# --- Main thread (GUI) ---------------------------------------------------------
 
-# Per-panel event handlers (depends on gui_themes.jl, plotting.jl, runtime.jl, protocol/roi popups)
-include("handlers_layout.jl")
-include("handlers_controller.jl")
-include("handlers_protocol.jl")
-include("handlers_console.jl")
-
-# Event handler orchestrator (wires up the per-panel handlers above)
-include("handlers.jl")
-
-# GUI construction (depends on plotting.jl, gui_themes.jl, handlers.jl and runtime.jl)
-include("GUI.jl")
+include("gui/gui_themes.jl")
+include("gui/gui_blocks.jl")
+include("gui/path_utils.jl")
+include("gui/app_run.jl")
+include("gui/plotting.jl")
+include("gui/session_save.jl")
+include("gui/runtime.jl")
+include("gui/refresh.jl")
+include("gui/protocol_popup.jl")
+include("gui/roi_popup.jl")
+include("gui/handlers_layout.jl")
+include("gui/handlers_controller.jl")
+include("gui/handlers_protocol.jl")
+include("gui/handlers_console.jl")
+include("gui/handlers.jl")
+include("gui/GUI.jl")
 
 # =============================================================================
 # STATE PERSISTENCE
@@ -289,110 +285,13 @@ function init_irf_runtime!()
 end
 
 # =============================================================================
-# APPLICATION INITIALIZATION & EXECUTION
+# APPLICATION START-UP, THREADS AND SHUTDOWN
 # =============================================================================
 
-"""
-    run_app()
-
-Main application entry point.
-
-1. Initializes directories and configuration
-2. Loads or creates persistent application state
-3. Creates GUI and attaches event handlers
-4. Handles application lifecycle (blocking call)
-"""
-function run_app()
-    @info "="^60
-    @info "FLIM Application Starting"
-    @info "="^60
-
-    if Threads.nthreads() == 1
-        @warn """
-        Julia is running with only 1 thread (Threads.nthreads() == 1).
-        The acquisition worker (lifetime fitting) is spawned on its own
-        thread via Threads.@spawn to keep the GUI responsive during a fit,
-        but that only works when a second thread is actually available —
-        with one thread it falls back to sharing the GUI thread, and the
-        window may stutter/freeze while fitting.
-        Fix: start Julia with more threads, e.g.
-            julia -t auto --project=.
-        (or set the environment variable JULIA_NUM_THREADS=auto before
-        starting Julia). This flag is identical on macOS and Windows.
-        """
-    end
-
-    # Ensure required directories exist
-    initialize_directories()
-
-    # Load or create persistent state
-    app_state = load_or_create_state()
-
-    # Initialize runtime state
-    runtime_state = AppRun()
-
-    # Load IRF for lifetime analysis
-    init_irf_runtime!()
-
-    # One-time JIT warmup of the fitting code path, done here (before the
-    # GUI appears) rather than left to the user's first Start click — see
-    # warmup_lifetime_fitting!'s docstring for why this matters and why a
-    # background thread doesn't sidestep it.
-    @info "Warming up lifetime-fitting code paths (one-time JIT compilation)..."
-    t_warmup = time()
-    warmup_lifetime_fitting!()
-    @info "Warmup complete" seconds = round(time() - t_warmup, digits=1)
-
-    # Create GUI
-    @info "Creating GUI..."
-    fig, blocks = make_gui(app_state, runtime_state)
-
-    # Attach event handlers
-    @info "Initializing event handlers..."
-    make_handlers(app_state, runtime_state, blocks)
-
-    @info "="^60
-    @info "Application ready"
-    @info "="^60
-
-    # Display and run (blocking)
-    display(fig)
-
-    return fig
-end
-
-"""
-    julia_main()::Cint
-
-Entry point for the compiled standalone application (see
-build/create_app.jl). PackageCompiler-generated executables call this
-function on launch.
-
-Unlike an interactive session — where `display(fig)` returns and the REPL
-keeps the process (and the GLMakie event loop) alive — a compiled binary
-would reach the end of `main` and exit immediately, closing the window
-before the user ever sees it. So after `run_app()` returns the displayed
-figure, this blocks on the figure's screen until the user closes the
-window.
-"""
-function julia_main()::Cint
-    try
-        fig = run_app()
-
-        screen = GLMakie.Makie.getscreen(fig.scene)
-        if screen !== nothing
-            wait(screen)
-        end
-    catch e
-        @error "FLIMApp terminated with an unhandled error" exception=(e, catch_backtrace())
-        return 1
-    end
-
-    return 0
-end
+include("app.jl")
 
 # Export public API
-export AppState, AppRun, run_app, save_state, load_state
+export AppState, AppRun, run_app, save_state, load_state, load_bench_config
 
 @info "FLIM Application module loaded. Call run_app() to start."
 

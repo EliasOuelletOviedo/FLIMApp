@@ -135,7 +135,7 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         Box(panel_grid[7, 5]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
         Box(panel_grid[7, 6]; merge(SPINNER_BOX_ATTRS, Dict{Symbol, Any}(:width => 24))...)
 
-        options = ["Histogram", "Photon counts", "Lifetime", "Ion concentration", "Command"]
+        options = PLOT_OPTIONS
 
         smoothing_value = clamp(app.layout.smoothing, 0, 10)
         app.layout.smoothing = smoothing_value
@@ -166,6 +166,9 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
         Label(panel_grid[7, 5]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "1"))...)
         Label(panel_grid[7, 6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:fontsize => 16, :text => "2"))...)
 
+        # The analysis worker picks binning/smoothing changes up from the
+        # settings snapshot the refresh tick republishes (refresh.jl);
+        # the display side is redrawn and rescaled on the next tick.
         function commit_layout_value!(key::Symbol, value)
             setfield!(app.layout, key, value)
             if key == :smoothing
@@ -173,6 +176,8 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                     recompute_roi_smooth!(app, series)
                 end
             end
+            app_run.display.dirty = true
+            app_run.display.last_autoscale_ns = UInt64(0)
             save_state(app)
             return nothing
         end

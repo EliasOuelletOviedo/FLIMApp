@@ -2,12 +2,18 @@
 acquisition.jl
 
 Data acquisition worker tasks for the FLIM application: Playback, Realtime,
-and Save modes. Hardware output lives in daq.jl; protocol schedule
-math lives in protocol.jl.
+and Save modes. Runs on its own thread (`Threads.@spawn` at START, see
+`spawn_acquisition_worker!` in gui/runtime.jl) and never touches the GUI:
+each analyzed file goes out through `emit_frame!` into the exchanges
+(exchange.jl) — the display ring read by the GUI refresh tick, the PI
+command atomics read by the DAQ loop, and the journal. Settings (binning,
+smoothing, controller gains, protocol) are read from the atomic snapshot
+the GUI publishes, never from `AppState` directly. Protocol schedule math
+lives in protocol.jl.
 
 The three modes share ~90% of their logic (sliding-window histogram binning,
 lifetime fitting with optional partial-fit optimization, PID command
-computation, channel emission) via `run_acquisition_loop!`. They differ only
+computation, emission) via `run_acquisition_loop!`. They differ only
 in how the next file to process is chosen and what happens after a result is
 emitted:
 - Playback: round-robins a fixed, sorted file list on a fixed-frequency schedule.
@@ -16,6 +22,7 @@ emitted:
 """
 
 using Base.Threads
+using DataFrames
 using Statistics: median
 
 # =============================================================================
@@ -271,6 +278,148 @@ function next_roi_slot!(tracker::RoiSlotTracker, file_time_s::Float64, sequence_
     return (tracker.slot, step - 1, ambiguous)
 end
 
+# =============================================================================
+# OUTPUT: ROI assignment and emission into the exchanges
+# =============================================================================
+
+"""
+    AnalysisOutput(exchange; roi_order=Int[], realtime=false, nominal_period_s=NaN)
+
+Where the analysis worker sends each analyzed file, plus the state that
+turns a stream of files into ROI assignments. `roi_order` is the ROI
+visiting order of this run (`roi_visit_order`, roi_geometry.jl) — the
+k-th file of each scan cycle belongs to `rois[roi_order[k]]` — or empty
+when results aren't split per ROI. In Real-time mode (`realtime`) the
+assignment is corrected against the delay between files
+(`RoiSlotTracker`, seeded with `nominal_period_s`), and every result is
+also kept as a row of `realtime_rows` for the end-of-run save.
+"""
+mutable struct AnalysisOutput
+    exchange::Exchange
+    roi_order::Vector{Int}
+    realtime::Bool
+    roi_slot_tracker::RoiSlotTracker
+    warned_missing_sequence::Bool
+    warned_ambiguous_gap::Bool
+    realtime_rows::DataFrame
+end
+
+function AnalysisOutput(exchange::Exchange; roi_order::Vector{Int} = Int[], realtime::Bool = false, nominal_period_s::Real = NaN)
+    rows = DataFrame(
+        frame_idx=UInt32[],
+        source_file=String[],
+        roi_index=Int[],
+        timestamp=Float64[],
+        photons_ch1=Float64[],
+        command1=Float64[],
+        command2=Float64[],
+        lifetime_ch1=Float64[],
+        concentration_ch1=Float64[],
+        protocol_setpoint=Float64[],
+        histogram_ch1=Vector{Float64}[],
+        fit_ch1=Vector{Float64}[],
+        photons_ch2=Float64[],
+        lifetime_ch2=Float64[],
+        concentration_ch2=Float64[],
+        histogram_ch2=Vector{Float64}[],
+        fit_ch2=Vector{Float64}[]
+    )
+    return AnalysisOutput(exchange, copy(roi_order), realtime, RoiSlotTracker(nominal_period_s), false, false, rows)
+end
+
+"""
+    assign_roi!(out, sample)::Int
+
+Drawn index of the ROI `sample` belongs to (1 when results aren't split).
+
+Round-robin over the visiting order: file 1 -> first ROI visited, file 2 ->
+second, ..., file N+1 -> first again. Keyed on the file's OWN embedded
+sequence number (`file_sequence_number`, parsed from its filename), not this
+app's read-count (`frame_index`) — see `AcquisitionSample`'s docstring
+(data_types.jl): a file that never reaches this app is invisible to
+`frame_index`, which would then silently misassign every later file to the
+wrong ROI for the rest of the run. Keying on the filename's own number
+instead just leaves that one ROI's turn empty for that cycle. Falls back to
+`frame_index` (with a one-time warning) only if the filename has no
+parseable trailing number at all.
+
+In Real-time mode that number is then corrected against the measured delay
+between files (`next_roi_slot!`), which is the only thing that can see a
+scan the source never wrote a file for — that hole consumes no sequence
+number, so the numbering alone reports business as usual right through it.
+Playback paces files on its own synthetic schedule and Save runs them as
+fast as it can, so in neither mode does the delay between reads carry any
+information about the acquisition's cadence.
+"""
+function assign_roi!(out::AnalysisOutput, sample::AcquisitionSample)::Int
+    n_rois = length(out.roi_order)
+    n_rois <= 1 && return isempty(out.roi_order) ? 1 : out.roi_order[1]
+
+    sequence_number = sample.file_sequence_number
+    if sequence_number === nothing
+        if !out.warned_missing_sequence
+            @warn "File name has no parseable sequence number; falling back to read-count for ROI assignment (this can drift out of sync after a skipped file)" source_file=sample.source_file
+            out.warned_missing_sequence = true
+        end
+        sequence_number = Int(sample.frame_index)
+    end
+
+    if out.realtime
+        tracker = out.roi_slot_tracker
+        slot, skipped, ambiguous = next_roi_slot!(tracker, sample.file_time, sequence_number)
+
+        if skipped > 0
+            @warn "Gap between acquisition files spans more than one ROI scan; assuming the source wrote no file for it and advancing ROI assignment to stay aligned" source_file=sample.source_file skipped_scans=skipped file_period_s=round(tracker.period_est_s, digits=3) roi_index=out.roi_order[mod1(slot, n_rois)]
+        elseif ambiguous && !out.warned_ambiguous_gap
+            @warn "Delay between acquisition files doesn't line up with the expected scan period; ROI assignment may drift — check Scan time / Shift time against the actual acquisition" source_file=sample.source_file expected_period_s=round(tracker.period_est_s, digits=3)
+            out.warned_ambiguous_gap = true
+        end
+
+        sequence_number = slot
+    end
+
+    return out.roi_order[mod1(sequence_number, n_rois)]
+end
+
+"""
+    emit_frame!(out, sample)::Bool
+
+Publish one analyzed file: to the display ring (GUI), the PI command
+atomics (DAQ loop), the journal, and — in Real-time mode — the rows kept
+for the end-of-run save. Never blocks. Returns `true` (keep going).
+"""
+function emit_frame!(out::AnalysisOutput, sample::AcquisitionSample)::Bool
+    roi_index = assign_roi!(out, sample)
+    record = FrameRecord(sample, roi_index)
+    publish!(out.exchange.frames, record)
+    set_command_values!(out.exchange, sample.command1, sample.command2)
+    send_journal!(out.exchange.journal, JournalFrame(record))
+
+    if out.realtime
+        push!(out.realtime_rows, (
+            frame_idx=sample.frame_index,
+            source_file=String(sample.source_file),
+            roi_index=roi_index,
+            timestamp=Float64(sample.timestamps),
+            photons_ch1=Float64(sample.ch1.photons),
+            command1=Float64(sample.command1),
+            command2=Float64(sample.command2),
+            lifetime_ch1=Float64(sample.ch1.lifetime),
+            concentration_ch1=Float64(sample.ch1.concentration),
+            protocol_setpoint=Float64(sample.protocol_setpoint),
+            histogram_ch1=copy(sample.ch1.histogram),
+            fit_ch1=copy(sample.ch1.fit),
+            photons_ch2=Float64(sample.ch2.photons),
+            lifetime_ch2=Float64(sample.ch2.lifetime),
+            concentration_ch2=Float64(sample.ch2.concentration),
+            histogram_ch2=copy(sample.ch2.histogram),
+            fit_ch2=copy(sample.ch2.fit)
+        ))
+    end
+
+    return true
+end
+
 """
     ChannelFitState
 
@@ -449,34 +598,32 @@ function process_frame!(
 end
 
 """
-    run_acquisition_loop!(ch, running, layout, controller, next_file!, emit!;
-                           initial_guess, protocol, use_partial_fit)
+    run_acquisition_loop!(out, running, next_file!, emit!; initial_guess, use_partial_fit)
 
 Shared body for all three acquisition modes. Repeatedly calls `next_file!(n)`
 (with `n` the current, pre-increment frame counter) to obtain the next
 `.sdt` filepath to process — or `nothing` to stop the loop, which each mode
 uses to encode its own pacing/waiting/termination policy. For each file it
-runs `process_frame!` for channel 1 and, if the file has a second
+reads the current settings snapshot (`current_settings`, exchange.jl — so a
+mid-run edit of binning, smoothing, gains or protocol applies from the next
+file on), runs `process_frame!` for channel 1 and, if the file has a second
 TCSPC channel, independently for channel 2 too — decided once from the
 first file of the run (`has_channel2`) and held fixed for the rest of the
 acquisition, not re-checked per file. Then calls `emit!(sample, n)` — which
-each mode uses to `put!` onto `ch` plus its own post-emit policy (extra
+each mode uses for `emit_frame!` plus its own post-emit policy (extra
 pacing, progress reporting) — returning `false` to stop the loop.
 
 Must be called from within the caller's own `try/catch/finally` so that
-IRF/path validation failures and cleanup (closing `ch`, clearing `running[]`)
-are handled by the specific mode wrapper (see `start_playback`/
+IRF/path validation failures and cleanup (clearing `running[]` and the PI
+commands) are handled by the specific mode wrapper (see `start_playback`/
 `start_realtime`/`start_save` below).
 """
 function run_acquisition_loop!(
-        ch::Channel{AcquisitionSample},
+        out::AnalysisOutput,
         running::Threads.Atomic{Bool},
-        layout::LayoutSettings,
-        controller::ControllerSettings,
         next_file!::Function,
         emit!::Function;
         initial_guess::Vector{Float64},
-        protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable},
         use_partial_fit::Bool
     )
     timestamps = 0.0
@@ -519,8 +666,11 @@ function run_acquisition_loop!(
 
         timestamps += frame_time
 
-        current_protocol = resolve_protocol_config(protocol)
-        protocol_active = current_protocol !== nothing && current_protocol.active
+        settings = current_settings(out.exchange)
+        layout = settings.layout
+        controller = settings.controller
+        current_protocol = settings.protocol
+        protocol_active = current_protocol.active
         setpoint_ns = protocol_active ? protocol_setpoint_at(current_protocol, timestamps) : fallback_setpoint_ns
 
         # Distinct from setpoint_ns: PID control keeps regulating toward the
@@ -558,7 +708,7 @@ function run_acquisition_loop!(
         # checks above.
         n += UInt32(1)
 
-        if !(isopen(ch) && running[])
+        if !running[]
             break
         end
 
@@ -580,7 +730,7 @@ end
 # =============================================================================
 
 """
-    start_playback(ch, running, layout, controller; kwargs...)
+    start_playback(out, running; kwargs...)
 
 Worker task for Playback mode: round-robins over all `.sdt` files in
 `get_data_root_path()` on a fixed-frequency schedule (`target_frequency`).
@@ -588,15 +738,12 @@ Worker task for Playback mode: round-robins over all `.sdt` files in
 `app_run.target_frequency`), re-read every cycle rather than captured once,
 so editing the target-frequency textbox (GUI.jl/handlers.jl) re-paces the
 schedule immediately, mid-run. See `run_acquisition_loop!` for the shared
-fitting/binning/PID body.
+fitting/binning/PID body. Returns `out`.
 """
 function start_playback(
-        ch::Channel{AcquisitionSample},
-        running::Threads.Atomic{Bool},
-        layout::LayoutSettings,
-        controller::ControllerSettings;
+        out::AnalysisOutput,
+        running::Threads.Atomic{Bool};
         initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
-        protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable} = nothing,
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         dt::Float64 = 0.0001,
         use_partial_fit::Bool = true,
@@ -660,32 +807,20 @@ function start_playback(
             return nothing
         end
 
-        emit! = function (sample, n)
-            try
-                put!(ch, sample)
-            catch e
-                isa(e, InvalidStateException) && return false
-                rethrow()
-            end
-            return true
-        end
+        emit! = (sample, n) -> emit_frame!(out, sample)
 
-        run_acquisition_loop!(ch, running, layout, controller, next_file!, emit!;
-                               initial_guess=initial_guess, protocol=protocol, use_partial_fit=use_partial_fit)
+        run_acquisition_loop!(out, running, next_file!, emit!;
+                               initial_guess=initial_guess, use_partial_fit=use_partial_fit)
     catch e
         @error "Playback worker error" exception=e
         rethrow()
     finally
         running[] = false
-        try
-            close(ch)
-        catch
-            # Ignore if already closed
-        end
+        set_command_values!(out.exchange, NaN, NaN)
         @info "Playback worker finished"
     end
 
-    return nothing
+    return out
 end
 
 # =============================================================================
@@ -693,20 +828,18 @@ end
 # =============================================================================
 
 """
-    start_realtime(ch, running, layout, controller; kwargs...)
+    start_realtime(out, running; kwargs...)
 
 Worker task for Real-time mode: always processes the newest available
 `.sdt` file in `get_data_root_path()`, waiting (polling every
 `poll_interval_s`) if no new file has appeared yet. See
-`run_acquisition_loop!` for the shared fitting/binning/PID body.
+`run_acquisition_loop!` for the shared fitting/binning/PID body. Returns
+`out`, whose `realtime_rows` feed the end-of-run save.
 """
 function start_realtime(
-        ch::Channel{AcquisitionSample},
-        running::Threads.Atomic{Bool},
-        layout::LayoutSettings,
-        controller::ControllerSettings;
+        out::AnalysisOutput,
+        running::Threads.Atomic{Bool};
         initial_guess::Vector{Float64} = [3.0, 0.5, 0.5, 0.0, 5.0e-5],
-        protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable} = nothing,
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         dt::Float64 = 0.0001,
         poll_interval_s::Float64 = 0.1
@@ -795,32 +928,23 @@ function start_realtime(
         end
 
         emit! = function (sample, n)
-            try
-                put!(ch, sample)
-            catch e
-                isa(e, InvalidStateException) && return false
-                rethrow()
-            end
+            emit_frame!(out, sample)
             sleep(dt)
             return true
         end
 
-        run_acquisition_loop!(ch, running, layout, controller, next_file!, emit!;
-                               initial_guess=initial_guess, protocol=protocol, use_partial_fit=false)
+        run_acquisition_loop!(out, running, next_file!, emit!;
+                               initial_guess=initial_guess, use_partial_fit=false)
     catch e
         @error "Real-time worker error" exception=e
         rethrow()
     finally
         running[] = false
-        try
-            close(ch)
-        catch
-            # Ignore if already closed
-        end
+        set_command_values!(out.exchange, NaN, NaN)
         @info "Real-time worker finished"
     end
 
-    return nothing
+    return out
 end
 
 # =============================================================================
@@ -828,24 +952,21 @@ end
 # =============================================================================
 
 """
-    start_save(ch, running, layout, controller; kwargs...)
+    start_save(out, running; kwargs...)
 
 Worker task for Save mode: processes all `.sdt` files in
-`get_data_root_path()` once, reporting progress via `progress_cb(pct)`, then
-stops naturally once every file has been processed. See
-`run_acquisition_loop!` for the shared fitting/binning/PID body.
+`get_data_root_path()` once, reporting progress (percent) through
+`out.exchange.save_progress`, then stops naturally once every file has been
+processed. See `run_acquisition_loop!` for the shared fitting/binning/PID
+body. Returns `out`.
 """
 function start_save(
-        ch::Channel{AcquisitionSample},
-        running::Threads.Atomic{Bool},
-        layout::LayoutSettings,
-        controller::ControllerSettings;
+        out::AnalysisOutput,
+        running::Threads.Atomic{Bool};
         initial_guess::Vector{Float64} = [3.0, 0.0, 5.0e-5],
-        protocol::Union{Nothing, ProtocolSettings, Observables.AbstractObservable} = nothing,
         paused::Union{Nothing, Threads.Atomic{Bool}} = nothing,
         dt::Float64 = 0.0000001,
-        use_partial_fit::Bool = true,
-        progress_cb::Union{Nothing, Function} = nothing
+        use_partial_fit::Bool = true
     )
     try
         @info "Save worker started on thread $(threadid())"
@@ -872,17 +993,7 @@ function start_save(
             return nothing
         end
 
-        last_progress_pct = Ref(-1)
-
-        if progress_cb !== nothing
-            try
-                progress_cb(0)
-                last_progress_pct[] = 0
-            catch e
-                @warn "Save progress callback failed" error=string(e)
-                progress_cb = nothing
-            end
-        end
+        out.exchange.save_progress[] = 0.0
 
         file_idx = Ref(0)
 
@@ -908,28 +1019,9 @@ function start_save(
         end
 
         emit! = function (sample, n)
-            try
-                put!(ch, sample)
-            catch e
-                isa(e, InvalidStateException) && return false
-                rethrow()
-            end
-
-            if progress_cb !== nothing
-                progress_pct = clamp(floor(Int, (Int(n) * 100) / nb_files), 0, 100)
-                if progress_pct > last_progress_pct[]
-                    for pct in (last_progress_pct[] + 1):progress_pct
-                        try
-                            progress_cb(pct)
-                        catch e
-                            @warn "Save progress callback failed" error=string(e)
-                            progress_cb = nothing
-                            break
-                        end
-                    end
-                    last_progress_pct[] = progress_pct
-                end
-            end
+            emit_frame!(out, sample)
+            # Read by the GUI refresh tick, which owns the progress bar.
+            out.exchange.save_progress[] = clamp(floor(Int, (Int(n) * 100) / nb_files), 0, 100)
 
             if dt > 0.0
                 sleep(dt)
@@ -938,20 +1030,16 @@ function start_save(
             return true
         end
 
-        run_acquisition_loop!(ch, running, layout, controller, next_file!, emit!;
-                               initial_guess=initial_guess, protocol=protocol, use_partial_fit=use_partial_fit)
+        run_acquisition_loop!(out, running, next_file!, emit!;
+                               initial_guess=initial_guess, use_partial_fit=use_partial_fit)
     catch e
         @error "Save worker error" exception=e
         rethrow()
     finally
         running[] = false
-        try
-            close(ch)
-        catch
-            # Ignore if already closed
-        end
+        set_command_values!(out.exchange, NaN, NaN)
         @info "Save worker finished"
     end
 
-    return nothing
+    return out
 end

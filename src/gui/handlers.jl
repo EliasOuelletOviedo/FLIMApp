@@ -7,9 +7,11 @@ Wires up:
 - Panel switching (delegates to handlers_layout.jl / handlers_controller.jl /
   handlers_protocol.jl / handlers_console.jl for each panel's own controls)
 - START/PAUSE/RESUME/STOP button actions
-- IRF/data-folder path selection and DAQ connect/disconnect
+- IRF/data-folder path selection and DAQ connect/disconnect/acknowledge
 
-Uses Observables for reactive updates and on(...) bindings for event attachment.
+Handlers never do the work themselves (plan §2): the DAQ buttons only drop
+a command for the DAQ loop thread, START spawns the analysis worker; their
+effects come back through the refresh tick (refresh.jl).
 """
 
 """
@@ -22,18 +24,6 @@ frequency/file readout once an acquisition is actually running.
 """
 function show_status!(blocks, message::AbstractString)
     blocks.info_label.text[] = String(message)
-    return nothing
-end
-
-"""
-    show_daq_session!(blocks, daq)
-
-Reflect the DAQ session (or its absence, `nothing`) on the CONNECT button
-and the DAQ status label.
-"""
-function show_daq_session!(blocks, daq)
-    blocks.connect_button.label[] = daq === nothing ? "CONNECT" : "DISCONNECT"
-    blocks.daq_label.text[] = daq_status_text(daq)
     return nothing
 end
 
@@ -60,32 +50,15 @@ end
 function clear_runtime_plots!(app, app_run, blocks)
     n_hist = length(app_run.hist_time[])
 
+    # Replaces app_run.ch1_rois/ch2_rois wholesale (the ROI count or the
+    # ROI toggle may have changed since the last run) and empties the
+    # global histories — render_plot! below rebinds the curves to match.
+    reset_acquisition_state!(app, app_run)
+
     for series in channel_series(app_run)
-        reset_channel_series!(series)
         series.histogram[] = fill(NaN, n_hist)
         series.fit[] = fill(NaN, n_hist)
     end
-
-    # Replaces app_run.ch1_rois/ch2_rois wholesale (e.g. the ROI count or the
-    # ROI toggle may have changed since the last run) — render_plot!
-    # below rebuilds the axes to match, same as after
-    # rebuild_roi_series! in start_pressed (runtime.jl).
-    rebuild_roi_series!(app, app_run)
-
-    empty!(app_run.protocol_setpoint[])
-    empty!(app_run.command1[])
-    empty!(app_run.command2[])
-    empty!(app_run.timestamps[])
-    app_run.i[] = 0
-    app_run.save_progress[] = NaN
-
-    foreach(notify_channel_series!, channel_series(app_run))
-    foreach(notify_roi_series!, roi_channel_series(app_run))
-    notify(app_run.protocol_setpoint)
-    notify(app_run.command1)
-    notify(app_run.command2)
-    notify(app_run.timestamps)
-    notify(app_run.i)
 
     render_plot!(app, app_run, blocks, :plot1)
     render_plot!(app, app_run, blocks, :plot2)
@@ -187,21 +160,19 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
         end
     end
 
+    # CONNECT / RESET / DISCONNECT, depending on the DAQ loop's state
+    # (connect_button_label, refresh.jl). Disconnecting mid-scan raises the
+    # stop flag first, so the outputs go to zero within one readback block.
     on(blocks.connect_button.clicks) do _
-        if app_run.daq !== nothing
-            daq = app_run.daq
-            app_run.daq = nothing
-            disconnect_daq!(daq)
-            show_daq_session!(blocks, nothing)
-            return
-        end
-
-        daq = connect_daq()
-        app_run.daq = daq
-        show_daq_session!(blocks, daq)
-
-        if daq === nothing
-            show_status!(blocks, "Could not connect to the DAQ (see console)")
+        ex = app_run.exchange
+        state = loop_status(ex).state
+        if state == LOOP_DISCONNECTED
+            send_command!(ex, ConnectCommand())
+        elseif state == LOOP_FAULT
+            send_command!(ex, AcknowledgeCommand())
+        else
+            request_stop!(ex)
+            send_command!(ex, DisconnectCommand())
         end
     end
 

@@ -676,7 +676,7 @@ time — see its docstring for why *locating* an external file via `@__DIR__`
 at runtime is unsafe in a PackageCompiler app, even though *reading* one at
 compile time, as done here, is not.
 """
-const CELLPOSE_SEGMENT_SCRIPT = read(normpath(joinpath(@__DIR__, "..", "scripts", "cellpose_segment.py")), String)
+const CELLPOSE_SEGMENT_SCRIPT = read(normpath(joinpath(@__DIR__, "..", "..", "scripts", "cellpose_segment.py")), String)
 
 """
     cellpose_script_path(; dir=user_data_dir())::String
@@ -954,10 +954,32 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     the colormap, so `nan_color`-excluded pixels aside, what's displayed is
     the actual capped data) before drawing.
     """
+    lifetime_overlay_request = Ref(0)
+
     function update_lifetime_overlay!()
         volume = pixel_volume[]
         volume === nothing && return nothing
+        threshold = min_photons[]
+        lifetime_overlay_request[] += 1
+        request = lifetime_overlay_request[]
 
+        # The per-pixel fit is heavy: computed on a worker thread, drawn
+        # back here on the GUI thread (this @async task stays on it).
+        @async begin
+            lifetime_map = try
+                fetch(Threads.@spawn pixel_lifetime_map(volume; min_photons=threshold))
+            catch e
+                @warn "Failed to compute pixel lifetime map" error=string(e)
+                return nothing
+            end
+            # A newer import or threshold edit has superseded this request.
+            request == lifetime_overlay_request[] || return nothing
+            draw_lifetime_overlay!(lifetime_map, threshold)
+        end
+        return nothing
+    end
+
+    function draw_lifetime_overlay!(lifetime_map, threshold)
         if lifetime_map_plot[] !== nothing
             delete!(image_axis, lifetime_map_plot[])
             lifetime_map_plot[] = nothing
@@ -967,16 +989,9 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             lifetime_colorbar[] = nothing
         end
 
-        lifetime_map = try
-            pixel_lifetime_map(volume; min_photons=min_photons[])
-        catch e
-            @warn "Failed to compute pixel lifetime map" error=string(e)
-            return nothing
-        end
-
         finite_values = filter(isfinite, vec(lifetime_map))
         if isempty(finite_values)
-            @warn "No pixel has enough photons for a lifetime map" min_photons=min_photons[]
+            @warn "No pixel has enough photons for a lifetime map" min_photons=threshold
             return nothing
         end
 
@@ -1123,41 +1138,49 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         # that matters for a large image (e.g. a real 2048x2048x256 file
         # needs on the order of 10GB through the old path just to load,
         # before any padding this lab's setup can store around the true
-        # content is even trimmed off).
-        intensity, volume = extract_sdt_image_streamed(filepath)
-        if intensity === nothing
-            @info "SDT file is a histogram, not an image; nothing to display" path=filepath
-            return
+        # content is even trimmed off). Still seconds of work: read on a
+        # worker thread, displayed back here on the GUI thread.
+        @async begin
+            intensity, volume = try
+                fetch(Threads.@spawn extract_sdt_image_streamed(filepath))
+            catch e
+                @error "Image import failed" path=filepath error=string(e)
+                return nothing
+            end
+            if intensity === nothing
+                @info "SDT file is a histogram, not an image; nothing to display" path=filepath
+                return
+            end
+            pixel_volume[] = volume
+            intensity_image[] = intensity
+
+            n_cols, n_rows = size(intensity)
+            canvas_size = max(n_cols, n_rows)
+            x_offset = (canvas_size - n_cols) ÷ 2
+            y_offset = (canvas_size - n_rows) ÷ 2
+            image_offset[] = (x_offset, y_offset)
+            # Recorded so the galvo voltage mapping (roi_geometry.jl) can apply this
+            # same centering to app_run.rois's coordinates (in this image's own,
+            # un-padded pixel space) at Start-button time, long after this popup
+            # and its local x_offset/y_offset above have gone away.
+            app_run.imported_image_size = (n_cols, n_rows)
+
+            # Grayscale base image: always drawn, never hidden by the lifetime
+            # toggle below — the lifetime map (if any) is a separate heatmap
+            # layered on top of it.
+            if image_plot[] !== nothing
+                delete!(image_axis, image_plot[])
+            end
+            image_plot[] = heatmap!(image_axis, x_offset:(x_offset + n_cols - 1), y_offset:(y_offset + n_rows - 1), intensity, colormap = :grays)
+            update_lifetime_overlay!()
+            # Set the limits attribute directly rather than calling limits!/ylims!:
+            # those helpers reset ax.yreversed[] to false whenever the y-limits are
+            # passed low-to-high (their own convention for "not reversed"), which
+            # would silently undo the yreversed=true set at axis construction.
+            image_axis.limits[] = (0, canvas_size, 0, canvas_size)
+
+            @info "Image imported" path=filepath size=size(intensity) canvas_size=canvas_size offset=(x_offset, y_offset)
         end
-        pixel_volume[] = volume
-        intensity_image[] = intensity
-
-        n_cols, n_rows = size(intensity)
-        canvas_size = max(n_cols, n_rows)
-        x_offset = (canvas_size - n_cols) ÷ 2
-        y_offset = (canvas_size - n_rows) ÷ 2
-        image_offset[] = (x_offset, y_offset)
-        # Recorded so roi.jl's galvo voltage mapping can apply this
-        # same centering to app_run.rois's coordinates (in this image's own,
-        # un-padded pixel space) at Start-button time, long after this popup
-        # and its local x_offset/y_offset above have gone away.
-        app_run.imported_image_size = (n_cols, n_rows)
-
-        # Grayscale base image: always drawn, never hidden by the lifetime
-        # toggle below — the lifetime map (if any) is a separate heatmap
-        # layered on top of it.
-        if image_plot[] !== nothing
-            delete!(image_axis, image_plot[])
-        end
-        image_plot[] = heatmap!(image_axis, x_offset:(x_offset + n_cols - 1), y_offset:(y_offset + n_rows - 1), intensity, colormap = :grays)
-        update_lifetime_overlay!()
-        # Set the limits attribute directly rather than calling limits!/ylims!:
-        # those helpers reset ax.yreversed[] to false whenever the y-limits are
-        # passed low-to-high (their own convention for "not reversed"), which
-        # would silently undo the yreversed=true set at axis construction.
-        image_axis.limits[] = (0, canvas_size, 0, canvas_size)
-
-        @info "Image imported" path=filepath size=size(intensity) canvas_size=canvas_size offset=(x_offset, y_offset)
     end
 
     # Cheap show/hide: no recompute, since update_lifetime_overlay! already
@@ -1193,9 +1216,9 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     end
 
     # Galvo voltage range textboxes: commit straight to app.roi (RoiSettings,
-    # data_types.jl) and persist, so roi_scan_segments (roi.jl) picks up the
-    # edited range next time it reads app.roi, and the range survives across
-    # sessions like every other persisted setting.
+    # data_types.jl) and persist, so the next START's scan (roi_geometry.jl)
+    # uses the edited range, and the range survives across sessions like
+    # every other persisted setting.
     for (textbox, field) in ((x_min_textbox, :v_min_x), (x_max_textbox, :v_max_x), (y_min_textbox, :v_min_y), (y_max_textbox, :v_max_y))
         on(textbox.stored_string) do new_str
             val = tryparse(Int64, new_str)

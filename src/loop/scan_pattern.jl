@@ -1,431 +1,181 @@
 """
-roi.jl
+loop/scan_pattern.jl
 
-ROI galvo-scan generation. When ROI mode is active (`app.roi.active`) and
-the DAQ is connected (`app_run.daq`), `start_roi_scan!` builds one cycle of
-galvo waveform and port-0 sync pattern for the currently-drawn ROIs
-(`app_run.rois`) and hands it to the card, which loops it until STOP —
-called once from `start_pressed` (runtime.jl), before the acquisition
-worker is dispatched, so the scan is already running when files start
-arriving.
+The slots the DAQ loop plays (DAQ loop thread only). Built once at START
+from a `ScanRequest`, then copied into preallocated slot buffers — commands
+filled in — before each write, so steady-state iterations don't allocate.
 
-Scan-timing parameters (points per ROI, spiral turns, scan/shift time)
-live on `app.protocol` (`ProtocolSettings`, data_types.jl) — GUI-editable
-and persisted, via the Protocol panel (handlers_protocol.jl). The galvo
-voltage range (`v_min_x`/`v_max_x`/`v_min_y`/`v_max_y`) lives on `app.roi`
-(`RoiSettings`, data_types.jl) the same way, editable from the ROI popup
-(roi_popup.jl). The DAQ wiring and sample rate are in daq.jl; the remaining
-tunable below stays a plain (non-persisted) module variable, hand-edited
-directly in this file.
+One slot per ROI visit; slot `s` visits position `k = s mod R + 1` of the
+visiting order, visit `v = s ÷ R`:
+
+- scan (`scan_time`): the ROI's spiral, gate high, command outputs at the
+  latest PI command, sync pulses on its first samples;
+- shift (`shift_time`): half-cosine move toward the next ROI's center,
+  gate low, command outputs at 0 V.
+
+Every slot thus ends with the lasers off and the gate low. Regeneration is
+forbidden (loop/hardware.jl), so a loop that stops writing leaves the card
+stopped on that state. Before slot 0, the entry moves the galvos from 0 V
+onto the first ROI (`shift_time`, everything off).
+
+Without ROI scanning (ROI mode off, or no ROI drawn) there is one slot per
+cycle, galvos at 0 V and port 0 low: only the command outputs play.
 """
 
-using Statistics
+# Port-0 lines: bit b of each sample drives line P0.b. Bits 0, 2, 3 and 4–7
+# match the NI-PCIe-6321 branch (sequence.jl).
+const DO_BIT_GATE     = 0   # high during each ROI's scan
+const DO_BIT_ENABLE   = 1   # high while slots play (the watchdog drops it if the loop dies)
+const DO_BIT_SEQUENCE = 2   # pulse at the start of the first ROI's scan, every cycle
+const DO_BIT_ROI      = 3   # pulse at the start of every ROI's scan
+const DO_ROI_CODE_SHIFT = 4 # bits 4–7: drawn index − 1 of the ROI being visited (mod 16)
 
-# =============================================================================
-# TUNABLE PARAMETERS
-# =============================================================================
-# Plain variables, not `const` — meant to be hand-edited in this file
-# (not promoted to config.jl) as the galvo setup is tuned.
+do_bit(b) = UInt8(1) << b
 
-# Reference image size (pixels, square) the galvo voltage range (app.roi)
-# was calibrated against: a 1024x1024 image maps its full pixel extent onto
-# the full voltage range. Real acquisitions are always 1024 wide but can be
-# shorter than 1024 tall (e.g. a 1024x512 scan) — rather than rescale a
-# shorter image to fill the full voltage range (which would use a
-# *different* voltage-per-pixel scale than this calibration),
-# roi_scan_segments shifts a shorter image's ROI coordinates so they sit
-# centered within this same 1024x1024 reference frame before converting to
-# voltage, using the actual imported image size (app_run.imported_image_size,
-# recorded at import time by roi_popup.jl) to compute that shift — matching
-# roi_popup.jl's own canvas-centering (image_offset) for the on-screen
-# display of that same image.
-roi_voltage_calibration_size = 1024
+"""
+    ScanPattern
 
-# =============================================================================
-# GEOMETRY: uniform-density spiral scan pattern conforming to a ROI's shape
-# =============================================================================
+Everything needed to produce any slot: per visiting position `k`, the
+galvo path (volts) and port-0 bytes of one slot, plus the entry move.
+`roi_order[k]` is the drawn index of the ROI at position `k` (0 when the
+galvos don't scan).
+"""
+struct ScanPattern
+    sample_rate_hz::Float64
+    scanning::Bool
+    roi_order::Vector{Int}
+    scan_samples::Int
+    shift_samples::Int
+    slot_samples::Int
+    entry_x::Vector{Float64}
+    entry_y::Vector{Float64}
+    x::Matrix{Float64}
+    y::Matrix{Float64}
+    lines::Matrix{UInt8}
+end
 
-# Distance from (cx, cy) to the intersection between the ray at angle θ and
-# the polygon contour (xs, ys). Returns 0.0 if no intersection is found.
-function polygon_ray_distance(θ::Real, xs::AbstractVector{<:Real}, ys::AbstractVector{<:Real},
-                                          cx::Real, cy::Real)
-    dx, dy = cos(θ), sin(θ)
-    n = length(xs)
-    best = Inf
+slots_per_cycle(p::ScanPattern) = size(p.x, 2)
+slot_position(p::ScanPattern, s::Integer) = mod(s, slots_per_cycle(p)) + 1
+slot_roi(p::ScanPattern, s::Integer) = p.roi_order[slot_position(p, s)]
+slot_visit(p::ScanPattern, s::Integer) = s ÷ slots_per_cycle(p)
+entry_samples(p::ScanPattern) = length(p.entry_x)
+slot_duration_s(p::ScanPattern) = p.slot_samples / p.sample_rate_hz
 
+"""Half-cosine move from `a` to `b` filling `out`: zero speed at both ends (sequence.jl's `deplacement`)."""
+function half_cosine_move!(out::AbstractVector{Float64}, a::Real, b::Real)
+    n = length(out)
     for i in 1:n
-        j = i == n ? 1 : i + 1
-        ax, ay = xs[i] - cx, ys[i] - cy
-        ex, ey = xs[j] - xs[i], ys[j] - ys[i]
-
-        det = ex * dy - ey * dx
-        abs(det) < 1e-12 && continue
-
-        t = (ex * ay - ey * ax) / det
-        s = (dx * ay - dy * ax) / det
-
-        if t > 1e-9 && 0.0 <= s <= 1.0 && t < best
-            best = t
-        end
+        s = n == 1 ? 1.0 : (1 - cos(π * (i - 1) / (n - 1))) / 2
+        out[i] = a + (b - a) * s
     end
-
-    return isfinite(best) ? best : 0.0
-end
-
-# Variant of a disk spiral that hugs the ROI's own shape (xs, ys): the
-# radial density still follows compensated_radial_cdf (computed for a mean
-# radius R), but each point is then rescaled to the contour's actual
-# distance in direction θ.
-function shape_spiral_points(N::Int, xs::AbstractVector{<:Real}, ys::AbstractVector{<:Real};
-                                         center::Tuple{Real,Real} = (0.0, 0.0),
-                                         turns::Int = 4)
-
-    x0, y0 = float(center[1]), float(center[2])
-
-    R = mean(hypot(xs[k] - x0, ys[k] - y0) for k in eachindex(xs))
-
-    points = Vector{Tuple{Int64,Int64}}(undef, N)
-
-    for k in 1:N
-        u = (k - 0.5) / N
-        θ = π * turns * u
-
-        R_θ = polygon_ray_distance(θ, xs, ys, x0, y0)
-        R_θ = R_θ > 0 ? R_θ : R
-        # ρ = R_θ * sqrt(u): uniform-area radial density (area ∝ ρ², so
-        # sqrt(u) keeps points evenly spread by area, not clustered toward
-        # the center) — no beam-width compensation.
-        ρ_scaled = R_θ * sqrt(u)
-
-        x = x0 + ρ_scaled * cos(θ)
-        y = y0 + ρ_scaled * sin(θ)
-
-        points[k] = (round(Int64, x), round(Int64, y))
-    end
-
-    return points
-end
-
-centroid_center(x_coords, y_coords) = (mean(x_coords), mean(y_coords))
-
-# =============================================================================
-# TOUR OPTIMIZATION: visiting order across ROI centers
-# =============================================================================
-
-dist2(p, q) = hypot(float(q[1]) - float(p[1]), float(q[2]) - float(p[2]))
-
-function path_length_cycle(points::AbstractVector{<:Tuple{<:Real,<:Real}})
-    n = length(points)
-    n <= 1 && return 0.0
-
-    s = 0.0
-    for i in 1:n-1
-        s += dist2(points[i], points[i+1])
-    end
-    s += dist2(points[end], points[1])
-    return s
-end
-
-function nearest_neighbor_cycle(points::AbstractVector{<:Tuple{<:Real,<:Real}})
-    n = length(points)
-    n <= 1 && return collect(points)
-
-    used = falses(n)
-    order = Vector{Int}(undef, n)
-
-    current = 1
-    order[1] = current
-    used[current] = true
-
-    for k in 2:n
-        best_j = 0
-        best_d = Inf
-        p = points[current]
-
-        for j in 1:n
-            if !used[j]
-                d = dist2(p, points[j])
-                if d < best_d
-                    best_d = d
-                    best_j = j
-                end
-            end
-        end
-
-        order[k] = best_j
-        used[best_j] = true
-        current = best_j
-    end
-
-    return [points[i] for i in order]
-end
-
-function two_opt_cycle!(tour::Vector{Tuple{Float64,Float64}})
-    n = length(tour)
-    n <= 3 && return tour
-
-    improved = true
-    while improved
-        improved = false
-
-        for i in 2:n-2
-            for k in i+1:n-1
-                A = tour[i-1]
-                B = tour[i]
-                C = tour[k]
-                D = tour[k+1]
-
-                old = dist2(A, B) + dist2(C, D)
-                new = dist2(A, C) + dist2(B, D)
-
-                if new + 1e-12 < old
-                    reverse!(tour, i, k)
-                    improved = true
-                end
-            end
-        end
-    end
-
-    return tour
-end
-
-function heuristic_tour(points::AbstractVector{<:Tuple{<:Real,<:Real}})
-    tour = [ (float(p[1]), float(p[2])) for p in nearest_neighbor_cycle(points) ]
-    two_opt_cycle!(tour)
-    return tour
-end
-
-# Exact shortest-cycle visiting order via Held-Karp DP (point 1 fixed to
-# break symmetry). O(2^(n-1) * n) time/memory — fine for the small ROI
-# counts this is meant for, but not intended to scale past ~15-20 ROIs.
-function optimize_centers(points::AbstractVector{<:Tuple{<:Real,<:Real}})
-    n = length(points)
-    n <= 1 && return collect(points)
-
-    pts = [(float(p[1]), float(p[2])) for p in points]
-
-    # Initial upper bound from a fast heuristic.
-    best_guess = heuristic_tour(pts)
-    upper_bound = path_length_cycle(best_guess)
-
-    d = Matrix{Float64}(undef, n, n)
-    for i in 1:n, j in 1:n
-        d[i, j] = dist2(pts[i], pts[j])
-    end
-
-    N = n - 1
-    total_masks = 1 << N
-
-    # dp[mask+1, j] = minimal cost starting from 1, visiting exactly mask
-    # (over points 2..n), ending at j.
-    dp = fill(Inf, total_masks, n)
-    parent = fill(UInt16(0), total_masks, n)
-
-    for j in 2:n
-        mask = 1 << (j - 2)
-        dp[mask + 1, j] = d[1, j]
-        parent[mask + 1, j] = UInt16(1)
-    end
-
-    for mask in 0:total_masks-1
-        for j in 2:n
-            bitj = 1 << (j - 2)
-            if (mask & bitj) == 0
-                continue
-            end
-
-            cur = dp[mask + 1, j]
-            if !isfinite(cur) || cur >= upper_bound
-                continue
-            end
-
-            remaining = (~mask) & (total_masks - 1)
-            while remaining != 0
-                lb = remaining & -remaining
-                kbit = trailing_zeros(lb)
-                k = kbit + 2
-                newmask = mask | lb
-                newcost = cur + d[j, k]
-
-                if newcost < dp[newmask + 1, k] && newcost < upper_bound
-                    dp[newmask + 1, k] = newcost
-                    parent[newmask + 1, k] = UInt16(j)
-                end
-
-                remaining -= lb
-            end
-        end
-    end
-
-    fullmask = total_masks - 1
-    best_cost = Inf
-    best_last = 0
-
-    for j in 2:n
-        c = dp[fullmask + 1, j] + d[j, 1]
-        if c < best_cost
-            best_cost = c
-            best_last = j
-        end
-    end
-
-    order = Vector{Int}(undef, n)
-    order[1] = 1
-
-    mask = fullmask
-    last = best_last
-
-    for pos in n:-1:2
-        order[pos] = last
-        prev = Int(parent[mask + 1, last])
-        mask = mask & ~(1 << (last - 2))
-        last = prev
-    end
-
-    return [points[i] for i in order]
-end
-
-# =============================================================================
-# WAVEFORM ASSEMBLY
-# =============================================================================
-
-# Pixel coordinate -> galvo voltage (mV): linear over the image span,
-# sign-flipped for the galvo's mirrored axis convention.
-to_voltage(coord::Real, n_pixels::Real, v_min::Real, v_max::Real) =
-    -(v_min + (coord - 1) * (v_max - v_min) / (n_pixels - 1))
-
-"""
-    roi_scan_segments(app, app_run, rois::Vector{RoiCoordinates})
-
-The galvo path for `rois`, in mV: one `(; center, points)` per ROI, in an
-optimized visiting order across ROI centers (`optimize_centers`), where
-`points` is a uniform-density spiral scan of that ROI's shape
-(`shape_spiral_points`) starting near `center`. Spiral density and turns
-(`app.protocol.points_per_roi`/`.spiral_turns`) are read from `app` —
-GUI-editable via the Protocol panel, handlers_protocol.jl.
-
-`rois`' coordinates are in `app_run.imported_image_size`'s own pixel space,
-which can be shorter (in height) than `roi_voltage_calibration_size`'s
-1024x1024 calibration reference — shifted to sit centered within that
-reference frame before conversion to voltage; see that constant's
-docstring for why.
-"""
-function roi_scan_segments(app, app_run, rois::Vector{RoiCoordinates})
-    v_min_x, v_max_x = app.roi.v_min_x, app.roi.v_max_x
-    v_min_y, v_max_y = app.roi.v_min_y, app.roi.v_max_y
-
-    image_width, image_height = app_run.imported_image_size
-    x_shift = (roi_voltage_calibration_size - image_width) / 2
-    y_shift = (roi_voltage_calibration_size - image_height) / 2
-
-    centers = [centroid_center(roi.xs, roi.ys) for roi in rois]
-    ordered_centers = optimize_centers(centers)
-    ordered_rois = [rois[findfirst(==(c), centers)] for c in ordered_centers]
-
-    segments = NamedTuple{(:center, :points), Tuple{Tuple{Int64,Int64}, Vector{Tuple{Int64,Int64}}}}[]
-
-    for roi in ordered_rois
-        cx, cy = centroid_center(roi.xs, roi.ys)
-        center_v = (
-            round(Int64, to_voltage(cx + x_shift, roi_voltage_calibration_size, v_min_x, v_max_x)),
-            round(Int64, to_voltage(cy + y_shift, roi_voltage_calibration_size, v_min_y, v_max_y))
-        )
-
-        xs_v = [to_voltage(x + x_shift, roi_voltage_calibration_size, v_min_x, v_max_x) for x in roi.xs]
-        ys_v = [to_voltage(y + y_shift, roi_voltage_calibration_size, v_min_y, v_max_y) for y in roi.ys]
-
-        points = shape_spiral_points(app.protocol.points_per_roi, xs_v, ys_v; center=center_v, turns=app.protocol.spiral_turns)
-        push!(segments, (; center = center_v, points))
-    end
-
-    return segments
+    return out
 end
 
 """
-    roi_scan_waveform(app, app_run, rois; rate_hz=daq_scan_rate_hz) -> (; x, y, d)
+    build_scan_pattern(request, cfg)::ScanPattern
 
-One full cycle of the ROI scan sampled at `rate_hz`: galvo X/Y in volts and
-one port-0 byte per sample (`DO_BIT_*`, daq.jl). The card loops it
-(`start_scan_output!`, daq.jl), and every cycle gives each ROI of
-`roi_scan_segments`, in that order:
-
-- `app.protocol.shift_time` ms parked on its center while the galvos
-  settle, gate low;
-- `app.protocol.scan_time` ms on its spiral, each point held for an equal
-  share of that time, gate high, with the ROI sync pulse on its first
-  samples (plus the sequence pulse for the first ROI).
-
-The enable line and the ROI index (bits 4–7) are set on every sample. One
-cycle lasts `length(rois) × (scan_time + shift_time)` ms, the file period
-`roi_scan_period_s` (acquisition.jl) assumes.
+Sample the slots of `request` at `cfg.sample_rate_hz`. Each spiral point is
+held for an equal share of the scan. Throws if the scan time is shorter
+than a sample or if any galvo sample breaks the limits (`check_galvo_path`,
+loop/safety.jl) — nothing is written in that case.
 """
-function roi_scan_waveform(app, app_run, rois::Vector{RoiCoordinates}; rate_hz::Real = daq_scan_rate_hz)
-    n_scan  = round(Int, app.protocol.scan_time * rate_hz / 1000)
-    n_shift = round(Int, app.protocol.shift_time * rate_hz / 1000)
-    n_scan >= 1 || error("scan time of $(app.protocol.scan_time) ms is shorter than one sample at $(rate_hz) Hz")
-    n_pulse = clamp(round(Int, daq_sync_pulse_s * rate_hz), 1, n_scan)
+function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
+    rate = cfg.sample_rate_hz
+    n_scan = round(Int, request.scan_time_ms * rate / 1000)
+    n_shift = round(Int, request.shift_time_ms * rate / 1000)
+    n_scan >= 1 || error("scan time of $(request.scan_time_ms) ms is shorter than one sample at $(rate) Hz")
+    n_pulse = clamp(round(Int, cfg.sync_pulse_s * rate), 1, n_scan)
+    n = n_scan + n_shift
+    scanning = request.roi_active && !isempty(request.rois)
 
-    x = Float64[]
-    y = Float64[]
-    d = UInt8[]
+    if !scanning
+        return ScanPattern(rate, false, [0], n_scan, n_shift, n, zeros(n_shift), zeros(n_shift),
+                           zeros(n, 1), zeros(n, 1), zeros(UInt8, n, 1))
+    end
 
-    for (k, segment) in enumerate(roi_scan_segments(app, app_run, rois))
-        code = (UInt8((k - 1) & 0x0f) << DO_ROI_CODE_SHIFT) | do_bit(DO_BIT_ENABLE)
+    segments = roi_scan_segments(request)
+    R = length(segments)
+    x = zeros(n, R)
+    y = zeros(n, R)
+    lines = zeros(UInt8, n, R)
 
-        append!(x, fill(segment.center[1] / 1000, n_shift))
-        append!(y, fill(segment.center[2] / 1000, n_shift))
-        append!(d, fill(code, n_shift))
+    for (k, segment) in enumerate(segments)
+        code = (UInt8((segment.roi_index - 1) & 0x0f) << DO_ROI_CODE_SHIFT) | do_bit(DO_BIT_ENABLE)
 
         n_points = length(segment.points)
-        held = [segment.points[fld((j - 1) * n_points, n_scan) + 1] for j in 1:n_scan]
-        append!(x, [p[1] / 1000 for p in held])
-        append!(y, [p[2] / 1000 for p in held])
+        for j in 1:n_scan
+            point = segment.points[fld((j - 1) * n_points, n_scan) + 1]
+            x[j, k] = point[1] / 1000
+            y[j, k] = point[2] / 1000
+            lines[j, k] = code | do_bit(DO_BIT_GATE)
+        end
+        lines[1:n_pulse, k] .|= do_bit(DO_BIT_ROI)
+        k == 1 && (lines[1:n_pulse, k] .|= do_bit(DO_BIT_SEQUENCE))
 
-        scan_d = fill(code | do_bit(DO_BIT_GATE), n_scan)
-        scan_d[1:n_pulse] .|= do_bit(DO_BIT_ROI)
-        k == 1 && (scan_d[1:n_pulse] .|= do_bit(DO_BIT_SEQUENCE))
-        append!(d, scan_d)
+        next_center = segments[mod1(k + 1, R)].center
+        half_cosine_move!(view(x, n_scan+1:n, k), x[n_scan, k], next_center[1] / 1000)
+        half_cosine_move!(view(y, n_scan+1:n, k), y[n_scan, k], next_center[2] / 1000)
+        lines[n_scan+1:n, k] .= code
     end
 
-    return (; x, y, d)
+    first_center = segments[1].center
+    entry_x = half_cosine_move!(zeros(n_shift), 0.0, first_center[1] / 1000)
+    entry_y = half_cosine_move!(zeros(n_shift), 0.0, first_center[2] / 1000)
+
+    check_galvo_path(vcat(vec(x), entry_x), vcat(vec(y), entry_y), cfg)
+
+    return ScanPattern(rate, true, [s.roi_index for s in segments], n_scan, n_shift, n,
+                       entry_x, entry_y, x, y, lines)
 end
 
 """
-    start_roi_scan!(app, app_run)
+    SlotBuffers(n)
 
-If ROI mode is active (`app.roi.active`) and the DAQ is connected
-(`app_run.daq`), build the scan waveform for the currently drawn ROIs
-(`app_run.rois`) and start it looping on the card. A no-op (with a log
-message) if ROI mode is off, the DAQ isn't connected, or no ROIs are drawn.
-
-A failure (a galvo sample over `daq_galvo_limit_v`, a DAQmx error) is
-logged, not raised, and leaves the scan stopped — it shouldn't block
-acquisition from starting.
+One slot's worth of output, laid out the way the NI writes expect it
+(channel by channel): `galvos` is X then Y, `commands` is command 1 then
+command 2, `lines` one byte per sample. Allocated once per run.
 """
-function start_roi_scan!(app, app_run)
-    if !app.roi.active
-        return nothing
-    end
+struct SlotBuffers
+    galvos::Vector{Float64}
+    lines::Vector{UInt8}
+    commands::Vector{Float64}
+end
 
-    daq = app_run.daq
-    if daq === nothing
-        @info "ROI mode is active but the DAQ is not connected; skipping the galvo scan"
-        return nothing
-    end
+SlotBuffers(n::Integer) = SlotBuffers(zeros(2n), zeros(UInt8, n), zeros(2n))
+buffer_samples(b::SlotBuffers) = length(b.lines)
 
-    rois = app_run.rois[]
-    if isempty(rois)
-        @info "ROI mode is active but no ROIs are drawn; skipping the galvo scan"
-        return nothing
-    end
+"""
+    prepare_slot!(buffers, pattern, s, command1_v, command2_v)
 
-    try
-        waveform = roi_scan_waveform(app, app_run, rois)
-        start_scan_output!(daq, waveform.x, waveform.y, waveform.d)
-        @info "ROI galvo scan started" n_rois=length(rois) n_samples=length(waveform.x) rate_hz=daq_scan_rate_hz image_size=app_run.imported_image_size
-    catch e
-        @error "Failed to start the ROI galvo scan" error=string(e)
-    end
+Fill `buffers` with slot `s`: its ROI's galvo path and lines, the two
+command voltages during the scan and 0 V during the shift. No allocation.
+"""
+function prepare_slot!(buffers::SlotBuffers, pattern::ScanPattern, s::Integer, command1_v::Float64, command2_v::Float64)
+    n = pattern.slot_samples
+    offset = (slot_position(pattern, s) - 1) * n
+    copyto!(buffers.galvos, 1, pattern.x, offset + 1, n)
+    copyto!(buffers.galvos, n + 1, pattern.y, offset + 1, n)
+    copyto!(buffers.lines, 1, pattern.lines, offset + 1, n)
 
-    return nothing
+    n_scan = pattern.scan_samples
+    commands = buffers.commands
+    @inbounds for j in 1:n
+        on = j <= n_scan
+        commands[j] = on ? command1_v : 0.0
+        commands[n + j] = on ? command2_v : 0.0
+    end
+    return buffers
+end
+
+"""
+    entry_buffers(pattern)::SlotBuffers
+
+The move onto the first ROI, everything else off.
+"""
+function entry_buffers(pattern::ScanPattern)::SlotBuffers
+    n = entry_samples(pattern)
+    buffers = SlotBuffers(n)
+    buffers.galvos[1:n] .= pattern.entry_x
+    buffers.galvos[n+1:2n] .= pattern.entry_y
+    return buffers
 end

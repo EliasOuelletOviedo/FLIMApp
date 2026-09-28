@@ -1,0 +1,61 @@
+# Bench configuration, read once at startup (scripts/app.jl, run_app).
+#
+# Hardware wiring, timing, safety limits and journal settings. Everything
+# the GUI edits (scan/shift time, points per ROI, galvo voltage range,
+# ROIs, controller gains...) stays in the saved AppState instead.
+# A missing key falls back to the value shown here.
+
+[hardware]
+# "ni" drives the NI-DAQmx cards. "simulation" keeps everything in memory:
+# the readback returns exactly what was written, paced in real time, so the
+# whole app (loop, journal, display) runs without the cards.
+backend = "ni"
+
+[channels]
+galvos = "X6321/ao0:1"                  # AO 0 = galvo X, AO 1 = galvo Y
+lines = "X6321/port0/line0:7"           # sync lines, one bit per line (see src/loop/scan_pattern.jl)
+counter = "X6321/ctr0"                  # counter generating the shared sample clock
+clock = "/X6321/Ctr0InternalOutput"     # ...its output terminal, reaching the 6110 through RTSI
+commands = "S6110/ao0:1"                # AO 0 = PI command 1, AO 1 = PI command 2
+readback = "X6321/ai0:11"               # AI read back every block; paces the loop
+readback_terminal = "RSE"               # RSE, NRSE, Diff, PseudoDiff or Default
+# What each readback channel is wired to, in order: galvo_x, galvo_y,
+# command_1, command_2 or line_0 ... line_7. Used for the journal header,
+# the Readback plot legend and the simulated backend.
+readback_signals = ["galvo_x", "galvo_y", "command_1", "command_2",
+                    "line_0", "line_1", "line_2", "line_3",
+                    "line_4", "line_5", "line_6", "line_7"]
+# Static digital line that opens the shutter while a scan runs (high =
+# open). Empty: no shutter. Keep it outside port 0, e.g. "X6321/port1/line0".
+shutter = ""
+
+[timing]
+sample_rate_hz = 10000.0
+block_ms = 20           # readback block: loop period and stop-flag latency
+lead_slots = 0          # slots written ahead of the card; 0 = max(2, number of ROIs)
+
+[limits]
+galvo_v = 5.0                  # any galvo sample beyond this is refused
+command_full_scale_v = 5.0     # output for a 100 % PI command
+command_max_v = 5.0            # AO range declared to NI-DAQmx: it refuses any write beyond
+
+[sync]
+pulse_s = 0.001                # width of the sequence and ROI pulses
+
+[watchdog]
+# 6321 watchdog: if the loop stops re-arming it for timeout_s, the lines
+# below (and the shutter) go low. Digital/PFI lines only.
+enabled = true
+timeout_s = 1.0
+lines = "X6321/port0/line0:7"
+
+[journal]
+directory = ""                 # "" = ~/FLIMApp_journal; one folder per run
+readback = true                # every readback sample, Float32: 12 ch at 10 kHz ≈ 29 MB/min
+queue_capacity = 4096          # entries waiting to be written; beyond, they are dropped and counted
+flush_interval_s = 1.0
+
+[display]
+refresh_hz = 30
+autoscale_interval_s = 1.0     # axis limits recomputed at most this often
+max_points_per_line = 4000     # longer windows are decimated before plotting
