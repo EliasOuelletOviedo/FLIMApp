@@ -5,9 +5,19 @@ using FLIMApp: ChannelFrame, ChannelSeries, AcquisitionSample, ProtocolSettings,
 using ZipFile
 
 # These tests cover the GUI-free logic: protocol schedule math, smoothing,
-# state persistence, spinner stepping, plot windowing, and the MLE lifetime
-# fit on a synthetic decay with a known lifetime. The GUI itself (Makie
-# widgets/handlers) is exercised manually via run_app().
+# state persistence, spinner stepping, plot windowing, the MLE lifetime fit
+# on a synthetic decay with a known lifetime, the bench config, the
+# exchanges between threads, the journal, and the DAQ loop on its simulated
+# backend. The GUI itself (Makie widgets/handlers) is exercised manually via
+# run_app().
+
+# A config for tests: simulated cards, journal in a temporary folder.
+test_bench_config(overrides = Dict{String, Any}()) = FLIMApp.bench_config_from_dict(
+    merge(Dict{String, Any}("hardware" => Dict{String, Any}("backend" => "simulation"),
+                            "journal" => Dict{String, Any}("directory" => mktempdir(), "flush_interval_s" => 0.1)),
+          overrides); source = "test")
+
+square_roi(x0, y0) = FLIMApp.RoiCoordinates("roi", [x0, x0 + 40, x0 + 40, x0, x0], [y0, y0, y0 + 40, y0 + 40, y0])
 
 @testset "FLIMApp" begin
 
@@ -176,16 +186,31 @@ end
     FLIMApp.accumulate_roi_sample!(app, series1, frame, 0.5)
     FLIMApp.accumulate_roi_sample!(app, app_run.ch2_rois[1], ChannelFrame(), 0.5)
 
-    @test series1.timestamps[] == [0.5]
-    @test series1.photons[] == [100.0]
-    @test series1.lifetime[] == [3.0]
-    @test series1.lifetime_smooth[] == [3.0]              # level 0: passthrough
-    @test series1.concentration[] == [1.5]
-    @test isnan(app_run.ch2_rois[1].lifetime[][1])        # absent-channel sentinel
+    @test series1.timestamps == [0.5]
+    @test series1.photons == [100.0]
+    @test series1.lifetime == [3.0]
+    @test series1.lifetime_smooth == [3.0]                # level 0: passthrough
+    @test series1.concentration == [1.5]
+    @test isnan(app_run.ch2_rois[1].lifetime[1])          # absent-channel sentinel
+
+    # A whole analyzed file goes to its ROI's series and the global ones.
+    sample = AcquisitionSample(frame, ChannelFrame(), 12.0, NaN, 1.0, 4.0, UInt32(7), "f_0007.sdt", 7, NaN)
+    FLIMApp.accumulate_frame!(app, app_run, FLIMApp.FrameRecord(sample, 1))
+    @test app_run.command1 == [12.0] && app_run.protocol_setpoint == [4.0] && app_run.i == 7
+    @test length(series1.timestamps) == 2
+
+    # Curves are refilled in place from the histories, windowed and decimated.
+    points = FLIMApp.Point2f[]
+    xs = collect(0.0:1.0:1000.0)
+    FLIMApp.fill_points!(points, xs, 2 .* xs, 100.0, 1000)
+    @test first(points)[1] == 900.0 && last(points) == FLIMApp.Point2f(1000.0, 2000.0)
+    FLIMApp.fill_points!(points, xs, xs, Inf, 10)
+    @test length(points) <= 11 && last(points)[1] == 1000.0
 
     FLIMApp.reset_acquisition_state!(app, app_run)
-    @test isempty(app_run.ch1_rois[1].photons[])
-    @test isempty(app_run.ch2_rois[1].lifetime[])
+    @test isempty(app_run.ch1_rois[1].photons)
+    @test isempty(app_run.ch2_rois[1].lifetime)
+    @test isempty(app_run.command1)
     @test app_run.ch1.counts[] == 0.0
     @test isnan(app_run.save_progress[])
 end
@@ -207,68 +232,240 @@ end
     @test FLIMApp.pid_command_from_state(state, 4.0, 100.0, 100.0, false, true) == 100.0
 end
 
-@testset "DAQ command voltage" begin
-    full_scale = FLIMApp.daq_command_full_scale_v
-    @test FLIMApp.command_volts(0.0) == 0.0
-    @test FLIMApp.command_volts(50.0) == full_scale / 2
-    @test FLIMApp.command_volts(100.0) == full_scale
-    # Clamped to 0–100 %; a controller that's off (NaN) outputs 0 V.
-    @test FLIMApp.command_volts(250.0) == full_scale
-    @test FLIMApp.command_volts(-5.0) == 0.0
-    @test FLIMApp.command_volts(NaN) == 0.0
+@testset "bench config" begin
+    # The shipped file holds exactly the built-in defaults.
+    shipped = FLIMApp.load_bench_config(FLIMApp.default_bench_config_path())
+    defaults = FLIMApp.bench_config_from_dict(Dict{String, Any}())
+    for field in fieldnames(FLIMApp.BenchConfig)
+        field == :source || @test getfield(shipped, field) == getfield(defaults, field)
+    end
+    @test shipped.block_samples == 200                     # 20 ms at 10 kHz
+    @test FLIMApp.bench_devices(shipped) == ["X6321", "S6110"]
 
-    # Without the NI-DAQmx driver, connecting fails cleanly instead of throwing.
+    # A typo or an impossible value is an error, not a silent default.
+    @test_throws ErrorException FLIMApp.bench_config_from_dict(Dict("timing" => Dict("blok_ms" => 20)))
+    @test_throws ErrorException FLIMApp.bench_config_from_dict(Dict("hardware" => Dict("backend" => "usb")))
+    @test_throws ErrorException FLIMApp.bench_config_from_dict(Dict("timing" => Dict("lead_slots" => 1)))
+    @test_throws ErrorException FLIMApp.bench_config_from_dict(Dict("channels" => Dict("readback_signals" => ["galvo_z"])))
+end
+
+@testset "DAQ command voltage" begin
+    cfg = test_bench_config()
+    full_scale = cfg.command_full_scale_v
+    @test FLIMApp.command_volts(0.0, cfg) == 0.0
+    @test FLIMApp.command_volts(50.0, cfg) == full_scale / 2
+    @test FLIMApp.command_volts(100.0, cfg) == full_scale
+    # Clamped to 0–100 % and to the declared range; a controller that's off (NaN) outputs 0 V.
+    @test FLIMApp.command_volts(250.0, cfg) == full_scale
+    @test FLIMApp.command_volts(-5.0, cfg) == 0.0
+    @test FLIMApp.command_volts(NaN, cfg) == 0.0
+    capped = test_bench_config(Dict{String, Any}("limits" => Dict{String, Any}("command_max_v" => 1.0)))
+    @test FLIMApp.command_volts(100.0, capped) == 1.0
+end
+
+@testset "exchanges between threads" begin
+    # Ring: the reader gets everything new; overwritten items are reported lost.
+    ring = FLIMApp.Ring{Int}(4)
+    out = Int[]
+    foreach(i -> FLIMApp.publish!(ring, i), 1:3)
+    cursor, lost = FLIMApp.take_new!(out, ring, 0)
+    @test out == [1, 2, 3] && cursor == 3 && lost == 0
+    foreach(i -> FLIMApp.publish!(ring, i), 4:9)
+    empty!(out)
+    cursor, lost = FLIMApp.take_new!(out, ring, cursor)
+    @test out == [6, 7, 8, 9] && lost == 2
+    @test FLIMApp.reset_cursor(ring) == 9
+
+    # Journal queue: never blocks, drops and counts past capacity.
+    queue = FLIMApp.JournalQueue(2)
+    @test FLIMApp.journal_event!(queue, :info, "a") && FLIMApp.journal_event!(queue, :info, "b")
+    @test !FLIMApp.journal_event!(queue, :info, "c")
+    @test queue.dropped[] == 1
+    @test length(FLIMApp.drain_journal!(FLIMApp.JournalEntry[], queue)) == 2
+    @test FLIMApp.pending_journal(queue) == 0
+
+    # Readback pool: no free buffer means 0, never a wait.
+    pool = FLIMApp.ReadbackPool(2, 3, 1)
+    index = FLIMApp.acquire!(pool)
+    @test index == 1 && FLIMApp.acquire!(pool) == 0
+    FLIMApp.release!(pool, index)
+    @test FLIMApp.acquire!(pool) == 1
+
+    # Loop commands never block the GUI, even when nobody takes them.
+    ex = FLIMApp.Exchange()
+    @test all(_ -> FLIMApp.send_command!(ex, FLIMApp.ConnectCommand()), 1:FLIMApp.LOOP_COMMAND_CAPACITY)
+    @test !(@test_logs (:warn,) match_mode=:any FLIMApp.send_command!(ex, FLIMApp.ConnectCommand()))
+end
+
+@testset "ROI scan slots" begin
+    cfg = test_bench_config()
+    rois = [square_roi(100.0, 100.0), square_roi(600.0, 300.0), square_roi(300.0, 800.0)]
+    order = FLIMApp.roi_visit_order(rois)
+    @test sort(order) == [1, 2, 3] && first(order) == 1
+    request = FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 95, 5, (1024, 1024))
+    pattern = FLIMApp.build_scan_pattern(request, cfg)
+
+    n_scan, n_shift = 950, 50
+    @test pattern.slot_samples == n_scan + n_shift
+    @test FLIMApp.slots_per_cycle(pattern) == 3
+    @test FLIMApp.slot_duration_s(pattern) ≈ FLIMApp.roi_scan_period_s(ProtocolSettings(scan_time=95, shift_time=5))
+    @test pattern.roi_order == order
+    @test FLIMApp.slot_roi(pattern, 4) == order[2] && FLIMApp.slot_visit(pattern, 4) == 1
+
+    buffers = FLIMApp.SlotBuffers(pattern.slot_samples)
+    rising_edges(v) = count(i -> v[i] == 1 && v[i - 1] == 0, 2:length(v))
+    for s in 0:2
+        FLIMApp.prepare_slot!(buffers, pattern, s, 2.0, 0.5)
+        line(b) = (buffers.lines .>> b) .& 0x01
+        gate = line(FLIMApp.DO_BIT_GATE)
+        # Scan: gate high, commands on. Shift: gate low, commands at 0 V —
+        # every slot ends off.
+        @test all(==(1), gate[1:n_scan]) && all(==(0), gate[n_scan+1:end])
+        @test all(==(2.0), buffers.commands[1:n_scan]) && all(==(0.0), buffers.commands[n_scan+1:pattern.slot_samples])
+        @test all(==(0.5), buffers.commands[pattern.slot_samples+1:pattern.slot_samples+n_scan])
+        @test buffers.commands[end] == 0.0 && buffers.lines[end] & FLIMApp.do_bit(FLIMApp.DO_BIT_GATE) == 0
+        # Drawn index − 1 of the visited ROI on bits 4–7, enable on throughout.
+        @test all(==(order[s + 1] - 1), buffers.lines .>> FLIMApp.DO_ROI_CODE_SHIFT)
+        @test all(==(1), line(FLIMApp.DO_BIT_ENABLE))
+        @test sum(line(FLIMApp.DO_BIT_ROI)) == round(Int, cfg.sync_pulse_s * cfg.sample_rate_hz)
+        @test sum(line(FLIMApp.DO_BIT_SEQUENCE)) == (s == 0 ? round(Int, cfg.sync_pulse_s * cfg.sample_rate_hz) : 0)
+        FLIMApp.check_slot(buffers, cfg)
+    end
+
+    # The spiral points in order, each held equally long; the shift ends on
+    # the next ROI's center (half-cosine move); the entry reaches the first.
+    segments = FLIMApp.roi_scan_segments(request)
+    FLIMApp.prepare_slot!(buffers, pattern, 0, 0.0, 0.0)
+    held = [(buffers.galvos[j], buffers.galvos[pattern.slot_samples + j]) for j in 1:n_scan]
+    @test unique(held) == unique([(p[1] / 1000, p[2] / 1000) for p in segments[1].points])
+    @test buffers.galvos[pattern.slot_samples] ≈ segments[2].center[1] / 1000
+    @test pattern.entry_x[1] == 0.0 && pattern.entry_x[end] ≈ segments[1].center[1] / 1000
+    @test maximum(abs, pattern.x) <= 1.0 && maximum(abs, pattern.y) <= 1.0    # default ±1000 mV range
+
+    # Without ROI scanning: galvos parked at 0 V, port 0 low, commands only.
+    idle = FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(rois, Int[], false, -1000, 1000, -1000, 1000, 20, 3, 95, 5, (1024, 1024)), cfg)
+    FLIMApp.prepare_slot!(buffers, idle, 7, 1.0, 0.0)
+    @test all(==(0.0), buffers.galvos) && all(==(0x00), buffers.lines) && buffers.commands[1] == 1.0
+
+    # Refused before anything reaches the card.
+    @test_throws FLIMApp.SafetyError FLIMApp.build_scan_pattern(
+        FLIMApp.ScanRequest(rois, order, true, -9000, 9000, -1000, 1000, 20, 3, 95, 5, (1024, 1024)), cfg)
+    @test_throws FLIMApp.SafetyError FLIMApp.check_galvo_path([0.0, NaN], [0.0, 0.0], cfg)
+    buffers.commands[1] = cfg.command_max_v + 1
+    @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, cfg)
+end
+
+@testset "DAQ loop on the simulated cards" begin
+    cfg = test_bench_config()
+    ex = FLIMApp.Exchange(cfg)
+    hw = FLIMApp.SimulatedHardware(cfg; realtime=true)
+    loop = Threads.@spawn FLIMApp.daq_loop(cfg, ex; hardware=hw)
+    journal = Threads.@spawn FLIMApp.journal_loop(cfg, ex)
+    state() = FLIMApp.loop_status(ex).state
+    await(f; timeout=10.0) = timedwait(f, timeout; pollint=0.005) === :ok
+
+    FLIMApp.send_command!(ex, FLIMApp.ConnectCommand())
+    @test await(() -> state() == FLIMApp.LOOP_READY)
+    @test hw.zero_count == 1                                   # INIT zeroes everything
+
+    rois = [square_roi(100.0, 100.0), square_roi(600.0, 300.0), square_roi(300.0, 800.0)]
+    order = FLIMApp.roi_visit_order(rois)
+    request = FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 45, 5, (1024, 1024))
+    FLIMApp.send_journal!(ex.journal, FLIMApp.JournalRunStart(time(), Dict{String, Any}("mode" => "test")))
+    FLIMApp.set_command_values!(ex, 40.0, NaN)
+    FLIMApp.send_command!(ex, FLIMApp.StartCommand(request))
+    @test await(() -> state() == FLIMApp.LOOP_RUNNING)
+    summaries = FLIMApp.SlotSummary[]
+    @test await(() -> (FLIMApp.take_new!(summaries, ex.slots, length(summaries)); length(summaries) >= 6))
+
+    # Slots follow the visiting order; commands carried as written; the loop
+    # stays far from its deadline.
+    @test [s.roi for s in summaries[1:3]] == order
+    @test all(s -> s.command1_v == FLIMApp.command_volts(40.0, cfg) && s.command2_v == 0.0, summaries)
+    @test all(s -> s.iteration_s < s.deadline_s / 2, summaries)
+
+    # The readback is what was written (the simulation mirrors the outputs).
+    view = ex.readback
+    pattern = FLIMApp.build_scan_pattern(request, cfg)
+    lock(view.lock)
+    data, n_points, slot = copy(view.data), view.n_points, view.slot
+    unlock(view.lock)
+    stride = max(1, cld(pattern.slot_samples, cfg.max_points_per_line))
+    expected = pattern.x[1:stride:end, FLIMApp.slot_position(pattern, slot)]
+    @test maximum(abs.(data[1, 1:n_points] .- expected[1:n_points])) < 1e-6
+
+    # STOP: outputs zeroed, back to READY, within the plan's 50 ms (plus scheduling slack).
+    t0 = time()
+    FLIMApp.request_stop!(ex)
+    @test await(() -> state() == FLIMApp.LOOP_READY)
+    @test time() - t0 < 0.5
+    @test hw.zero_count == 2 && !hw.running
+
+    # Missed deadline -> FAULT (outputs zeroed); START refused until acknowledged.
+    ex.stop[] = false
+    FLIMApp.send_command!(ex, FLIMApp.StartCommand(request))
+    @test await(() -> state() == FLIMApp.LOOP_RUNNING)
+    sleep(0.1)
+    hw.skip_samples = 10 * pattern.slot_samples
+    @test await(() -> state() == FLIMApp.LOOP_FAULT)
+    @test occursin("missed deadline", FLIMApp.loop_status(ex).message)
+    @test hw.zero_count == 3
+    FLIMApp.send_command!(ex, FLIMApp.AcknowledgeCommand())
+    @test await(() -> state() == FLIMApp.LOOP_READY)
+
+    FLIMApp.send_journal!(ex.journal, FLIMApp.JournalRunEnd(time()))
+    FLIMApp.send_command!(ex, FLIMApp.DisconnectCommand())
+    FLIMApp.send_command!(ex, FLIMApp.QuitCommand())
+    @test await(() -> istaskdone(loop))
+    ex.shutdown[] = true
+    @test await(() -> istaskdone(journal))
+    @test ex.journal.dropped[] == 0
+
+    # The journal wrote one run folder with the visits and the readback.
+    run_dir = only(filter(isdir, readdir(FLIMApp.journal_root(cfg); join=true)))
+    visits = readlines(joinpath(run_dir, "visits.csv"))
+    @test visits[1] == FLIMApp.VISITS_CSV_HEADER && length(visits) > 6
+    readback = reinterpret(Float32, read(joinpath(run_dir, "readback.bin")))
+    @test length(readback) % length(cfg.readback_signals) == 0
+    @test isfile(joinpath(run_dir, "run.toml")) && isfile(joinpath(run_dir, "readback.txt"))
+    @test any(l -> occursin("missed deadline", l), readlines(joinpath(run_dir, "log.txt")))
+end
+
+@testset "DAQ loop without the NI driver" begin
+    # Connecting fails into FAULT with the reason; nothing throws.
     if isempty(Base.Libc.Libdl.find_library("nicaiu"))
-        @test FLIMApp.connect_daq() === nothing
+        cfg = FLIMApp.bench_config_from_dict(Dict{String, Any}("journal" => Dict{String, Any}("directory" => mktempdir())))
+        ex = FLIMApp.Exchange(cfg)
+        loop = Threads.@spawn FLIMApp.daq_loop(cfg, ex)
+        FLIMApp.send_command!(ex, FLIMApp.ConnectCommand())
+        @test timedwait(() -> FLIMApp.loop_status(ex).state == FLIMApp.LOOP_FAULT, 10.0) === :ok
+        @test occursin("connection failed", FLIMApp.loop_status(ex).message)
+        FLIMApp.send_command!(ex, FLIMApp.QuitCommand())
+        @test timedwait(() -> istaskdone(loop), 10.0) === :ok
     end
 end
 
-@testset "ROI scan waveform" begin
-    app = AppState(true)
-    app.protocol.points_per_roi = 20
-    app.protocol.scan_time = 95
-    app.protocol.shift_time = 5
-    app_run = AppRun()
-    square(x0, y0) = FLIMApp.RoiCoordinates("roi", [x0, x0 + 40, x0 + 40, x0, x0], [y0, y0, y0 + 40, y0 + 40, y0])
-    rois = [square(100.0, 100.0), square(600.0, 300.0), square(300.0, 800.0)]
+@testset "analysis output: ROI assignment by visiting order" begin
+    ex = FLIMApp.Exchange()
+    frame = ChannelFrame([1.0], [1.0], 10.0, 3.0, 1.0)
+    sample(n) = AcquisitionSample(frame, ChannelFrame(), 25.0, 30.0, Float64(n), NaN, UInt32(n), "f_$(n).sdt", n, NaN)
 
-    rate = 10_000.0
-    n_scan, n_shift = 950, 50
-    w = FLIMApp.roi_scan_waveform(app, app_run, rois; rate_hz=rate)
+    # The k-th file of each cycle belongs to the k-th ROI visited.
+    out = FLIMApp.AnalysisOutput(ex; roi_order=[1, 3, 2])
+    @test [FLIMApp.assign_roi!(out, sample(n)) for n in 1:6] == [1, 3, 2, 1, 3, 2]
+    @test FLIMApp.assign_roi!(FLIMApp.AnalysisOutput(ex), sample(5)) == 1    # not split per ROI
 
-    # One cycle: every ROI gets shift_time + scan_time.
-    @test length(w.x) == length(w.y) == length(w.d) == 3 * (n_scan + n_shift)
-    @test length(w.x) / rate ≈ 3 * FLIMApp.roi_scan_period_s(app.protocol)
+    # emit_frame! publishes for the GUI, the DAQ loop and the journal.
+    @test FLIMApp.emit_frame!(out, sample(7))
+    records = FLIMApp.FrameRecord[]
+    FLIMApp.take_new!(records, ex.frames, 0)
+    @test only(records).roi_index == 1
+    @test ex.command_values[1][] == 25.0 && ex.command_values[2][] == 30.0
+    @test FLIMApp.pending_journal(ex.journal) == 1
 
-    line(b) = (w.d .>> b) .& 0x01
-    rising_edges(v) = count(i -> v[i] == 1 && v[i - 1] == 0, 2:length(v))
-    gate = line(FLIMApp.DO_BIT_GATE)
-    for k in 0:2
-        slot = k * (n_scan + n_shift)
-        # Gate low while parked on the center, high while scanning.
-        @test all(==(0), gate[slot + 1 : slot + n_shift])
-        @test all(==(1), gate[slot + n_shift + 1 : slot + n_shift + n_scan])
-        # ROI index on bits 4–7 for the whole slot.
-        @test all(==(k), w.d[slot + 1 : slot + n_shift + n_scan] .>> FLIMApp.DO_ROI_CODE_SHIFT)
-    end
-    @test all(==(1), line(FLIMApp.DO_BIT_ENABLE))
-    @test rising_edges(line(FLIMApp.DO_BIT_ROI)) == 3
-    @test rising_edges(line(FLIMApp.DO_BIT_SEQUENCE)) == 1
-    @test sum(line(FLIMApp.DO_BIT_SEQUENCE)) == round(Int, FLIMApp.daq_sync_pulse_s * rate)
-
-    # mV -> V: parked on the first ROI's center, then its spiral points in
-    # order, each held for an equal share of the scan.
-    segments = FLIMApp.roi_scan_segments(app, app_run, rois)
-    @test w.x[1] == segments[1].center[1] / 1000
-    @test w.y[1] == segments[1].center[2] / 1000
-    held = [(w.x[i], w.y[i]) for i in n_shift + 1 : n_shift + n_scan]
-    @test unique(held) == unique([(p[1] / 1000, p[2] / 1000) for p in segments[1].points])
-    @test maximum(abs, w.x) <= 1.0 && maximum(abs, w.y) <= 1.0    # default ±1000 mV range
-
-    # Out-of-range or non-finite galvo samples are refused before reaching the card.
-    @test FLIMApp.check_galvo_waveform(w.x, w.y) === nothing
-    @test_throws ErrorException FLIMApp.check_galvo_waveform([0.0, 2 * FLIMApp.daq_galvo_limit_v], [0.0, 0.0])
-    @test_throws ErrorException FLIMApp.check_galvo_waveform([0.0, NaN], [0.0, 0.0])
+    realtime = FLIMApp.AnalysisOutput(ex; roi_order=[1, 2], realtime=true, nominal_period_s=1.0)
+    FLIMApp.emit_frame!(realtime, sample(1))
+    @test FLIMApp.nrow(realtime.realtime_rows) == 1
 end
 
 @testset "acquisition helpers" begin

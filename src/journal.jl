@@ -183,9 +183,16 @@ function write_entry!(writer::JournalWriter, entry::JournalReadbackStart)
         writer.orphans += 1
         return nothing
     end
+    # A second scan in the same run (e.g. after a fault was acknowledged)
+    # appends to the same file rather than truncating the first one.
+    if writer.readback_bin !== nothing
+        entry.signals == writer.readback_signals && entry.sample_rate_hz == writer.readback_rate_hz ||
+            @warn "Readback layout changed within a run; appending anyway" run=writer.run_dir
+        println(writer.run_log, timestamp_string(time()), " INFO new scan: readback continues at sample ", writer.readback_samples + 1)
+        return nothing
+    end
     writer.readback_signals = copy(entry.signals)
     writer.readback_rate_hz = entry.sample_rate_hz
-    writer.readback_bin === nothing || close(writer.readback_bin)
     writer.readback_bin = open(joinpath(writer.run_dir, "readback.bin"), "w")
     writer.readback_samples = 0
     open(joinpath(writer.run_dir, "readback.txt"), "w") do io
