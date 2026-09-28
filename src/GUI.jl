@@ -20,56 +20,6 @@ using Base.Threads
 using Dates
 
 """
-    port_options(no_port_label::AbstractString)::Vector{String}
-
-Enumerate serial ports and prepend a default "no selection" label.
-"""
-function port_options(no_port_label::AbstractString)::Vector{String}
-    detected_ports = try
-        list_ports()
-    catch e
-        @warn "Port enumeration failed" error = string(e)
-        String[]
-    end
-
-    return vcat([String(no_port_label)], detected_ports)
-end
-
-"""
-    refresh_port_menu!(menu::Menu; no_port_label::AbstractString="No port selected")
-
-Refresh serial port menu options while preserving the previous valid selection.
-"""
-function refresh_port_menu!(menu::Menu; no_port_label::AbstractString="No port selected")
-    if menu.is_open[]
-        return nothing
-    end
-
-    old_selection = menu.selection[]
-    new_options = port_options(no_port_label)
-
-    # Prevent updates if user opened the dropdown while ports were being scanned.
-    if menu.is_open[]
-        return nothing
-    end
-
-    if menu.options[] != new_options
-        menu.options[] = new_options
-    end
-
-    if old_selection isa AbstractString && old_selection in new_options
-        idx = findfirst(==(old_selection), new_options)
-        if idx !== nothing && menu.i_selected[] != idx
-            menu.i_selected[] = idx
-        end
-    elseif menu.i_selected[] != 1
-        menu.i_selected[] = 1
-    end
-
-    return nothing
-end
-
-"""
     make_gui_grids(fig)
 
 Build the top-level grid skeleton (top/left/right + the nested button/path/
@@ -177,8 +127,8 @@ end
 """
     make_control_widgets!(button_grid, panelbtn_grid)
 
-Create the START/CLEAR buttons, IRF/data-folder path controls, serial port
-menu + CONNECT button, info label, mode/lifetimes menus, and the panel
+Create the START/CLEAR buttons, IRF/data-folder path controls, DAQ status
+label + CONNECT button, info label, mode/lifetimes menus, and the panel
 switch buttons. Returns a NamedTuple of the created widgets.
 """
 function make_control_widgets!(button_grid, panelbtn_grid)
@@ -192,11 +142,7 @@ function make_control_widgets!(button_grid, panelbtn_grid)
     irf_button    = Button(button_grid[2, 1:2];  PATH_BUTTON_ATTRS...)
     folder_button = Button(button_grid[3, 1:2];  PATH_BUTTON_ATTRS...)
 
-    no_port_selected_label = "No port selected"
-
-    initial_port_options = port_options(no_port_selected_label)
-    port = Menu(button_grid[4, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => initial_port_options, :default => 1))...)
-
+    daq_label = Label(button_grid[4, 1], daq_status_text(nothing); merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
     connect = Button(button_grid[4, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
 
     label = Label(button_grid[5, 1], "Frequency: -- Hz\nFile: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
@@ -217,37 +163,10 @@ function make_control_widgets!(button_grid, panelbtn_grid)
     )
 
     return (start_button=start, stop_button=stop, irf_path_textbox=irf_path, irf_button=irf_button,
-            folder_path_textbox=folder_path, folder_button=folder_button, port_menu=port,
+            folder_path_textbox=folder_path, folder_button=folder_button, daq_label=daq_label,
             connect_button=connect, info_label=label, target_freq_textbox=target_freq,
             mode_menu=mode, lifetimes_menu=lifetimes,
-            panel_buttons=panel, no_port_selected_label=no_port_selected_label)
-end
-
-"""
-    start_port_menu_refresher!(fig, port_menu, no_port_label)
-
-Launch a background task that periodically refreshes `port_menu`'s options
-while the figure window is open, and exits once the window is closed.
-"""
-function start_port_menu_refresher!(fig, port_menu, no_port_label)
-    @async begin
-        was_open = false
-
-        while true
-            is_window_open = isopen(fig.scene)
-
-            if is_window_open
-                was_open = true
-                refresh_port_menu!(port_menu; no_port_label=no_port_label)
-            elseif was_open
-                break
-            end
-
-            sleep(1.0)
-        end
-    end
-
-    return nothing
+            panel_buttons=panel)
 end
 
 """
@@ -301,7 +220,7 @@ function make_gui(app, app_run)
         irf_button          = widgets.irf_button,
         folder_path_textbox = widgets.folder_path_textbox,
         folder_button       = widgets.folder_button,
-        port_menu           = widgets.port_menu,
+        daq_label           = widgets.daq_label,
         connect_button      = widgets.connect_button,
         target_freq_textbox = widgets.target_freq_textbox,
         mode_menu           = widgets.mode_menu,
@@ -314,7 +233,6 @@ function make_gui(app, app_run)
         save_progress_axis  = axes.save_progress_axis
     )
 
-    start_port_menu_refresher!(fig, widgets.port_menu, widgets.no_port_selected_label)
     draw_initial_plots!(app, app_run, blocks)
 
     # Axis autoscaling is handled by plotting.jl's autoscale_values!/autoscale_plot!

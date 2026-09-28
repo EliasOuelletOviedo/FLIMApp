@@ -36,7 +36,7 @@ Base.@kwdef struct GuiBlocks
     irf_button::Button
     folder_path_textbox::Textbox
     folder_button::Button
-    port_menu::Menu
+    daq_label::Label
     connect_button::Button
     target_freq_textbox::Textbox
     mode_menu::Menu

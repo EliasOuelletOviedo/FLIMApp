@@ -7,7 +7,7 @@ Wires up:
 - Panel switching (delegates to handlers_layout.jl / handlers_controller.jl /
   handlers_protocol.jl / handlers_console.jl for each panel's own controls)
 - START/PAUSE/RESUME/STOP button actions
-- IRF/data-folder path selection and serial port connect/disconnect
+- IRF/data-folder path selection and DAQ connect/disconnect
 
 Uses Observables for reactive updates and on(...) bindings for event attachment.
 """
@@ -22,6 +22,18 @@ frequency/file readout once an acquisition is actually running.
 """
 function show_status!(blocks, message::AbstractString)
     blocks.info_label.text[] = String(message)
+    return nothing
+end
+
+"""
+    show_daq_session!(blocks, daq)
+
+Reflect the DAQ session (or its absence, `nothing`) on the CONNECT button
+and the DAQ status label.
+"""
+function show_daq_session!(blocks, daq)
+    blocks.connect_button.label[] = daq === nothing ? "CONNECT" : "DISCONNECT"
+    blocks.daq_label.text[] = daq_status_text(daq)
     return nothing
 end
 
@@ -85,7 +97,7 @@ end
 
 Attach all GUI event handlers: panel switching (one function per panel,
 see handlers_layout.jl / handlers_controller.jl / handlers_protocol.jl /
-handlers_console.jl), START/PAUSE/RESUME/STOP, and path/serial-connect
+handlers_console.jl), START/PAUSE/RESUME/STOP, and path/DAQ-connect
 buttons.
 """
 function make_handlers(app, app_run, blocks::GuiBlocks)
@@ -176,37 +188,21 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
     end
 
     on(blocks.connect_button.clicks) do _
-        if app_run.serial_conn !== nothing
-            zero_all_outputs!(app_run.serial_conn)
-
-            try
-                close(app_run.serial_conn)
-                @info "Serial port disconnected"
-            catch e
-                @warn "Error while disconnecting serial port" error=string(e)
-            end
-
-            app_run.serial_conn = nothing
-            blocks.connect_button.label[] = "CONNECT"
+        if app_run.daq !== nothing
+            daq = app_run.daq
+            app_run.daq = nothing
+            disconnect_daq!(daq)
+            show_daq_session!(blocks, nothing)
             return
         end
 
-        selected_port = blocks.port_menu.selection[]
-        if !(selected_port isa AbstractString) || selected_port == "No port selected"
-            @warn "No port selected"
-            show_status!(blocks, "Select a serial port first")
-            return
-        end
+        daq = connect_daq()
+        app_run.daq = daq
+        show_daq_session!(blocks, daq)
 
-        ser = connect_to_port(selected_port)
-        if ser === nothing
-            blocks.connect_button.label[] = "CONNECT"
-            show_status!(blocks, "Could not connect to $selected_port")
-            return
+        if daq === nothing
+            show_status!(blocks, "Could not connect to the DAQ (see console)")
         end
-
-        app_run.serial_conn = ser
-        blocks.connect_button.label[] = "DISCONNECT"
     end
 
     for (key, btn) in panel

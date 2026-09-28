@@ -432,7 +432,7 @@ smooth probability-map segmentation, but possible in principle) — the walk
 then can't close and this returns two empty vectors rather than a
 partial/self-intersecting polygon, so the caller (`run_cellpose_segmentation!`)
 can skip that label safely instead of handing a broken boundary to
-`add_and_track_roi!` (and, downstream, `roi_trigger_buffer`'s hardware scan
+`add_and_track_roi!` (and, downstream, `roi_scan_segments`'s hardware scan
 path).
 """
 function pixel_label_boundary(mask_xy::AbstractMatrix{<:Integer}, label::Integer)::Tuple{Vector{Float64}, Vector{Float64}}
@@ -1137,7 +1137,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         x_offset = (canvas_size - n_cols) ÷ 2
         y_offset = (canvas_size - n_rows) ÷ 2
         image_offset[] = (x_offset, y_offset)
-        # Recorded so roi.jl's trigger-box voltage mapping can apply this
+        # Recorded so roi.jl's galvo voltage mapping can apply this
         # same centering to app_run.rois's coordinates (in this image's own,
         # un-padded pixel space) at Start-button time, long after this popup
         # and its local x_offset/y_offset above have gone away.
@@ -1193,7 +1193,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     end
 
     # Galvo voltage range textboxes: commit straight to app.roi (RoiSettings,
-    # data_types.jl) and persist, so roi_trigger_buffer (roi.jl) picks up the
+    # data_types.jl) and persist, so roi_scan_segments (roi.jl) picks up the
     # edited range next time it reads app.roi, and the range survives across
     # sessions like every other persisted setting.
     for (textbox, field) in ((x_min_textbox, :v_min_x), (x_max_textbox, :v_max_x), (y_min_textbox, :v_min_y), (y_max_textbox, :v_max_y))

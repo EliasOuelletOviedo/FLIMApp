@@ -29,7 +29,7 @@
 #### Analysis & Processing
 - [src/lifetime_analysis.jl](src/lifetime_analysis.jl) - MLE fitting algorithms, IRF/.sdt loading
 - [src/acquisition.jl](src/acquisition.jl) - Playback/Realtime/Save worker tasks
-- [src/serial.jl](src/serial.jl) - Serial port discovery + PID/PWM I/O
+- [src/daq.jl](src/daq.jl) - NI-DAQmx outputs: ROI galvo scan, sync lines, PI commands
 - [src/protocol.jl](src/protocol.jl) - Protocol schedule math
 - [src/session_save.jl](src/session_save.jl) - Realtime-capture session saving
 
@@ -77,7 +77,7 @@ in `run_acquisition_loop!` in the same file
 3. [src/handlers_layout.jl](src/handlers_layout.jl) - Binding and updates
 
 ### For Hardware Integration
-1. [src/serial.jl](src/serial.jl) list_ports() - Serial enumeration
+1. [src/daq.jl](src/daq.jl) - Hardware map, DAQ session, scan and command outputs
 2. [src/lifetime_analysis.jl](src/lifetime_analysis.jl) read_sdt_frame() - File reading
 
 ## Testing

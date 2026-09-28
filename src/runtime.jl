@@ -4,7 +4,7 @@ runtime.jl
 Background task lifecycle for the FLIM application: the consumer/info tasks
 started on acquisition, and the START/PAUSE/RESUME/STOP button handlers that
 launch and tear them down together with the acquisition worker task
-(acquisition.jl), autoscaling (plotting.jl), and serial signaling (serial.jl).
+(acquisition.jl), autoscaling (plotting.jl), and DAQ outputs (daq.jl).
 
 Tasks are launched by start_pressed() and terminated by stop_pressed().
 """
@@ -70,10 +70,10 @@ function consumer_loop(app, app_run, blocks; rate=30, acquisition_mode="Playback
     # are written that hole leaves no trace in the numbering — so every
     # later file lands one ROI off, permanently. `RoiSlotTracker`
     # (acquisition.jl) recovers the real scan slot from the delay between
-    # files instead, seeded with the period the trigger box itself was
-    # programmed with (`app.protocol.scan_time + .shift_time`, read once
-    # here: that's the value uploaded at START, which a later edit to the
-    # textbox does not re-upload).
+    # files instead, seeded with the period the DAQ scan waveform was built
+    # with (`app.protocol.scan_time + .shift_time`, read once here: that's
+    # the waveform started at START, which a later edit to the textbox does
+    # not rebuild).
     #
     # Real-time only. Playback paces files on its own synthetic schedule and
     # Save runs them as fast as it can, so in neither mode does the delay
@@ -378,7 +378,7 @@ and store it on `app_run.worker_task`.
 Launched with `Threads.@spawn`, not `@async`: the worker loop is CPU-bound
 (the MLE fit dominates its frame time, measured ~88% of a loop iteration),
 and `@async` tasks are sticky to the thread they were spawned from — with
-GLMakie's event loop and `consumer_task`/`serial_task`/`infos_task` all
+GLMakie's event loop and `consumer_task`/`output_task`/`infos_task` all
 pinned to the main thread via `@async` (see `start_pressed` below), a
 CPU-bound `@async` worker would block GUI redraw/input for the duration of
 every fit. `Threads.@spawn` lets the scheduler run the worker on a
@@ -390,7 +390,7 @@ which `start_pressed` checks for and warns about below. With a single
 thread it degrades gracefully to the same cooperative scheduling as
 `@async` — never worse, just not better.
 
-`consumer_task` (and `serial_task`/`infos_task`) must stay on `@async`:
+`consumer_task` (and `output_task`/`infos_task`) must stay on `@async`:
 they touch `Observable`s and the GLMakie figure directly, which are not
 safe to mutate concurrently from multiple threads.
 """
@@ -471,7 +471,7 @@ end
 
 Handler called when the START button is clicked. After its guard checks and
 claiming `running[]`/`paused[]` synchronously, the rest of the work — the
-ROI trigger-box upload, setting up the communication channel, resetting all
+ROI galvo scan, setting up the communication channel, resetting all
 time-series observables, and launching four background tasks — happens on
 its own `@async` task that this function does not wait on (see the comment
 above that task in the body for why: this function's own call stack is
@@ -487,7 +487,7 @@ The four background tasks:
   `app_run` observables so that the plots react. Stays on `@async` (pinned
   to the thread it's spawned from, i.e. the GUI thread) since it touches
   `Observable`s/GLMakie, which aren't safe to mutate from multiple threads;
-* **serial_task** - periodically sends PID/PWM commands to the connected device;
+* **output_task** - periodically writes the PI commands to the DAQ command outputs (daq.jl);
 * **infos_task** - refreshes the status label at 1 Hz.
 
 `blocks` is used to read the selected mode/lifetimes menus and to obtain
@@ -525,38 +525,36 @@ function start_pressed(app, app_run, blocks)
     app_run.running[] = true
     app_run.paused[] = false
 
-    # Everything below is real work — the ROI trigger-box upload alone can
-    # be 1000+ blocking serial round trips — so none of it runs directly in
-    # this function's own call stack. start_pressed is invoked synchronously
-    # from GLMakie's own render-loop task: button clicks are dispatched via
+    # Everything below is real work — building the ROI scan waveform,
+    # scanning the data folder, launching the tasks — so none of it runs
+    # directly in this function's own call stack. start_pressed is invoked
+    # synchronously from GLMakie's own render-loop task: button clicks are dispatched via
     # GLFW.PollEvents() from inside that loop's while-loop (GLMakie
     # screen.jl), so this function's call stack *is* that task. Blocking it
     # — even indirectly, e.g. a wait() on some other task — blocks the
     # render loop itself; nothing else can step in to draw a frame while
-    # it's suspended waiting. The previous attempt at this
-    # (`wait(@async build_and_send_roi_trigger_buffer!(...))`) still did
-    # exactly that, which is why the save_progress bar it drives (roi.jl)
-    # stayed invisible. Returning immediately here and doing the real work
-    # on its own task instead — never waited on from this call stack, same
-    # as consumer_task/serial_task/infos_task always have been — is what
-    # actually lets rendering keep happening while this runs.
+    # it's suspended waiting. Returning immediately here and doing the real
+    # work on its own task instead — never waited on from this call stack,
+    # same as consumer_task/output_task/infos_task always have been — is
+    # what actually lets rendering keep happening while this runs.
     @async begin
-        # Position the trigger box (if active/connected) before any
-        # file-reading begins, so the first acquired frame already matches
-        # the first ROI in the scan cycle. No-op (see its own docstring)
-        # unless ROI mode is on, a serial device is connected, and at least
-        # one ROI is drawn.
-        build_and_send_roi_trigger_buffer!(app, app_run)
+        # Start the galvo scan (if ROI mode is on and the DAQ connected)
+        # before any file-reading begins, so the first acquired frame
+        # already matches the first ROI in the scan cycle. No-op (see its
+        # own docstring) unless ROI mode is on, the DAQ is connected, and at
+        # least one ROI is drawn.
+        start_roi_scan!(app, app_run)
 
-        # The GUI stays responsive during that upload now (that's the point
-        # of this task), which makes it newly possible for the user to
-        # click STOP while it's still running — stop_pressed (below) would
-        # see running[] already true and run its shutdown against state
+        # The GUI stays responsive while this task runs, so the user can
+        # click STOP before it finishes — stop_pressed (below) would see
+        # running[] already true and run its shutdown against state
         # (channel/worker_task/...) this function hasn't created yet. Bail
         # out here instead of dispatching a worker the user just asked to
-        # stop before it ever started.
+        # stop before it ever started, and zero the outputs again in case
+        # that STOP landed before the scan above was started.
         if !app_run.running[]
-            @info "Acquisition stopped before it finished starting (during ROI trigger-box upload)"
+            @info "Acquisition stopped before it finished starting"
+            app_run.daq === nothing || zero_all_outputs!(app_run.daq)
             return nothing
         end
 
@@ -613,7 +611,7 @@ function start_pressed(app, app_run, blocks)
         spawn_acquisition_worker!(app_run, selected_mode, app.layout, app.controller, initial_guess, protocol_config)
 
         app_run.consumer_task = @async consumer_loop(app, app_run, blocks; rate=10, acquisition_mode=selected_mode)
-        app_run.serial_task = @async serial_signal_loop(app, app_run; rate=20.0)
+        app_run.output_task = @async command_output_loop(app_run, blocks; rate=20.0)
         app_run.infos_task = @async infos_loop(app_run, blocks.info_label; rate=1)
     end
 
@@ -640,7 +638,7 @@ end
 The five background-task slots, in the order `stop_pressed` tears them down.
 """
 background_tasks(app_run) = (app_run.worker_task, app_run.consumer_task,
-                             app_run.autoscaler_task, app_run.infos_task, app_run.serial_task)
+                             app_run.autoscaler_task, app_run.infos_task, app_run.output_task)
 
 """
     tasks_still_running(app_run)::Bool
@@ -657,9 +655,14 @@ end
 """
     stop_pressed(app_run)
 
-Stop any running acquisition: zero the hardware outputs, clear `running`,
-and close the channel — all synchronously — then `wait` on the background
-tasks from a detached `@async` task rather than inline.
+Stop any running acquisition: clear `running`, zero the hardware outputs
+(stopping the ROI scan), and close the channel — all synchronously — then
+`wait` on the background tasks from a detached `@async` task rather than
+inline. The outputs are zeroed even when nothing is running (CLEAR).
+
+`running` drops before the zeroing so `command_output_loop`, which only
+yields in its `sleep`, can't wake up in between and write one last command
+on top of the zeros.
 
 The `wait` is what makes the difference: `stop_pressed` runs on GLMakie's
 render-loop task (it's a button handler), and waiting there for a worker
@@ -670,20 +673,19 @@ restart until it completes — `start_pressed` overwrites them with the fresh
 run's tasks once they're done.
 """
 function stop_pressed(app_run)
-    if app_run.serial_conn !== nothing
-        zero_all_outputs!(app_run.serial_conn)
-    end
-
     if !app_run.running[]
+        app_run.daq === nothing || zero_all_outputs!(app_run.daq)
         app_run.save_progress[] = NaN
         @info "Not running"
         return
     end
 
-    @info "Stopping acquisition"
-
     app_run.paused[] = false
     app_run.running[] = false
+    app_run.daq === nothing || zero_all_outputs!(app_run.daq)
+
+    @info "Stopping acquisition"
+
     if app_run.channel !== nothing && isopen(app_run.channel)
         close(app_run.channel)
     end

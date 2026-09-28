@@ -2,7 +2,7 @@
 acquisition.jl
 
 Data acquisition worker tasks for the FLIM application: Playback, Realtime,
-and Save modes. Serial port discovery lives in serial.jl; protocol schedule
+and Save modes. Hardware output lives in daq.jl; protocol schedule
 math lives in protocol.jl.
 
 The three modes share ~90% of their logic (sliding-window histogram binning,
@@ -68,9 +68,8 @@ end
 Nominal wall-clock delay between two consecutive acquisition files, in
 seconds: one ROI's scan (`protocol.scan_time`) plus the galvo settle/shift
 onto the next one (`protocol.shift_time`), both in ms. These are the very
-numbers `build_and_send_roi_trigger_buffer!` (roi.jl) programs the trigger
-box's playback timing from, so this is the cadence the hardware is actually
-running at rather than a guess — good enough to seed `RoiSlotTracker`, which
+numbers `roi_scan_waveform` (roi.jl) builds the DAQ scan waveform from, so
+this is the cadence the hardware is actually running at rather than a guess — good enough to seed `RoiSlotTracker`, which
 then refines it against what the files really do. `NaN` if they don't add up
 to a usable period.
 """
@@ -87,7 +86,7 @@ end
 const ROI_SLOT_GAP_WINDOW = 25
 
 # Gaps to observe before trusting the measured period over the nominal one.
-# The nominal period is what the trigger box was programmed with, so it's
+# The nominal period is what the scan waveform was built with, so it's
 # right about the hardware; the measured one also absorbs whatever per-file
 # overhead the source acquisition adds on top, which is what actually sets
 # the spacing on disk.
@@ -118,7 +117,7 @@ reads onto the physical ROI-scan *slots* that produced them, so round-robin
 ROI assignment survives a scan that wrote no file at all.
 
 Holds the nominal file period (`roi_scan_period_s`, from the protocol
-settings the trigger box was programmed with), a running estimate refined
+settings the scan waveform was built with), a running estimate refined
 from the last `ROI_SLOT_GAP_WINDOW` observed gaps, the previous file's
 timestamp and sequence number, and the current slot.
 

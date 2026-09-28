@@ -13,7 +13,6 @@ This module defines the primary structures for application state:
 
 using Observables
 using Base.Threads
-using LibSerialPort: SerialPort
 
 # =============================================================================
 # ACQUISITION SAMPLES (worker -> consumer payload)
@@ -78,8 +77,8 @@ ROI 1 -> 4) — every later file then lands on the wrong ROI, permanently.
 couldn't be stat'ed) — when the source actually wrote it, not when this app
 got around to reading it, so it stays meaningful even when the reader is
 backlogged. It's what makes the hole above detectable: consecutive ROI scans
-are `scan_time + shift_time` ms apart by construction (the trigger box is
-programmed with exactly those numbers, roi.jl), so a gap of ~2x that period
+are `scan_time + shift_time` ms apart by construction (the DAQ scan
+waveform is built from exactly those numbers, roi.jl), so a gap of ~2x that period
 means one scan produced no file. See `RoiSlotTracker`/`next_roi_slot!`
 (acquisition.jl), which `consumer_loop` (runtime.jl) drives to keep
 round-robin ROI assignment aligned through such holes.
@@ -157,9 +156,9 @@ Experimental protocol schedule: `times`/`setpoints` are parallel vectors of
 `PROTOCOL_STEP_COUNT` per-step durations and setpoints.
 
 `points_per_roi`/`spiral_turns`/`scan_time`/`shift_time` are the
-ROI trigger-box scan-buffer parameters (roi.jl), editable from the Protocol
-panel (handlers_protocol.jl) — see `roi_trigger_buffer`/
-`build_and_send_roi_trigger_buffer!` in roi.jl for how they're used.
+ROI galvo-scan parameters (roi.jl), editable from the Protocol panel
+(handlers_protocol.jl) — see `roi_scan_segments`/`roi_scan_waveform` in
+roi.jl for how they're used.
 """
 Base.@kwdef mutable struct ProtocolSettings
     active::Bool = false
@@ -178,8 +177,8 @@ end
     RoiSettings
 
 ROI panel settings. `v_min_x`/`v_max_x`/`v_min_y`/`v_max_y` are the ROI
-trigger-box galvo voltage range (mV) for each axis, editable from the ROI
-popup — see `roi_trigger_buffer` (roi.jl) for how they're used.
+galvo voltage range (mV) for each axis, editable from the ROI popup — see
+`roi_scan_segments` (roi.jl) for how they're used.
 """
 Base.@kwdef mutable struct RoiSettings
     active::Bool = false
@@ -392,6 +391,20 @@ struct RoiCoordinates
 end
 
 """
+    DaqSession
+
+Open NI-DAQmx output session (daq.jl), created by CONNECT and released by
+DISCONNECT. `command_task` is an on-demand AO task on the PI command
+outputs, kept open for the whole session; `scan_tasks` holds the hardware-timed ROI scan tasks (galvo AO, port-0
+lines, and the counter clock pacing them, in that order) while a scan runs,
+empty otherwise. Task handles are DAQmx `TaskHandle`s.
+"""
+mutable struct DaqSession
+    command_task::Ptr{Nothing}
+    scan_tasks::Vector{Ptr{Nothing}}
+end
+
+"""
     AppRun
 
 Runtime state for the application. This structure holds references to
@@ -406,8 +419,8 @@ during execution. It is NOT serialized.
 - `consumer_task::Union{Task, Nothing}`: data consumer and GUI update task
 - `autoscaler_task::Union{Task, Nothing}`: periodic axis autoscaling task
 - `infos_task::Union{Task, Nothing}`: periodic info/status update task
-- `serial_task::Union{Task, Nothing}`: periodic serial command task
-- `serial_conn::Union{SerialPort, Nothing}`: open serial connection, if any
+- `output_task::Union{Task, Nothing}`: periodic PI command output task (daq.jl)
+- `daq::Union{DaqSession, Nothing}`: open DAQ session, if any
 - `ch1::ChannelSeries` / `ch2::ChannelSeries`: per-channel "latest frame" snapshot (Histogram plot only)
 - `ch1_rois::Vector{RoiChannelSeries}` / `ch2_rois::Vector{RoiChannelSeries}`: per-channel,
   per-ROI accumulated time series (every other plot) — always the same
@@ -419,7 +432,7 @@ during execution. It is NOT serialized.
   many ROIs are drawn
 - `protocol_setpoint::Observable{Vector{Float64}}`: time-series of protocol setpoints used by PID
 - `command1::Observable{Vector{Float64}}` / `command2`: time-series of PID command values —
-  NOT split per ROI: these drive real hardware output (serial.jl), not just
+  NOT split per ROI: these drive real hardware output (daq.jl), not just
   the "Command" plot, so they stay a single shared series regardless of ROI count
 - `timestamps::Observable{Vector{Float64}}`: time-series timestamps
 - `i::Observable{UInt32}`: current frame/iteration counter
@@ -438,8 +451,8 @@ during execution. It is NOT serialized.
 - `imported_image_size::Tuple{Int,Int}`: `(width, height)` in pixels of the
   most recently imported ROI-popup image (roi_popup.jl's `im_import_button`
   handler) — `rois[]`'s coordinates are in this image's own pixel space.
-  Read by `roi_trigger_buffer` (roi.jl) to correct for an image shorter
-  than the trigger box's voltage calibration reference (see its docstring).
+  Read by `roi_scan_segments` (roi.jl) to correct for an image shorter
+  than the galvo voltage calibration reference (see its docstring).
   Defaults to `(1024, 1024)`, matching that calibration reference, so a run
   started before any image has been imported this session behaves as if no
   correction were needed.
@@ -452,8 +465,8 @@ mutable struct AppRun
     consumer_task::Union{Task, Nothing}
     autoscaler_task::Union{Task, Nothing}
     infos_task::Union{Task, Nothing}
-    serial_task::Union{Task, Nothing}
-    serial_conn::Union{SerialPort, Nothing}
+    output_task::Union{Task, Nothing}
+    daq::Union{DaqSession, Nothing}
     ch1::ChannelSeries
     ch2::ChannelSeries
     ch1_rois::Vector{RoiChannelSeries}

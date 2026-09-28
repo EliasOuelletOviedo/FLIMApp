@@ -207,6 +207,70 @@ end
     @test FLIMApp.pid_command_from_state(state, 4.0, 100.0, 100.0, false, true) == 100.0
 end
 
+@testset "DAQ command voltage" begin
+    full_scale = FLIMApp.daq_command_full_scale_v
+    @test FLIMApp.command_volts(0.0) == 0.0
+    @test FLIMApp.command_volts(50.0) == full_scale / 2
+    @test FLIMApp.command_volts(100.0) == full_scale
+    # Clamped to 0–100 %; a controller that's off (NaN) outputs 0 V.
+    @test FLIMApp.command_volts(250.0) == full_scale
+    @test FLIMApp.command_volts(-5.0) == 0.0
+    @test FLIMApp.command_volts(NaN) == 0.0
+
+    # Without the NI-DAQmx driver, connecting fails cleanly instead of throwing.
+    if isempty(Base.Libc.Libdl.find_library("nicaiu"))
+        @test FLIMApp.connect_daq() === nothing
+    end
+end
+
+@testset "ROI scan waveform" begin
+    app = AppState(true)
+    app.protocol.points_per_roi = 20
+    app.protocol.scan_time = 95
+    app.protocol.shift_time = 5
+    app_run = AppRun()
+    square(x0, y0) = FLIMApp.RoiCoordinates("roi", [x0, x0 + 40, x0 + 40, x0, x0], [y0, y0, y0 + 40, y0 + 40, y0])
+    rois = [square(100.0, 100.0), square(600.0, 300.0), square(300.0, 800.0)]
+
+    rate = 10_000.0
+    n_scan, n_shift = 950, 50
+    w = FLIMApp.roi_scan_waveform(app, app_run, rois; rate_hz=rate)
+
+    # One cycle: every ROI gets shift_time + scan_time.
+    @test length(w.x) == length(w.y) == length(w.d) == 3 * (n_scan + n_shift)
+    @test length(w.x) / rate ≈ 3 * FLIMApp.roi_scan_period_s(app.protocol)
+
+    line(b) = (w.d .>> b) .& 0x01
+    rising_edges(v) = count(i -> v[i] == 1 && v[i - 1] == 0, 2:length(v))
+    gate = line(FLIMApp.DO_BIT_GATE)
+    for k in 0:2
+        slot = k * (n_scan + n_shift)
+        # Gate low while parked on the center, high while scanning.
+        @test all(==(0), gate[slot + 1 : slot + n_shift])
+        @test all(==(1), gate[slot + n_shift + 1 : slot + n_shift + n_scan])
+        # ROI index on bits 4–7 for the whole slot.
+        @test all(==(k), w.d[slot + 1 : slot + n_shift + n_scan] .>> FLIMApp.DO_ROI_CODE_SHIFT)
+    end
+    @test all(==(1), line(FLIMApp.DO_BIT_ENABLE))
+    @test rising_edges(line(FLIMApp.DO_BIT_ROI)) == 3
+    @test rising_edges(line(FLIMApp.DO_BIT_SEQUENCE)) == 1
+    @test sum(line(FLIMApp.DO_BIT_SEQUENCE)) == round(Int, FLIMApp.daq_sync_pulse_s * rate)
+
+    # mV -> V: parked on the first ROI's center, then its spiral points in
+    # order, each held for an equal share of the scan.
+    segments = FLIMApp.roi_scan_segments(app, app_run, rois)
+    @test w.x[1] == segments[1].center[1] / 1000
+    @test w.y[1] == segments[1].center[2] / 1000
+    held = [(w.x[i], w.y[i]) for i in n_shift + 1 : n_shift + n_scan]
+    @test unique(held) == unique([(p[1] / 1000, p[2] / 1000) for p in segments[1].points])
+    @test maximum(abs, w.x) <= 1.0 && maximum(abs, w.y) <= 1.0    # default ±1000 mV range
+
+    # Out-of-range or non-finite galvo samples are refused before reaching the card.
+    @test FLIMApp.check_galvo_waveform(w.x, w.y) === nothing
+    @test_throws ErrorException FLIMApp.check_galvo_waveform([0.0, 2 * FLIMApp.daq_galvo_limit_v], [0.0, 0.0])
+    @test_throws ErrorException FLIMApp.check_galvo_waveform([0.0, NaN], [0.0, 0.0])
+end
+
 @testset "acquisition helpers" begin
     @test FLIMApp.initial_guess_for_lifetimes("1 lifetime") == [3.0, 0.0, 5.0e-5]
     @test length(FLIMApp.initial_guess_for_lifetimes("2 lifetimes")) == 5

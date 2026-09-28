@@ -39,7 +39,8 @@ include("gui_themes.jl")          # 3. UI styling (reuses config.jl's theme dict
 include("gui_blocks.jl")          # 3b. GuiBlocks: typed container of GUI elements
 include("path_utils.jl")          # 4. Path picker/cache helpers
 include("smoothing.jl")           # 5. Lifetime smoothing/Kalman helpers
-include("serial.jl")              # 6. Serial port discovery + PID/PWM I/O
+include("io/DAQmx.jl")            # 6. NI-DAQmx bindings (ccall on nicaiu)
+include("daq.jl")                 # 6b. DAQ outputs: galvo scan, sync lines, PI commands
 include("protocol.jl")            # 7. Protocol schedule math
 include("plotting.jl")            # 8. Axis autoscaling + plot-series lookup
 include("io/SdtFile.jl")          # 9. .sdt block parser (used by read_sdt_frame below)

@@ -43,8 +43,11 @@ include("path_utils.jl")
 # Smoothing/Kalman helpers used by acquisition and runtime
 include("smoothing.jl")
 
-# Serial port discovery + PID/PWM command I/O (standalone)
-include("serial.jl")
+# NI-DAQmx bindings (ccall on nicaiu; resolved only when a function is called)
+include("io/DAQmx.jl")
+
+# Hardware output through DAQmx: galvo scan, sync lines, PI commands (depends on data_types.jl)
+include("daq.jl")
 
 # Protocol schedule math (standalone)
 include("protocol.jl")
@@ -67,11 +70,11 @@ include("acquisition.jl")
 # Realtime-capture session saving (depends on data_types.jl, path_utils.jl)
 include("session_save.jl")
 
-# ROI trigger-box scan-buffer generation (depends on data_types.jl for
-# RoiCoordinates; used by runtime.jl's start_pressed)
+# ROI galvo-scan waveform generation (depends on data_types.jl for
+# RoiCoordinates and daq.jl; used by runtime.jl's start_pressed)
 include("roi.jl")
 
-# Background task lifecycle (depends on acquisition/protocol/serial/session_save/plotting/smoothing/roi)
+# Background task lifecycle (depends on acquisition/protocol/daq/session_save/plotting/smoothing/roi)
 include("runtime.jl")
 
 # Protocol popup UI module

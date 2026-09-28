@@ -1,26 +1,22 @@
 """
 roi.jl
 
-ROI trigger-box scan-buffer generation. When ROI mode is active
-(`app.roi.active`) and a serial trigger box is connected
-(`app_run.serial_conn`), `build_and_send_roi_trigger_buffer!` computes a
-galvo scan buffer for the currently-drawn ROIs (`app_run.rois`) and uploads
-it to the device — called once from `start_pressed` (runtime.jl), before
-the acquisition worker is dispatched, so the trigger box is positioned
-before files start arriving.
+ROI galvo-scan generation. When ROI mode is active (`app.roi.active`) and
+the DAQ is connected (`app_run.daq`), `start_roi_scan!` builds one cycle of
+galvo waveform and port-0 sync pattern for the currently-drawn ROIs
+(`app_run.rois`) and hands it to the card, which loops it until STOP —
+called once from `start_pressed` (runtime.jl), before the acquisition
+worker is dispatched, so the scan is already running when files start
+arriving.
 
 Scan-timing parameters (points per ROI, spiral turns, scan/shift time)
 live on `app.protocol` (`ProtocolSettings`, data_types.jl) — GUI-editable
 and persisted, via the Protocol panel (handlers_protocol.jl). The galvo
 voltage range (`v_min_x`/`v_max_x`/`v_min_y`/`v_max_y`) lives on `app.roi`
 (`RoiSettings`, data_types.jl) the same way, editable from the ROI popup
-(roi_popup.jl). The remaining tunables below stay plain (non-persisted)
-module variables, hand-edited directly in this file.
-
-Ported from the standalone prototype `Test_roi_trigger_box.jl` (same
-directory): that script loaded its own image/ROI-zip files and only
-plotted the result. Here the ROI source is `app_run.rois` (already the
-live ROI set — see roi_popup.jl) and the buffer is actually uploaded.
+(roi_popup.jl). The DAQ wiring and sample rate are in daq.jl; the remaining
+tunable below stays a plain (non-persisted) module variable, hand-edited
+directly in this file.
 """
 
 using Statistics
@@ -29,40 +25,21 @@ using Statistics
 # TUNABLE PARAMETERS
 # =============================================================================
 # Plain variables, not `const` — meant to be hand-edited in this file
-# (not promoted to config.jl) as the trigger-box setup is tuned.
+# (not promoted to config.jl) as the galvo setup is tuned.
 
-# Reference image size (pixels, square) the trigger-box voltage extremes
-# below were calibrated against: a 1024x1024 image maps its full pixel
-# extent onto the full voltage range. Real acquisitions are always 1024
-# wide but can be shorter than 1024 tall (e.g. a 1024x512 scan) — rather
-# than rescale a shorter image to fill the full voltage range (which would
-# use a *different* voltage-per-pixel scale than this calibration),
-# roi_trigger_buffer shifts a shorter image's ROI coordinates so they sit
+# Reference image size (pixels, square) the galvo voltage range (app.roi)
+# was calibrated against: a 1024x1024 image maps its full pixel extent onto
+# the full voltage range. Real acquisitions are always 1024 wide but can be
+# shorter than 1024 tall (e.g. a 1024x512 scan) — rather than rescale a
+# shorter image to fill the full voltage range (which would use a
+# *different* voltage-per-pixel scale than this calibration),
+# roi_scan_segments shifts a shorter image's ROI coordinates so they sit
 # centered within this same 1024x1024 reference frame before converting to
 # voltage, using the actual imported image size (app_run.imported_image_size,
 # recorded at import time by roi_popup.jl) to compute that shift — matching
 # roi_popup.jl's own canvas-centering (image_offset) for the on-screen
 # display of that same image.
 roi_voltage_calibration_size = 1024
-
-# Delay between writing a command and reading the trigger box's response
-# (send_roi_trigger_command), giving the device time to process and reply
-# before the read is attempted. A real upload sends on the order of 1000+
-# of these round trips (2 per scan point, plus overhead commands), so too
-# short a delay here risks a read finding no data yet and blocking until
-# connect_to_port's read timeout (serial.jl) — surfacing as
-# LibSerialPort.Timeout() and aborting the whole upload on one slow reply.
-# Raise if timeouts persist; lower if uploads feel unnecessarily slow.
-roi_trigger_command_delay_s = 1e-6
-
-# How many times build_and_send_roi_trigger_buffer! restarts the *entire*
-# build-and-upload sequence (buffer rebuild, full point re-upload, arming
-# commands) from scratch after a failure — e.g. a LibSerialPort.Timeout()
-# partway through — before giving up and logging an error. Not a per-command
-# retry (see send_roi_trigger_command): a failure partway through leaves the
-# device's buffer in an unknown partial state, so the only reliable recovery
-# is to clear and redo the whole thing, not resume from wherever it broke.
-roi_trigger_buffer_max_attempts = 3
 
 # =============================================================================
 # GEOMETRY: uniform-density spiral scan pattern conforming to a ROI's shape
@@ -309,83 +286,23 @@ function optimize_centers(points::AbstractVector{<:Tuple{<:Real,<:Real}})
 end
 
 # =============================================================================
-# SERIAL PROTOCOL: trigger-box specific commands
-# =============================================================================
-#
-# Distinct from serial.jl's send_command(serial_conn, command_str), which is
-# fire-and-forget for the high-rate PID loop: uploading the scan buffer
-# needs to read each command's response back to detect an "ERR" reply.
-
-function send_roi_trigger_command(serial_conn, command_str::AbstractString)::String
-    write(serial_conn, command_str)
-    sleep(roi_trigger_command_delay_s)
-    return strip(read(serial_conn, String))
-end
-
-"""
-    send_roi_trigger_points!(serial_conn, pts; progress_cb=nothing)
-
-Clear the trigger box's buffer and upload `pts`. `progress_cb`, if given, is
-called with each new integer percent (0-100) as the upload advances —
-throttled to only fire on an actual percent increase, the same idiom
-`start_save` uses for save progress (acquisition.jl), so a callback wired to
-an `Observable` isn't notified on every single point.
-"""
-function send_roi_trigger_points!(serial_conn, pts::Vector{Tuple{Int64,Int64}}; progress_cb::Union{Nothing, Function} = nothing)
-    response = send_roi_trigger_command(serial_conn, "C Z\n")
-    occursin("ERR", response) && @warn "Trigger box error clearing buffer" response=response
-
-    n_pts = length(pts)
-    last_progress_pct = -1
-
-    for (idx, (x, y)) in enumerate(pts)
-        response = send_roi_trigger_command(serial_conn, "A 0 AB 1 $idx $x\n")
-        occursin("ERR", response) && @warn "Trigger box error setting buffer point" axis=1 idx=idx value=x response=response
-
-        response = send_roi_trigger_command(serial_conn, "A 0 AB 2 $idx $y\n")
-        occursin("ERR", response) && @warn "Trigger box error setting buffer point" axis=2 idx=idx value=y response=response
-
-        if progress_cb !== nothing
-            progress_pct = clamp(floor(Int, (idx * 100) / n_pts), 0, 100)
-            if progress_pct > last_progress_pct
-                for pct in (last_progress_pct + 1):progress_pct
-                    try
-                        progress_cb(pct)
-                    catch e
-                        @warn "ROI trigger-box progress callback failed" error=string(e)
-                        progress_cb = nothing
-                        break
-                    end
-                end
-                last_progress_pct = progress_pct
-            end
-        end
-    end
-
-    return nothing
-end
-
-# =============================================================================
-# BUFFER ASSEMBLY
+# WAVEFORM ASSEMBLY
 # =============================================================================
 
-# Pixel coordinate -> galvo voltage, matching Test_roi_trigger_box.jl's
-# mapping (linear over the image span, sign-flipped for the galvo's
-# mirrored axis convention).
+# Pixel coordinate -> galvo voltage (mV): linear over the image span,
+# sign-flipped for the galvo's mirrored axis convention.
 to_voltage(coord::Real, n_pixels::Real, v_min::Real, v_max::Real) =
     -(v_min + (coord - 1) * (v_max - v_min) / (n_pixels - 1))
 
 """
-    roi_trigger_buffer(app, app_run, rois::Vector{RoiCoordinates})::Vector{Tuple{Int64,Int64}}
+    roi_scan_segments(app, app_run, rois::Vector{RoiCoordinates})
 
-Build the galvo trigger-box scan buffer for `rois`, in voltage units: an
-optimized-order tour across ROI centers (`optimize_centers`), each followed
-by a uniform-density spiral scan of that ROI's shape
-(`shape_spiral_points`), with a settle dwell before entering each ROI after
-the first, and a final dwell back at the first ROI's center to close the
-cycle. Scan timing (`app.protocol.points_per_roi`/`.spiral_turns`/
-`.scan_time`/`.shift_time`) is read from `app` — GUI-editable via the
-Protocol panel, handlers_protocol.jl.
+The galvo path for `rois`, in mV: one `(; center, points)` per ROI, in an
+optimized visiting order across ROI centers (`optimize_centers`), where
+`points` is a uniform-density spiral scan of that ROI's shape
+(`shape_spiral_points`) starting near `center`. Spiral density and turns
+(`app.protocol.points_per_roi`/`.spiral_turns`) are read from `app` —
+GUI-editable via the Protocol panel, handlers_protocol.jl.
 
 `rois`' coordinates are in `app_run.imported_image_size`'s own pixel space,
 which can be shorter (in height) than `roi_voltage_calibration_size`'s
@@ -393,12 +310,7 @@ which can be shorter (in height) than `roi_voltage_calibration_size`'s
 reference frame before conversion to voltage; see that constant's
 docstring for why.
 """
-function roi_trigger_buffer(app, app_run, rois::Vector{RoiCoordinates})::Vector{Tuple{Int64,Int64}}
-    isempty(rois) && return Tuple{Int64,Int64}[]
-
-    points_per_roi = app.protocol.points_per_roi
-    dwell_points = round(Int, app.protocol.shift_time / app.protocol.scan_time * points_per_roi)
-
+function roi_scan_segments(app, app_run, rois::Vector{RoiCoordinates})
     v_min_x, v_max_x = app.roi.v_min_x, app.roi.v_max_x
     v_min_y, v_max_y = app.roi.v_min_y, app.roi.v_max_y
 
@@ -410,8 +322,7 @@ function roi_trigger_buffer(app, app_run, rois::Vector{RoiCoordinates})::Vector{
     ordered_centers = optimize_centers(centers)
     ordered_rois = [rois[findfirst(==(c), centers)] for c in ordered_centers]
 
-    buffer = Tuple{Int64,Int64}[]
-    first_center_v = nothing
+    segments = NamedTuple{(:center, :points), Tuple{Tuple{Int64,Int64}, Vector{Tuple{Int64,Int64}}}}[]
 
     for roi in ordered_rois
         cx, cy = centroid_center(roi.xs, roi.ys)
@@ -423,108 +334,97 @@ function roi_trigger_buffer(app, app_run, rois::Vector{RoiCoordinates})::Vector{
         xs_v = [to_voltage(x + x_shift, roi_voltage_calibration_size, v_min_x, v_max_x) for x in roi.xs]
         ys_v = [to_voltage(y + y_shift, roi_voltage_calibration_size, v_min_y, v_max_y) for y in roi.ys]
 
-        if first_center_v === nothing
-            first_center_v = center_v
-        else
-            append!(buffer, fill(center_v, dwell_points))
-        end
-
-        append!(buffer, shape_spiral_points(points_per_roi, xs_v, ys_v; center=center_v, turns=app.protocol.spiral_turns))
+        points = shape_spiral_points(app.protocol.points_per_roi, xs_v, ys_v; center=center_v, turns=app.protocol.spiral_turns)
+        push!(segments, (; center = center_v, points))
     end
 
-    append!(buffer, fill(first_center_v, dwell_points))
-
-    return buffer
+    return segments
 end
 
 """
-    build_and_send_roi_trigger_buffer!(app, app_run)
+    roi_scan_waveform(app, app_run, rois; rate_hz=daq_scan_rate_hz) -> (; x, y, d)
 
-If ROI mode is active (`app.roi.active`) and a serial trigger box is
-connected (`app_run.serial_conn`), build the scan buffer for the currently
-drawn ROIs (`app_run.rois`) and upload it, then arm the device's playback
-timing. A no-op (with a log message) if ROI mode is off, no device is
-connected, or no ROIs are drawn.
+One full cycle of the ROI scan sampled at `rate_hz`: galvo X/Y in volts and
+one port-0 byte per sample (`DO_BIT_*`, daq.jl). The card loops it
+(`start_scan_output!`, daq.jl), and every cycle gives each ROI of
+`roi_scan_segments`, in that order:
 
-On failure (e.g. a `LibSerialPort.Timeout()` partway through), restarts the
-whole sequence from scratch — buffer rebuild, full re-upload, arming
-commands — up to `roi_trigger_buffer_max_attempts` times, re-checking
-`app_run.serial_conn` on each attempt in case a concurrent disconnect
-(serial.jl's `serial_signal_loop`) cleared it. Only gives up (logs an error,
-swallowed, not raised) after that many failures — a trigger-box upload
-failure shouldn't block acquisition from starting.
+- `app.protocol.shift_time` ms parked on its center while the galvos
+  settle, gate low;
+- `app.protocol.scan_time` ms on its spiral, each point held for an equal
+  share of that time, gate high, with the ROI sync pulse on its first
+  samples (plus the sequence pulse for the first ROI).
 
-Drives the point-upload portion (`send_roi_trigger_points!`, the dominant
-share of the round trips) through `app_run.save_progress` — the same
-Observable/progress bar `start_save` (acquisition.jl) uses, safe to reuse
-since this always runs and completes before `start_pressed` (runtime.jl)
-dispatches the acquisition worker, so the two never overlap in time.
-Restored to `NaN` (hidden, GUI.jl) after every attempt, success or not.
+The enable line and the ROI index (bits 4–7) are set on every sample. One
+cycle lasts `length(rois) × (scan_time + shift_time)` ms, the file period
+`roi_scan_period_s` (acquisition.jl) assumes.
 """
-function build_and_send_roi_trigger_buffer!(app, app_run)
+function roi_scan_waveform(app, app_run, rois::Vector{RoiCoordinates}; rate_hz::Real = daq_scan_rate_hz)
+    n_scan  = round(Int, app.protocol.scan_time * rate_hz / 1000)
+    n_shift = round(Int, app.protocol.shift_time * rate_hz / 1000)
+    n_scan >= 1 || error("scan time of $(app.protocol.scan_time) ms is shorter than one sample at $(rate_hz) Hz")
+    n_pulse = clamp(round(Int, daq_sync_pulse_s * rate_hz), 1, n_scan)
+
+    x = Float64[]
+    y = Float64[]
+    d = UInt8[]
+
+    for (k, segment) in enumerate(roi_scan_segments(app, app_run, rois))
+        code = (UInt8((k - 1) & 0x0f) << DO_ROI_CODE_SHIFT) | do_bit(DO_BIT_ENABLE)
+
+        append!(x, fill(segment.center[1] / 1000, n_shift))
+        append!(y, fill(segment.center[2] / 1000, n_shift))
+        append!(d, fill(code, n_shift))
+
+        n_points = length(segment.points)
+        held = [segment.points[fld((j - 1) * n_points, n_scan) + 1] for j in 1:n_scan]
+        append!(x, [p[1] / 1000 for p in held])
+        append!(y, [p[2] / 1000 for p in held])
+
+        scan_d = fill(code | do_bit(DO_BIT_GATE), n_scan)
+        scan_d[1:n_pulse] .|= do_bit(DO_BIT_ROI)
+        k == 1 && (scan_d[1:n_pulse] .|= do_bit(DO_BIT_SEQUENCE))
+        append!(d, scan_d)
+    end
+
+    return (; x, y, d)
+end
+
+"""
+    start_roi_scan!(app, app_run)
+
+If ROI mode is active (`app.roi.active`) and the DAQ is connected
+(`app_run.daq`), build the scan waveform for the currently drawn ROIs
+(`app_run.rois`) and start it looping on the card. A no-op (with a log
+message) if ROI mode is off, the DAQ isn't connected, or no ROIs are drawn.
+
+A failure (a galvo sample over `daq_galvo_limit_v`, a DAQmx error) is
+logged, not raised, and leaves the scan stopped — it shouldn't block
+acquisition from starting.
+"""
+function start_roi_scan!(app, app_run)
     if !app.roi.active
         return nothing
     end
 
-    if app_run.serial_conn === nothing
-        @info "ROI mode is active but no serial device is connected; skipping trigger-box upload"
+    daq = app_run.daq
+    if daq === nothing
+        @info "ROI mode is active but the DAQ is not connected; skipping the galvo scan"
         return nothing
     end
 
     rois = app_run.rois[]
     if isempty(rois)
-        @info "ROI mode is active but no ROIs are drawn; skipping trigger-box upload"
+        @info "ROI mode is active but no ROIs are drawn; skipping the galvo scan"
         return nothing
     end
 
-    for attempt in 1:roi_trigger_buffer_max_attempts
-        serial_conn = app_run.serial_conn
-        if serial_conn === nothing
-            @warn "Serial device disconnected while retrying ROI trigger-box upload; giving up" attempt=attempt
-            return nothing
-        end
-
-        try
-            @info "Building ROI trigger-box scan buffer" n_rois=length(rois) points_per_roi=app.protocol.points_per_roi image_size=app_run.imported_image_size attempt=attempt
-            buffer = roi_trigger_buffer(app, app_run, rois)
-
-            @info "Uploading ROI trigger-box scan buffer" n_points=length(buffer)
-            app_run.save_progress[] = 0.0
-            roi_progress_cb = function (pct)
-                app_run.save_progress[] = Float64(pct)
-                return nothing
-            end
-            send_roi_trigger_points!(serial_conn, buffer; progress_cb=roi_progress_cb)
-
-            scan_time = app.protocol.scan_time
-            shift_time = app.protocol.shift_time
-            n_rois = length(rois)
-            f = 1000.0 / ((scan_time + shift_time) * n_rois)
-            duty_percent = 100 - round(Int64, 100 * shift_time / (shift_time + scan_time))
-
-            response = send_roi_trigger_command(serial_conn, "S 1 D 1 R 1\n")
-            response *= send_roi_trigger_command(serial_conn, "A 1 AA $f $(length(buffer))\n")
-            response *= send_roi_trigger_command(serial_conn, "A 1 DD 1 $(f * n_rois) $duty_percent 2 $n_rois 10\n")
-            response *= send_roi_trigger_command(serial_conn, "A 1 DD 1 $(f * n_rois) $duty_percent 2 1 10\n")
-            # response *= send_roi_trigger_command(serial_conn, "A 1 DD 1 $f $duty_percent 2 1 $duty_percent\n")
-            response *= send_roi_trigger_command(serial_conn, "A 0 DO 3 1\n")
-
-            if occursin("ERR", response)
-                @warn "Trigger box error arming playback timing" response=response
-            else
-                @info "ROI trigger-box scan buffer uploaded and armed"
-            end
-
-            return nothing
-        catch e
-            if attempt < roi_trigger_buffer_max_attempts
-                @warn "Failed to build/send ROI trigger-box scan buffer, restarting from scratch" attempt=attempt max_attempts=roi_trigger_buffer_max_attempts error=string(e)
-            else
-                @error "Failed to build/send ROI trigger-box scan buffer after $roi_trigger_buffer_max_attempts attempts" error=string(e)
-            end
-        finally
-            app_run.save_progress[] = NaN
-        end
+    try
+        waveform = roi_scan_waveform(app, app_run, rois)
+        start_scan_output!(daq, waveform.x, waveform.y, waveform.d)
+        @info "ROI galvo scan started" n_rois=length(rois) n_samples=length(waveform.x) rate_hz=daq_scan_rate_hz image_size=app_run.imported_image_size
+    catch e
+        @error "Failed to start the ROI galvo scan" error=string(e)
     end
 
     return nothing

@@ -2,8 +2,8 @@
 handlers_protocol.jl
 
 Protocol panel: the Protocol/ROI popup launch buttons and their active
-toggles, plus the ROI trigger-box scan-timing spinners (roi.jl reads these
-back off app.protocol at Start). Split out of handlers.jl's former single
+toggles, plus the ROI galvo-scan timing spinners (roi.jl reads these back
+off app.protocol at Start). Split out of handlers.jl's former single
 make_handlers function.
 """
 
@@ -12,7 +12,7 @@ make_handlers function.
                              protocol_popup_screen, roi_popup_screen; force=false)
 
 Render the Protocol panel (Protocol/ROI buttons + active toggles + ROI
-trigger-box scan-timing spinners) and wire up its controls. No-op if the
+galvo-scan timing spinners) and wire up its controls. No-op if the
 Protocol panel is already showing, unless `force=true`.
 """
 function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,

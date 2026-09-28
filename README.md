@@ -37,7 +37,7 @@ FLIMApp/
 │   ├── gui_blocks.jl           # GuiBlocks: typed container of GUI elements
 │   ├── path_utils.jl           # Shared path-picker/cache helpers
 │   ├── smoothing.jl            # Lifetime smoothing/Kalman helpers
-│   ├── serial.jl               # Serial port discovery + PID/PWM command I/O
+│   ├── daq.jl                  # NI-DAQmx outputs: ROI galvo scan, sync lines, PI commands
 │   ├── protocol.jl             # Protocol schedule math
 │   ├── plotting.jl             # Plot-axis autoscaling and plot-series lookup
 │   ├── lifetime_analysis.jl   # Lifetime fitting algorithms (MLE), IRF loading
@@ -54,6 +54,7 @@ FLIMApp/
 │   ├── GUI.jl                  # Makie GUI construction
 │   └── io/
 │       ├── SdtFile.jl          # SDT block parser; used by lifetime_analysis.jl's read_sdt_frame
+│       ├── DAQmx.jl            # Minimal NI-DAQmx bindings (ccall on nicaiu); used by daq.jl
 │       └── ImageJROI.jl        # WIP: ImageJ ROI reader (not yet wired in)
 ├── test/
 │   └── runtests.jl             # Test suite (run with `Pkg.test()`)
@@ -152,7 +153,7 @@ compressed (ZIP) and uncompressed formats.
 module FLIMApp
     config.jl
         ↓
-    data_types.jl   gui_themes.jl   path_utils.jl   smoothing.jl   serial.jl   protocol.jl
+    data_types.jl   gui_themes.jl   path_utils.jl   smoothing.jl   daq.jl   protocol.jl
         ↓
     plotting.jl
         ↓
@@ -195,11 +196,13 @@ Maximum Likelihood Estimation fitting for fluorescence decay, plus IRF/.sdt load
 - Convolution with photon transport
 - Iterative optimization using BFGS/L-BFGS-B
 
-#### `serial.jl`
-Serial hardware I/O:
-- Port enumeration (Windows/macOS/Linux)
-- Connecting to a device
-- PID/PWM command I/O
+#### `daq.jl`
+Hardware output through NI-DAQmx (`io/DAQmx.jl`), with the device/channel map
+at the top of the file:
+- CONNECT/DISCONNECT: device check, reset, zeroing
+- ROI galvo scan + port-0 sync lines, hardware-timed on a counter clock and
+  looped by the card (waveform built in `roi.jl`)
+- PI command outputs (analog, 0–100 % → 0–5 V), refreshed during acquisition
 
 #### `protocol.jl`
 Experimental protocol schedule math: converting the protocol UI's times/setpoints into a lookup used during acquisition.
@@ -222,7 +225,7 @@ Background task lifecycle:
 - **consumer_loop**: Data streaming and plotting
 - **infos_loop**: Status/frequency display
 - START/PAUSE/RESUME/STOP button handlers, which launch/tear down the worker,
-  consumer, serial, and infos tasks together
+  consumer, command-output, and infos tasks together
 
 #### `GUI.jl` & `gui_themes.jl`
 Makie-based user interface:
@@ -249,7 +252,7 @@ Block on display (event loop)
   ↓
 On button press → start_pressed()
   ↓
-Launch worker (acquisition.jl) + consumer + serial + infos tasks
+Launch worker (acquisition.jl) + consumer + command-output + infos tasks
   ↓
 Worker reads .sdt iteratively, fits lifetimes, sends to channel
   ↓
@@ -330,8 +333,8 @@ mle_reconvolution_fit(irf, data; params, gating_function, ...)::Vector
 conv_irf_data(x_data, params, irf; ...)::Vector
     Convolve IRF with decay model.
 
-list_ports()::Vector{String}
-    Enumerate available serial devices.
+connect_daq()::Union{DaqSession, Nothing}
+    Check, reset and zero the NI devices named in daq.jl's hardware map.
 ```
 
 ## Troubleshooting
