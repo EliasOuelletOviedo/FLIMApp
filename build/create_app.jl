@@ -16,14 +16,16 @@ this script on each platform you want a binary for:
   unsigned (Gatekeeper).
 - **Windows**: produces `dist/FLIMApp/`, with `FLIMApp.bat` at its root.
   Double-click the .bat (or make a shortcut to it). It sets the thread
-  count and starts `bin\\FLIMApp.exe`.
+  count and starts `bin\\FLIMApp.exe` at high priority with the bench
+  config shipped next to it (`config\\bench.toml`, edit it there).
 
 Either way the raw PackageCompiler output also remains directly runnable
 from a terminal (`.../bin/FLIMApp`).
 
-The launcher on both platforms sets `JULIA_NUM_THREADS=auto`: the
-acquisition worker runs on its own thread (see runtime.jl) and needs a
-second thread to keep the GUI responsive during fits. It also passes
+The launcher on both platforms sets `JULIA_NUM_THREADS=3,1` (plan.md §2):
+one interactive thread for the GUI, and worker threads for the DAQ loop,
+the journal and the analysis, so neither a card read nor a fit can freeze
+the window. It also passes
 `--gcthreads=<cores>,1` (no environment-variable equivalent exists for this
 one, unlike JULIA_NUM_THREADS, so it has to be a CLI arg to the launched
 binary) -- maxing out GC mark-phase parallelism plus concurrent sweeping
@@ -61,6 +63,10 @@ create_app(
     incremental=true,
     precompile_execution_file=joinpath(ROOT, "build", "precompile_app.jl")
 )
+
+# The bench config is read at launch, not compiled in: ship it next to the
+# executable (the launchers below pass its path) so it can be edited there.
+cp(joinpath(ROOT, "config"), joinpath(APP_COMPILE_DIR, "config"); force=true)
 
 if Sys.isapple()
     # Wrap the PackageCompiler output into a real macOS .app bundle so it is
@@ -109,15 +115,14 @@ if Sys.isapple()
     write(launcher,
         """
         #!/bin/bash
-        # FLIMApp launcher: locate the bundled app and run it with threads
-        # enabled (the acquisition worker needs its own thread, runtime.jl)
-        # and GC mark/sweep parallelism maxed out (see create_app.jl's
-        # docstring for why -- reduces GC-pause tail latency in the
-        # acquisition loop).
+        # FLIMApp launcher: locate the bundled app and run it with 3 worker
+        # threads + 1 interactive thread (plan.md section 2), GC mark/sweep
+        # parallelism maxed out (see create_app.jl's docstring for why --
+        # reduces GC-pause tail latency), and the bundled bench config.
         DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-        export JULIA_NUM_THREADS=auto
+        export JULIA_NUM_THREADS=3,1
         NCORES="\$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-        exec "\$DIR/../Resources/app/bin/FLIMApp" --gcthreads="\$NCORES",1
+        exec "\$DIR/../Resources/app/bin/FLIMApp" --gcthreads="\$NCORES",1 "\$DIR/../Resources/app/config/bench.toml"
         """)
     chmod(launcher, 0o755)
 
@@ -127,13 +132,13 @@ if Sys.isapple()
     println("Double-click it in Finder (first time: right-click -> Open, since it is unsigned).")
 elseif Sys.iswindows()
     # The .exe is already double-clickable; add a .bat launcher at the
-    # bundle root that also enables threading.
+    # bundle root that also sets the threads, the priority and the config.
     bat = joinpath(APP_COMPILE_DIR, "FLIMApp.bat")
     write(bat,
         """
         @echo off
-        set JULIA_NUM_THREADS=auto
-        start "" "%~dp0bin\\FLIMApp.exe" --gcthreads=%NUMBER_OF_PROCESSORS%,1
+        set JULIA_NUM_THREADS=3,1
+        start "FLIMApp" /high "%~dp0bin\\FLIMApp.exe" --gcthreads=%NUMBER_OF_PROCESSORS%,1 "%~dp0config\\bench.toml"
         """)
 
     println()

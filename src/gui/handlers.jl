@@ -19,8 +19,8 @@ effects come back through the refresh tick (refresh.jl).
 
 Write a short user-facing message to the info label — used to surface
 failures (no IRF, missing data folder, connection error) in the window
-instead of only in the console log. `infos_loop` overwrites it with the live
-frequency/file readout once an acquisition is actually running.
+instead of only in the console log. The refresh tick (refresh.jl) overwrites
+it with the live frequency/file readout once an acquisition is running.
 """
 function show_status!(blocks, message::AbstractString)
     blocks.info_label.text[] = String(message)

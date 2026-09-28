@@ -6,5 +6,5 @@
 # window is closed and the DAQ loop has zeroed the outputs.
 using FLIMApp
 
-fig = FLIMApp.run_app(isempty(ARGS) ? FLIMApp.default_bench_config_path() : ARGS[1])
+fig = FLIMApp.run_app(FLIMApp.config_path_from_args(ARGS))
 FLIMApp.wait_for_window(fig)

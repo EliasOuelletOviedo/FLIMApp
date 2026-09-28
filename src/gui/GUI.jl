@@ -235,8 +235,8 @@ function make_gui(app, app_run)
 
     draw_initial_plots!(app, app_run, blocks)
 
-    # Axis autoscaling is handled by plotting.jl's autoscale_values!/autoscale_plot!
-    # (called directly from consumer_loop on the axes stored in `blocks`).
+    # Curves and axis limits are kept current by the refresh tick
+    # (refresh.jl), started by run_app once the window is shown.
 
     return fig, blocks
 end

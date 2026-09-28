@@ -52,3 +52,11 @@ let protocol = FLIMApp.ProtocolSettings(
     FLIMApp.protocol_setpoint_at(protocol, 15.0)
     FLIMApp.normalize_protocol_config(protocol)
 end
+
+# --- bench config and the DAQ loop's iteration code (no cards, no threads) ----
+let cfg = FLIMApp.bench_config_from_dict(Dict{String, Any}(
+        "hardware" => Dict{String, Any}("backend" => "simulation"),
+        "journal" => Dict{String, Any}("directory" => mktempdir())))
+    FLIMApp.warm_up_loop!(cfg)
+    FLIMApp.load_bench_config(FLIMApp.default_bench_config_path())
+end

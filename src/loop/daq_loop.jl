@@ -214,6 +214,10 @@ function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s
     return nothing
 end
 
+# Below this, a garbage-collector pause (a few hundred ms have been measured
+# during heavy Playback fitting, see the Console panel) can miss a slot.
+const SHORT_DEADLINE_S = 0.5
+
 """
     run_scan!(hw, cfg, ex, request)
 
@@ -248,7 +252,9 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
     readback = zeros(n_signals, max(n, n_entry))
     n_read = Ref{Int32}(0)
     written_commands = zeros(2, lead + 1)
-    pool = cfg.journal_readback ? ReadbackPool(n_signals, max(n, n_entry), 8) : nothing
+    # Enough slot buffers for the journal to fall three batches behind.
+    n_pool = max(8, ceil(Int, 3 * cfg.journal_flush_s / slot_duration_s(pattern)) + 2)
+    pool = cfg.journal_readback ? ReadbackPool(n_signals, max(n, n_entry), n_pool) : nothing
     stride = max(1, cld(n, cfg.max_points_per_line))
     reset_readback_view!(ex.readback, cfg.readback_signals, cld(n, stride), stride / cfg.sample_rate_hz)
 
@@ -257,6 +263,12 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
         "$(slots_per_cycle(pattern)) ROI(s), $(round(1000 * slot_duration_s(pattern), digits=1)) ms slots, $lead ahead" :
         "commands only, $(round(1000 * slot_duration_s(pattern), digits=1)) ms slots, $lead ahead"
     journal_event!(ex.journal, :info, "scan started: $description; deadline $(round(1000 * deadline_s, digits=1)) ms")
+    if deadline_s < SHORT_DEADLINE_S
+        message = "deadline of $(round(1000 * deadline_s, digits=1)) ms leaves little room for garbage-collector pauses; " *
+                  "longer slots or a larger timing.lead_slots (config/bench.toml) give more"
+        journal_event!(ex.journal, :warn, message)
+        @warn message
+    end
 
     fault = nothing
     set_loop_status!(ex, LOOP_RUNNING, description)

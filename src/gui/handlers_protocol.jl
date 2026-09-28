@@ -2,8 +2,8 @@
 handlers_protocol.jl
 
 Protocol panel: the Protocol/ROI popup launch buttons and their active
-toggles, plus the ROI galvo-scan timing spinners (roi.jl reads these back
-off app.protocol at Start). Split out of handlers.jl's former single
+toggles, plus the ROI galvo-scan timing spinners (START copies them into
+the DAQ loop's ScanRequest, runtime.jl). Split out of handlers.jl's former single
 make_handlers function.
 """
 

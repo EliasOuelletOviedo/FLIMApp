@@ -358,7 +358,9 @@ end
 @testset "DAQ loop on the simulated cards" begin
     cfg = test_bench_config()
     ex = FLIMApp.Exchange(cfg)
-    hw = FLIMApp.SimulatedHardware(cfg; realtime=true)
+    # Paced in real time, but without the wall-clock deadline: a GC pause
+    # during the test suite must not turn into a fault here.
+    hw = FLIMApp.SimulatedHardware(cfg; realtime=true, strict_timing=false)
     loop = Threads.@spawn FLIMApp.daq_loop(cfg, ex; hardware=hw)
     journal = Threads.@spawn FLIMApp.journal_loop(cfg, ex)
     state() = FLIMApp.loop_status(ex).state

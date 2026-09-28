@@ -167,7 +167,7 @@ concretely typed (unlike a bare untyped `global`), which matters here since
 this is read from the acquisition hot loop (up to 1kHz in Playback mode).
 
 Not thread-safe, by design rather than oversight: `run_acquisition_loop!`
-runs on its own OS thread (`Threads.@spawn`, see runtime.jl) so the GUI
+runs on its own OS thread (`Threads.@spawn`, see gui/runtime.jl) so the GUI
 thread stays responsive during a fit, but its fields (and the FFT/gating/
 IRF-channel caches in this file) are only ever written from that single
 worker thread (`ensure_fft_plans`/`ensure_runtime_state!`, called from
@@ -854,7 +854,7 @@ be warmed independently. Measured cost of skipping this: the very first
 testing, and because Julia's compiler holds locks shared across threads,
 that stall was observed on the *main* GUI thread too, even though the fit
 itself runs on its own thread (see `spawn_acquisition_worker!` in
-runtime.jl) — i.e. moving the worker off the GUI thread does not by itself
+gui/runtime.jl) — i.e. moving the worker off the GUI thread does not by itself
 prevent this specific freeze; only warming ahead of time does.
 
 Only 1- and 2-lifetime are warmed: 3-lifetime has a separate, pre-existing

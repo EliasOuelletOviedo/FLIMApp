@@ -197,17 +197,27 @@ function wait_for_window(fig; timeout_s::Real = 10.0)
 end
 
 """
+    config_path_from_args(args)::String
+
+The first `.toml` among the command-line arguments (the launchers pass the
+bench config after Julia options), config/bench.toml otherwise.
+"""
+function config_path_from_args(args::AbstractVector{<:AbstractString})::String
+    index = findfirst(a -> endswith(lowercase(a), ".toml"), args)
+    return index === nothing ? default_bench_config_path() : String(args[index])
+end
+
+"""
     julia_main()::Cint
 
 Entry point for the compiled standalone application (see
-build/create_app.jl): the bench config is the first command-line argument
-(config/bench.toml otherwise). Blocks until the window is closed and the
+build/create_app.jl): the bench config is the first `.toml` command-line
+argument (config/bench.toml otherwise). Blocks until the window is closed and the
 background threads have finished.
 """
 function julia_main()::Cint
     try
-        config_path = isempty(ARGS) ? default_bench_config_path() : ARGS[1]
-        fig = run_app(config_path)
+        fig = run_app(config_path_from_args(ARGS))
         wait_for_window(fig)
     catch e
         @error "FLIMApp terminated with an unhandled error" exception=(e, catch_backtrace())

@@ -37,7 +37,7 @@ extension) as this file's sequence number in the acquisition — e.g.
 `"sample_00042.sdt"` -> `42`. Returns `nothing` if the filename has no
 trailing digits to parse. See `AcquisitionSample`'s docstring
 (data_types.jl) for why this — not the app's own read-count — is what
-round-robin ROI assignment (`consumer_loop`, runtime.jl) is keyed on, and
+round-robin ROI assignment (`assign_roi!` below) is keyed on, and
 for the one failure mode it does *not* cover (which `RoiSlotTracker` below
 handles).
 """
@@ -75,8 +75,9 @@ end
 Nominal wall-clock delay between two consecutive acquisition files, in
 seconds: one ROI's scan (`protocol.scan_time`) plus the galvo settle/shift
 onto the next one (`protocol.shift_time`), both in ms. These are the very
-numbers `roi_scan_waveform` (roi.jl) builds the DAQ scan waveform from, so
-this is the cadence the hardware is actually running at rather than a guess — good enough to seed `RoiSlotTracker`, which
+numbers the DAQ loop builds its slots from (`build_scan_pattern`,
+loop/scan_pattern.jl), so this is the cadence the hardware is actually
+running at rather than a guess — good enough to seed `RoiSlotTracker`, which
 then refines it against what the files really do. `NaN` if they don't add up
 to a usable period.
 """
@@ -128,7 +129,7 @@ settings the scan waveform was built with), a running estimate refined
 from the last `ROI_SLOT_GAP_WINDOW` observed gaps, the previous file's
 timestamp and sequence number, and the current slot.
 
-One instance per acquisition run, owned by `consumer_loop` (runtime.jl) —
+One instance per acquisition run, owned by its `AnalysisOutput` —
 its state is a rolling history, so it must not be shared across runs.
 """
 mutable struct RoiSlotTracker
@@ -186,7 +187,7 @@ end
         -> (slot::Int, skipped::Int, ambiguous::Bool)
 
 Advance `tracker` by one file and return the ROI-scan slot that file belongs
-to — the number `consumer_loop` (runtime.jl) takes `mod1(slot, n_rois)` of.
+to — the number `assign_roi!` takes `mod1(slot, n_rois)` of.
 `skipped` is how many slots were passed over (0 in the normal case),
 `ambiguous` flags a gap that didn't land convincingly on any whole number of
 periods.

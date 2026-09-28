@@ -17,7 +17,7 @@ using GLMakie
     GuiBlocks
 
 Every GUI element shared between `make_gui` (GUI.jl), the event handlers
-(handlers*.jl), and the background tasks (runtime.jl). Constructed once in
+(handlers*.jl), and the refresh tick (refresh.jl). Constructed once in
 `make_gui` and passed around read-only.
 """
 Base.@kwdef struct GuiBlocks

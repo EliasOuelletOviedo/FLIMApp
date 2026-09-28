@@ -160,6 +160,8 @@ mutable struct DisplayState
     tick_interval_max_s::Float64
     tick_interval_sum_s::Float64
     tick_work_max_s::Float64
+    gc_total_ns::Int
+    gc_tick_max_s::Float64
     loop_iteration_max_s::Float64
     loop_margin_min_s::Float64
     loop_deadline_s::Float64
@@ -176,7 +178,7 @@ DisplayState() = DisplayState(
     Dict(:plot1 => PlotSlot(), :plot2 => PlotSlot()), false, UInt64(0),
     0, zeros(Float32, 0, 0), 0, 0.0, String[], -1,
     nothing, LoopStatus(LOOP_DISCONNECTED, ""),
-    0, UInt64(0), 0.0, 0.0, 0.0,
+    0, UInt64(0), 0.0, 0.0, 0.0, 0, 0.0,
     0.0, Inf, NaN, 0, nothing, UInt64(0), 0, NaN,
     Observable("")
 )
@@ -192,6 +194,8 @@ function reset_diagnostics!(d::DisplayState)
     d.tick_interval_max_s = 0.0
     d.tick_interval_sum_s = 0.0
     d.tick_work_max_s = 0.0
+    d.gc_total_ns = Int(Base.gc_num().total_time)
+    d.gc_tick_max_s = 0.0
     d.loop_iteration_max_s = 0.0
     d.loop_margin_min_s = Inf
     d.loop_slots = 0

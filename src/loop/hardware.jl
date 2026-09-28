@@ -247,15 +247,18 @@ hw_disconnect!(hw::NIHardware) = (clear_scan_tasks!(hw); hw_zero!(hw))
 # =============================================================================
 
 """
-    SimulatedHardware(cfg; realtime=true)
+    SimulatedHardware(cfg; realtime=true, strict_timing=realtime)
 
 In-memory card: written samples go to a circular buffer of the size the
 loop asks for, and each readback block returns them back — per
 `cfg.readback_signals`, lines as 0/5 V — once the time they take to play
 has elapsed (`realtime`), or immediately (`realtime = false`, for tests).
-Reading past the last written sample marks an underflow, and the next
-write throws DAQmx -200290 exactly like the card. Writes outside the
-declared ranges throw -200561.
+With `strict_timing`, the card keeps its own wall-clock position like the
+real one: if the loop stalls (a long iteration, a garbage-collector pause)
+until the card has played everything written, that's an underflow. Reading
+past the last written sample is one too. Either way the next write throws
+DAQmx -200290 exactly like the card. Writes outside the declared ranges
+throw -200561.
 
 `skip_samples` is a test hook: the next read pretends the card ran that
 many samples ahead of the loop.
@@ -263,6 +266,7 @@ many samples ahead of the loop.
 mutable struct SimulatedHardware <: Hardware
     cfg::BenchConfig
     realtime::Bool
+    strict_timing::Bool
     connected::Bool
     running::Bool
     capacity::Int
@@ -278,7 +282,7 @@ mutable struct SimulatedHardware <: Hardware
     signal_sources::Vector{Tuple{Symbol, Int}}
 end
 
-function SimulatedHardware(cfg::BenchConfig; realtime::Bool = true)
+function SimulatedHardware(cfg::BenchConfig; realtime::Bool = true, strict_timing::Bool = realtime)
     sources = map(cfg.readback_signals) do name
         name == "galvo_x" ? (:galvo, 1) :
         name == "galvo_y" ? (:galvo, 2) :
@@ -286,7 +290,7 @@ function SimulatedHardware(cfg::BenchConfig; realtime::Bool = true)
         name == "command_2" ? (:command, 2) :
         (:line, parse(Int, last(split(name, '_'))))
     end
-    return SimulatedHardware(cfg, realtime, false, false, 0, zeros(2, 0), UInt8[], zeros(2, 0),
+    return SimulatedHardware(cfg, realtime, strict_timing, false, false, 0, zeros(2, 0), UInt8[], zeros(2, 0),
                              0, 0, UInt64(0), false, 0, 0, sources)
 end
 
@@ -343,6 +347,7 @@ function hw_read!(hw::SimulatedHardware, buffer::Matrix{Float64}, first_sample::
         now_ns = time_ns()
         now_ns < due_ns && sleep((due_ns - now_ns) / 1e9)
     end
+    hw.strict_timing && card_position(hw) > hw.written && (hw.underflow = true)
     @inbounds for j in 1:n_samples
         p = hw.generated + j - 1
         column = first_sample + j
@@ -363,8 +368,11 @@ function hw_read!(hw::SimulatedHardware, buffer::Matrix{Float64}, first_sample::
     return nothing
 end
 
+"""Samples the simulated card has played by now, by the wall clock."""
+card_position(hw::SimulatedHardware)::Int = floor(Int, (time_ns() - hw.t0_ns) * hw.cfg.sample_rate_hz / 1e9)
+
 hw_kick!(::SimulatedHardware) = nothing
-hw_generated(hw::SimulatedHardware)::Int = hw.generated
+hw_generated(hw::SimulatedHardware)::Int = hw.strict_timing ? clamp(card_position(hw), hw.generated, hw.written) : hw.generated
 hw_stop!(hw::SimulatedHardware) = (hw.running = false; hw_zero!(hw); nothing)
 hw_zero!(hw::SimulatedHardware) = (hw.zero_count += 1; nothing)
 hw_disconnect!(hw::SimulatedHardware) = (hw.running = false; hw_zero!(hw); hw.connected = false; nothing)

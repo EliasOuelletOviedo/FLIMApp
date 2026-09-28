@@ -4,8 +4,8 @@ smoothing.jl
 Shared lifetime smoothing: a constant-velocity (2-state) Kalman filter
 (`kalman_update!`, operating on a `KalmanState`, data_types.jl) used both as
 the plot-facing smoothing filter (`RoiChannelSeries`'s `_smooth` series,
-runtime.jl) and as the PID observer (`ChannelFitState.pid_kalman`,
-acquisition.jl) that replaced the PID's derivative term — see
+gui/runtime.jl) and as the PID observer (`ChannelFitState.pid_kalman`,
+analysis/acquisition.jl) that replaced the PID's derivative term — see
 `process_frame!`'s docstring for why. Independent `KalmanState`
 instances in each case (per (channel, ROI, metric) for plots, per
 (channel, metric) for the PID observer): same filter, not shared state.
@@ -162,7 +162,7 @@ end
 # smoothed series helpers (used by the GUI refresh tick, gui/runtime.jl)
 # -----------------------------------------------------------------------------
 #
-# Generic over which raw/smoothed observable pair (and KalmanState) they
+# Generic over which raw/smoothed series pair (and KalmanState) they
 # operate on, so lifetime/photons/ion concentration all go through the
 # exact same filter (kalman_update!) with the exact same parameters — not
 # separate copies that could drift apart.

@@ -58,13 +58,18 @@ function refresh_tick!(app, app_run, blocks)
     ex = app_run.exchange
     started_ns = time_ns()
 
+    # GC time since the previous tick: a pause long enough to make the
+    # display stutter shows up here in full (plan §9).
+    gc_total_ns = Int(Base.gc_num().total_time)
     if state.tick_last_ns != 0
         interval_s = (started_ns - state.tick_last_ns) / 1e9
         state.tick_interval_max_s = max(state.tick_interval_max_s, interval_s)
         state.tick_interval_sum_s += interval_s
         state.tick_count += 1
+        state.gc_tick_max_s = max(state.gc_tick_max_s, (gc_total_ns - state.gc_total_ns) / 1e9)
     end
     state.tick_last_ns = started_ns
+    state.gc_total_ns = gc_total_ns
 
     publish_analysis_settings!(app, app_run)
 
@@ -282,7 +287,7 @@ function diagnostics_text(app_run)::String
         "  slots: $(state.loop_slots)   iteration max: $(ms(state.loop_iteration_max_s))",
         "  margin min: $(ms(state.loop_margin_min_s))   deadline: $(ms(state.loop_deadline_s))",
         "Display tick: mean $(ms(tick_mean))   max $(ms(state.tick_interval_max_s))   work max $(ms(state.tick_work_max_s))",
-        "GC (since launch): longest pause $(ms(Int(gc.max_pause) / 1e9))   longest wait for a safepoint $(ms(Int(gc.max_time_to_safepoint) / 1e9))",
+        "GC: most in one tick $(ms(state.gc_tick_max_s))   longest wait for a safepoint (since launch) $(ms(Int(gc.max_time_to_safepoint) / 1e9))",
         "Journal: $(pending_journal(ex.journal)) pending   $(ex.journal.dropped[]) dropped",
         "Display lost: $(state.frames_lost) frames, $(state.slots_lost) slots",
         "Memory: $(round(Sys.maxrss() / 2^20, digits=0)) MB peak",

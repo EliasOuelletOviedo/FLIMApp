@@ -159,7 +159,7 @@ Experimental protocol schedule: `times`/`setpoints` are parallel vectors of
 `PROTOCOL_STEP_COUNT` per-step durations and setpoints.
 
 `points_per_roi`/`spiral_turns`/`scan_time`/`shift_time` are the
-ROI galvo-scan parameters (roi.jl), editable from the Protocol panel
+ROI galvo-scan parameters (roi_geometry.jl, loop/scan_pattern.jl), editable from the Protocol panel
 (handlers_protocol.jl) — see `roi_scan_segments`/`roi_scan_waveform` in
 roi.jl for how they're used.
 """
@@ -181,7 +181,7 @@ end
 
 ROI panel settings. `v_min_x`/`v_max_x`/`v_min_y`/`v_max_y` are the ROI
 galvo voltage range (mV) for each axis, editable from the ROI popup — see
-`roi_scan_segments` (roi.jl) for how they're used.
+`roi_scan_segments` (roi_geometry.jl) for how they're used.
 """
 Base.@kwdef mutable struct RoiSettings
     active::Bool = false
