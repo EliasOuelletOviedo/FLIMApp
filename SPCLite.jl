@@ -33,7 +33,9 @@ export modules_detectes, modules_prets, forcer_module, forcer_modules, chercher_
 export etat_init, info_module, type_module, eeprom, mode_dll, explication_init
 export lire_parametres, appliquer_ini, sync_etat, effacer_taux, taux
 export demarrer, arreter, etat_mesure, lire_fifo!, fifo_init, remplissage_fifo
+export configurer_memoire, definir_page, effacer_memoire, lire_bloc
 export Decodeur, decoder!, reinitialiser!, PERIODE_MT
+export SPC_OVERFL, SPC_OVERFLOW, SPC_TIME_OVER, SPC_COLTIM_OVER, SPC_CMD_STOP, SPC_HFILL_NRDY
 export SPC_ARMED, SPC_FOVFL, SPC_FEMPTY, NOMS_MODULES, MESSAGES_INIT, MESSAGES_SYNC
 
 # =====================================================================
@@ -167,6 +169,13 @@ const MESSAGES_SYNC = Dict(0 => "pas de SYNC", 1 => "SYNC correct",
 const SPC_ARMED  = 0x0080   # mesure en cours
 const SPC_FOVFL  = 0x0400   # FIFO débordé : des données ont été perdues
 const SPC_FEMPTY = 0x0800   # FIFO vide
+# Bits utiles en mode histogramme (mode 0, « Single ») :
+const SPC_OVERFL      = 0x0001   # arrêt sur débordement d'un canal (65535 coups)
+const SPC_OVERFLOW    = 0x0002   # un canal a débordé
+const SPC_TIME_OVER   = 0x0004   # arrêt à la fin du temps de collecte
+const SPC_COLTIM_OVER = 0x0008   # temps de collecte écoulé
+const SPC_CMD_STOP    = 0x0010   # arrêt par SPC_stop_measurement
+const SPC_HFILL_NRDY  = 0x8000   # effacement de la mémoire pas fini
 
 # =====================================================================
 # Fichiers .ini
@@ -536,6 +545,66 @@ function fifo_init(m::Integer)
                   Int16(m), ft, st, mt, h), "SPC_get_fifo_init_vars")
     return (type_fifo = Int(ft[]), type_flux = Int(st[]),
             horloge_macro_s = mt[] * 1e-10, entete = h[])   # mt en dixièmes de ns
+end
+
+# =====================================================================
+# Mode histogramme (mode 0, « Single » dans SPCM) : la carte construit
+# elle-même le déclin dans sa mémoire pendant le temps de collecte.
+# Manuel DLL : SPC_configure_memory, SPC_set_page, SPC_fill_memory,
+# SPC_read_data_block. Module prêt seulement, comme partout.
+# =====================================================================
+
+"""
+    configurer_memoire(m, resolution_adc, bits_routage=0)
+        -> (blocs, blocs_par_trame, trames_par_page, pages, longueur_bloc)
+
+Découpe la mémoire en courbes de 2^resolution_adc canaux. À appeler après
+SPC_init et après tout changement de adc_resolution. SPCMemConfig : quatre
+long (32 bits sous Windows) puis block_length, lus dans un tampon opaque.
+"""
+function configurer_memoire(m::Integer, resolution_adc::Integer, bits_routage::Integer = 0)
+    b = zeros(UInt8, 64)
+    chk_spc(ccall((:SPC_configure_memory, DLL_SPCM), Int16, (Int16, Int16, Int16, Ptr{UInt8}),
+                  Int16(m), Int16(resolution_adc), Int16(bits_routage), b), "SPC_configure_memory")
+    long(o) = Int(reinterpret(Int32, b[o + 1:o + 4])[1])
+    return (blocs = long(0), blocs_par_trame = long(4), trames_par_page = long(8),
+            pages = long(12), longueur_bloc = Int(reinterpret(Int16, b[17:18])[1]))
+end
+
+"""Page de mémoire où la prochaine mesure s'enregistre."""
+definir_page(m::Integer, page::Integer) =
+    chk_spc(ccall((:SPC_set_page, DLL_SPCM), Int16, (Int16, Clong), Int16(m), Clong(page)),
+            "SPC_set_page")
+
+"""
+    effacer_memoire(m; bloc=-1, page=0)
+
+Remplit de zéros un bloc (-1 : tous) d'une page (-1 : toutes), puis attend
+que la carte ait fini (bit SPC_HFILL_NRDY).
+"""
+function effacer_memoire(m::Integer; bloc::Integer = -1, page::Integer = 0, delai_max_s = 5.0)
+    r = chk_spc(ccall((:SPC_fill_memory, DLL_SPCM), Int16, (Int16, Clong, Clong, UInt16),
+                      Int16(m), Clong(bloc), Clong(page), 0x0000), "SPC_fill_memory")
+    t0 = time()
+    while r > 0 && (etat_mesure(m) & SPC_HFILL_NRDY) != 0
+        time() - t0 > delai_max_s && error("module $m : la mémoire ne finit pas de s'effacer")
+        sleep(0.002)
+    end
+    return nothing
+end
+
+"""
+    lire_bloc(m, n; bloc=0, page=0) -> Vector{UInt16}
+
+Lit une courbe de `n` canaux dans la mémoire de la carte, sans réduction.
+"""
+function lire_bloc(m::Integer, n::Integer; bloc::Integer = 0, page::Integer = 0)
+    d = zeros(UInt16, n)
+    chk_spc(ccall((:SPC_read_data_block, DLL_SPCM), Int16,
+                  (Int16, Clong, Clong, Int16, Int16, Int16, Ptr{UInt16}),
+                  Int16(m), Clong(bloc), Clong(page), Int16(1), Int16(0), Int16(n - 1), d),
+            "SPC_read_data_block")
+    return d
 end
 
 """Remplissage du FIFO de la carte, de 0 à 1."""
