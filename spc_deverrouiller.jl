@@ -21,17 +21,14 @@ function spc_deverrouiller()
     dossier = joinpath(@__DIR__, "resultats", "spc")
     ini = ecrire_ini(joinpath(dossier, "deverrouiller.ini"))
 
+    # N'interroge que les structures internes de la DLL ; l'EEPROM (lue sur
+    # la carte) seulement pour un module prêt.
     function montrer(titre)
         println("\n", titre)
-        vus = Int[]
-        for k in 0:7
-            info = try
-                info_module(k)
-            catch
-                nothing
-            end
-            (info === nothing || info.type <= 0) && continue
-            push!(vus, k)
+        vus = modules_detectes()
+        isempty(vus) && println("  aucune carte SPC détectée")
+        for k in vus
+            info = info_module(k)
             etat = etat_init(k)
             serie = etat == 0 ? (try eeprom(k).serie catch; "?" end) : "?"
             @printf("  module %d : bus %d, slot %d, utilisé %2d, n° de série %-10s %s\n",
@@ -41,11 +38,11 @@ function spc_deverrouiller()
         return vus
     end
 
-    # 1 et 2 : état de départ, puis reprise forcée
+    # 1 et 2 : état de départ, puis reprise forcée des seuls modules détectés
     initialiser(ini)
     try
         vus = montrer("Avant (utilisé -1 = verrouillé par un autre programme) :")
-        verrouilles = [k for k in vus if etat_init(k) == -6]
+        verrouilles = Int16[k for k in vus if etat_init(k) == -6]
         if isempty(verrouilles)
             println("\nAucun module verrouillé : rien à faire. Relance carto1_inventaire.jl.")
             return true
@@ -53,7 +50,7 @@ function spc_deverrouiller()
         forcer_modules(verrouilles)
         montrer("Après la reprise forcée (utilisé 1 = pris par cette session) :")
     finally
-        liberer_tous(0:7)
+        liberer()      # arrête seulement les modules prêts ; SPC_close dans tous les cas
     end
 
     # 3 : vérification sans forcer
@@ -63,7 +60,7 @@ function spc_deverrouiller()
         vus = montrer("Vérification, nouvelle initialisation sans forcer :")
         ok = !isempty(vus) && all(etat_init(k) == 0 for k in vus)
     finally
-        liberer_tous(0:7)
+        liberer()
     end
     println()
     println(ok ? "RÉUSSI : verrou levé. Relance carto1_inventaire.jl, puis la suite." :

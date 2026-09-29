@@ -153,7 +153,11 @@ function info_dcc(m::Integer)
             init = court(8), serie = serie)
 end
 
-"""Bits de surcharge : (connecteur1, connecteur3), vrais si la protection a coupé."""
+"""
+Bits de surcharge : (connecteur1, connecteur3), vrais si la protection a coupé.
+Lit la carte : seulement sur un module prêt (état 0), jamais sur un module
+absent ou pris par un autre programme.
+"""
 function surcharge_dcc(m::Integer)
     s = Ref{Int16}(0)
     _chk(ccall((:DCC_get_overload_state, DLL_DCC), Int16, (Int16, Ptr{Int16}), Int16(m), s),
@@ -161,7 +165,7 @@ function surcharge_dcc(m::Integer)
     return (c1 = (s[] & 0x1) != 0, c3 = (s[] & 0x2) != 0)
 end
 
-"""Limite de courant du refroidisseur (connecteur 3) atteinte ?"""
+"""Limite de courant du refroidisseur (connecteur 3) atteinte ? Module prêt seulement."""
 function limite_courant_dcc(m::Integer)
     s = Ref{Int16}(0)
     _chk(ccall((:DCC_get_curr_lmt_state, DLL_DCC), Int16, (Int16, Ptr{Int16}), Int16(m), s),

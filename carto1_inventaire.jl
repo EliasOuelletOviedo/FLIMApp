@@ -43,32 +43,24 @@ function carto1()
     code = initialiser(ini)
     try
         code < 0 && println("  SPC_init : $code ($(message_erreur(code)))")
-        vues = 0
+        detectes = modules_detectes()          # structures internes de la DLL seulement
         verrou = false
-        for k in 0:7
-            info = try
-                info_module(k)
-            catch
-                nothing
-            end
-            (info === nothing || info.type <= 0) && continue
-            vues += 1
+        for k in detectes
+            info = info_module(k)
             etat = etat_init(k)
-            serie = try
-                eeprom(k).serie
-            catch
-                "?"
-            end
+            # L'EEPROM se lit sur la carte : seulement si le module est prêt.
+            serie = etat == 0 ? (try eeprom(k).serie catch; "?" end) : "?"
             @printf("  module %d : %-10s n° de série %-10s bus PCI %3d, slot %2d, utilisé %2d : %s\n",
                     k, get(NOMS_MODULES, info.type, string(info.type)), serie,
                     info.bus, info.slot, info.utilise, etat == 0 ? "prête" : explication_init(etat))
             etat == -6 && (verrou = true)
         end
-        vues == 0 && println("  aucune carte SPC trouvée : ", explication_init(etat_init(0), code))
+        isempty(detectes) && println("  aucune carte SPC détectée",
+                                     code < 0 ? " (SPC_init : $(message_erreur(code)))" : "")
         verrou && println("  → verrou : ferme VS Code, vérifie les processus (voir le plan), ",
                           "puis lance spc_deverrouiller.jl.")
     finally
-        liberer_tous(0:3)
+        liberer()      # arrête seulement les modules prêts ; SPC_close dans tous les cas
     end
 
     if !isdefined(Main, :DCCLite)
@@ -90,11 +82,8 @@ function carto1()
             present = (info !== nothing && info.type == 100) || etat in (0, -2, -4)
             present || continue
             vues += 1
-            s = try
-                surcharge_dcc(k)
-            catch
-                nothing
-            end
+            # L'état de surcharge se lit sur la carte : seulement si le module est prêt.
+            s = etat == 0 ? (try surcharge_dcc(k) catch; nothing end) : nothing
             protection = s === nothing ? "?" :
                          "surcharge C1 $(s.c1 ? "OUI" : "non"), C3 $(s.c3 ? "OUI" : "non")"
             if info === nothing

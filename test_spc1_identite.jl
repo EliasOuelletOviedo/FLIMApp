@@ -27,22 +27,30 @@ function test_spc1(r)
         mode = mode_dll()
         println("Mode de la DLL : ", mode == 0 ? "matériel" : "simulation ($mode)")
 
+        # Structures internes de la DLL seulement : sans risque pour tous les modules.
+        detectes = modules_detectes()
         println("\nModules vus par la DLL :")
-        for k in 0:7
-            info = try
-                info_module(k)
-            catch
-                nothing
-            end
-            info === nothing && continue
-            (info.type > 0 || k == r.module_no) || continue
+        isempty(detectes) && println("  aucun")
+        for k in detectes
+            info = info_module(k)
             @printf("  module %d : type %d (%s), bus PCI %d, slot %d, utilisé %d, init %d\n",
                     k, info.type, get(NOMS_MODULES, info.type, "?"), info.bus, info.slot,
                     info.utilise, info.init)
         end
 
+        if !(r.module_no in detectes)
+            println("\nÉCHEC : le module $(r.module_no) n'est pas détecté.")
+            return false
+        end
         etat = etat_init(r.module_no)
         println("\nModule $(r.module_no) : ", explication_init(etat, code))
+        if etat != 0
+            println("\nÉCHEC : module pas prêt. Lis l'état ci-dessus, puis le tableau ",
+                    "« Si un test échoue » du plan.")
+            return false
+        end
+
+        # Ces deux lectures touchent la carte : seulement sur un module prêt.
         id = type_module(r.module_no)
         println("SPC_test_id : ", id, id >= 0 ? " ($(get(NOMS_MODULES, id, "type inconnu")))" :
                                               " ($(message_erreur(id)))")
@@ -53,7 +61,7 @@ function test_spc1(r)
             println("EEPROM illisible : ", sprint(showerror, err))
         end
 
-        ok = etat == 0 && id in (150, 151)
+        ok = id in (150, 151)
         println()
         if ok && !r.simulation
             println("RÉUSSI : la carte répond, c'est une $(NOMS_MODULES[id]).")
@@ -66,7 +74,7 @@ function test_spc1(r)
         end
         return ok
     finally
-        liberer(r.module_no)
+        liberer()      # arrête seulement les modules prêts ; SPC_close dans tous les cas
     end
 end
 

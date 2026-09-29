@@ -29,7 +29,7 @@ using Libdl, Printf
 
 export SPCError, chk_spc, message_erreur, DLL_SPCM
 export ecrire_ini, lire_ini, avec_spc, avec_spc_tous, initialiser, liberer, liberer_tous
-export forcer_module, forcer_modules, chercher_bh
+export modules_detectes, modules_prets, forcer_module, forcer_modules, chercher_bh
 export etat_init, info_module, type_module, eeprom, mode_dll, explication_init
 export lire_parametres, appliquer_ini, sync_etat, effacer_taux, taux
 export demarrer, arreter, etat_mesure, lire_fifo!, fifo_init, remplissage_fifo
@@ -251,13 +251,49 @@ _set_mode(mode, force, table::Vector{Int32}) =
     Int(ccall((:SPC_set_mode, DLL_SPCM), Int16, (Int16, Int16, Ptr{Int32}),
               Int16(mode), Int16(force), table))
 
+# Règle de sécurité de ce module : une fonction qui touche le matériel
+# (SPC_stop_measurement, SPC_test_id, SPC_get_eeprom_data, mesures…) ne
+# s'appelle QUE sur un module prêt, c'est-à-dire détecté et initialisé par
+# cette session. Sur un module absent ou non initialisé, la DLL peut faire
+# une violation d'accès, que try/catch ne rattrape pas. Seules
+# SPC_get_module_info et SPC_get_init_status, qui lisent les structures
+# internes de la DLL, se lisent sans risque pour les modules 0 à 7.
+
+"""
+    modules_detectes() -> Vector{Int16}
+
+Modules présents d'après SPC_get_module_info (type > 0), après SPC_init.
+Ne lit que les structures internes de la DLL : aucun accès au matériel.
+"""
+function modules_detectes()
+    vus = Int16[]
+    for k in 0:7
+        info = try
+            info_module(k)
+        catch
+            nothing
+        end
+        info !== nothing && info.type > 0 && push!(vus, Int16(k))
+    end
+    return vus
+end
+
+"""
+    modules_prets() -> Vector{Int16}
+
+Modules détectés ET initialisés par cette session (état 0) : les seuls sur
+lesquels on peut appeler une fonction qui touche le matériel.
+"""
+modules_prets() = Int16[k for k in modules_detectes() if etat_init(k) == 0]
+
 """
 Prend les modules listés même s'ils sont marqués « verrouillés » (par
 exemple après une session qui s'est mal terminée), en un seul appel à
-SPC_set_mode avec force_use = 1. Ne jamais l'utiliser pendant que SPCM
-se sert réellement des cartes.
+SPC_set_mode avec force_use = 1. Ne passer que des modules détectés.
+Ne jamais l'utiliser pendant que SPCM se sert réellement des cartes.
 """
 function forcer_modules(modules)
+    isempty(modules) && return 0
     table = zeros(Int32, 32)          # le manuel parle de 8 entrées ; 32 par prudence
     for m in modules
         table[m + 1] = 1
@@ -268,20 +304,30 @@ end
 forcer_module(m::Integer) = forcer_modules((m,))
 
 """
-Arrête les mesures éventuelles, déverrouille les modules et referme la DLL.
-Sans cela, SPCM trouverait les cartes « déjà utilisées » tant que le REPL vit.
+    liberer_tous(modules)
+
+Arrête la mesure sur chaque module de la liste, déverrouille les modules
+pris par cette session, puis referme la DLL. Ne passer QUE des modules
+prêts (voir `modules_prets`). Avec une liste vide, rien n'est arrêté ni
+déverrouillé, mais SPC_close est quand même appelé.
 """
 function liberer_tous(modules)
     for m in modules
         try; ccall((:SPC_stop_measurement, DLL_SPCM), Int16, (Int16,), Int16(m)); catch; end
     end
-    try; _set_mode(0, 0, zeros(Int32, 32)); catch; end
+    if !isempty(modules)
+        try; _set_mode(0, 0, zeros(Int32, 32)); catch; end   # in_use = 0 : déverrouille
+    end
     try; ccall((:SPC_close, DLL_SPCM), Int16, ()); catch; end
     return nothing
 end
 
-"""Comme `liberer_tous`, pour un seul module."""
-liberer(m::Integer = 0) = liberer_tous((m,))
+"""
+Libère tout ce que cette session tient : arrêt et déverrouillage des seuls
+modules prêts, puis SPC_close. Sans cela, SPCM trouverait les cartes
+« déjà utilisées ».
+"""
+liberer() = liberer_tous(modules_prets())
 
 """
     avec_spc_tous(f, ini; forcer=false)
@@ -289,43 +335,46 @@ liberer(m::Integer = 0) = liberer_tous((m,))
 Comme `avec_spc`, pour toutes les cartes présentes (deux SPC-150N, par
 exemple) : `f` reçoit la liste des numéros de modules prêts. Lève une
 erreur s'il n'y en a aucun. Tout est libéré à la fin, même sur une erreur.
-`forcer = true` reprend les modules restés verrouillés (état -6).
+`forcer = true` reprend les modules détectés restés verrouillés (état -6).
 """
 function avec_spc_tous(f, ini::AbstractString; forcer::Bool = false)
     code = initialiser(ini)
-    modules = Int16[]
     try
+        detectes = modules_detectes()
         if forcer
-            verrouilles = [k for k in 0:7 if etat_init(k) == -6]
+            verrouilles = Int16[k for k in detectes if etat_init(k) == -6]
             if !isempty(verrouilles)
-                @warn "Modules $verrouilles verrouillés : reprise forcée"
+                @warn "Modules $(Int.(verrouilles)) verrouillés : reprise forcée"
                 forcer_modules(verrouilles)
             end
         end
-        for k in 0:7
-            etat_init(k) == 0 && type_module(k) > 0 && push!(modules, Int16(k))
-        end
+        modules = modules_prets()
         if isempty(modules)
-            etats = join(("module $k : $(explication_init(etat_init(k)))" for k in 0:1), " ; ")
+            etats = isempty(detectes) ? "aucune carte détectée" :
+                    join(("module $k : $(explication_init(etat_init(k)))" for k in detectes), " ; ")
             throw(SPCError(code < 0 ? code : -1, "SPC_init", "aucun module prêt ($etats)"))
         end
         code < 0 && @warn "SPC_init a renvoyé $code ($(message_erreur(code))) ; modules prêts : $(Int.(modules))"
         return f(modules)
     finally
-        liberer_tous(isempty(modules) ? (0, 1) : modules)
+        liberer()      # seulement les modules prêts ; SPC_close dans tous les cas
     end
 end
 
 """
     avec_spc(f, ini; module_no=0, forcer=false)
 
-Initialise la DLL avec `ini`, vérifie que le module est prêt, appelle
-`f(module_no)`, puis libère tout, même en cas d'erreur. `forcer = true`
-reprend un module resté verrouillé (état -6) par une session précédente.
+Initialise la DLL avec `ini`, vérifie que le module est détecté et prêt,
+appelle `f(module_no)`, puis libère tout, même en cas d'erreur.
+`forcer = true` reprend un module resté verrouillé (état -6).
 """
 function avec_spc(f, ini::AbstractString; module_no::Integer = 0, forcer::Bool = false)
     code = initialiser(ini)
     try
+        detectes = modules_detectes()
+        module_no in detectes ||
+            throw(SPCError(-1, "SPC_init",
+                           "module $module_no non détecté (modules détectés : $(Int.(detectes)))"))
         etat = etat_init(module_no)
         if etat == -6 && forcer
             @warn "Module $module_no verrouillé : reprise forcée"
@@ -336,7 +385,7 @@ function avec_spc(f, ini::AbstractString; module_no::Integer = 0, forcer::Bool =
         code < 0 && @warn "SPC_init a renvoyé $code, mais le module $module_no est prêt : $(message_erreur(code))"
         return f(Int16(module_no))
     finally
-        liberer(module_no)
+        liberer()      # seulement les modules prêts ; SPC_close dans tous les cas
     end
 end
 
@@ -347,13 +396,14 @@ end
 """État d'initialisation du module (0 = prêt ; voir MESSAGES_INIT)."""
 etat_init(m::Integer) = Int(ccall((:SPC_get_init_status, DLL_SPCM), Int16, (Int16,), Int16(m)))
 
-"""Type du module (151 = SPC-150N) ; valeur < 0 = erreur."""
+"""Type du module (151 = SPC-150N) ; valeur < 0 = erreur. Lit le matériel : module prêt seulement."""
 type_module(m::Integer) = Int(ccall((:SPC_test_id, DLL_SPCM), Int16, (Int16,), Int16(m)))
 
 """
     info_module(m) -> (type, bus, slot, utilise, init, adresse)
 
 SPCModInfo. `utilise` : -1 verrouillé par un autre programme, 0 libre, 1 pris ici.
+Lit les structures internes de la DLL : sans risque pour les modules 0 à 7.
 """
 function info_module(m::Integer)
     buf = zeros(Int16, 16)            # 6 short utiles, marge
@@ -368,7 +418,8 @@ end
     eeprom(m) -> (type, serie, date)
 
 Données de production écrites par B&H dans la carte : les lire prouve
-qu'on parle bien au matériel, pas à un simulateur.
+qu'on parle bien au matériel, pas à un simulateur. Lit le matériel :
+module prêt seulement.
 """
 function eeprom(m::Integer)
     buf = zeros(UInt8, 1024)          # 3 × char[16] puis les réglages d'usine
