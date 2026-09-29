@@ -1,13 +1,19 @@
 """
     DCCLite
 
-Interface minimale, en lecture seule, vers la DLL des contrôleurs de
-détecteurs DCC-100 de Becker & Hickl (dcc64.dll), par ccall.
+Interface minimale vers la DLL des contrôleurs de détecteurs DCC-100 de
+Becker & Hickl (dcc64.dll), par ccall.
 
 Elle sert à l'inventaire : quels DCC-100 sont là, leur numéro de série,
 leur place sur le bus PCI et l'état de leurs protections. Elle n'allume
-rien. Au contraire, DCC_init coupe toutes les sorties par sécurité : pour
-allumer un détecteur, utilise le logiciel DCC de B&H.
+jamais rien. Au contraire, DCC_init coupe toutes les sorties par sécurité :
+pour allumer un détecteur, utilise le logiciel DCC de B&H.
+
+Libération : DCC_close seul laisse les modules verrouillés. `liberer_dcc`
+coupe les sorties, déverrouille (DCC_set_mode, in_use = 0), puis referme.
+Comme pour les SPC, seules les fonctions qui lisent les structures internes
+de la DLL (DCC_get_module_info, DCC_get_init_status) servent pour tous les
+modules ; tout ce qui touche une carte ne vise qu'un module prêt.
 
 Références :
 - « DCC Dynamic Link Library », manuel 2023 (prototypes, codes d'état) ;
@@ -22,7 +28,8 @@ module DCCLite
 using Libdl, Printf
 
 export DLL_DCC, DCCError, message_erreur_dcc, ecrire_ini_dcc, avec_dcc
-export initialiser_dcc, fermer_dcc, etat_init_dcc, actif_dcc, info_dcc
+export initialiser_dcc, fermer_dcc, liberer_dcc, forcer_dcc, etat_init_dcc, actif_dcc
+export info_dcc, modules_detectes_dcc, modules_prets_dcc
 export surcharge_dcc, limite_courant_dcc, couper_sorties_dcc, MESSAGES_INIT_DCC
 
 function _chercher_bh(nom::AbstractString)
@@ -173,26 +180,78 @@ function limite_courant_dcc(m::Integer)
     return s[] != 0
 end
 
-"""Coupe les sorties (module `m`, ou tous avec -1)."""
-couper_sorties_dcc(m::Integer = -1) =
+"""Coupe les sorties du module `m` (module prêt seulement)."""
+couper_sorties_dcc(m::Integer) =
     ccall((:DCC_enable_outputs, DLL_DCC), Int16, (Int16, Int16), Int16(m), Int16(0))
 
-"""Libère les modules pour le logiciel DCC de B&H."""
+"""Referme la DLL. Ne lève PAS le verrou des modules : voir `liberer_dcc`."""
 fermer_dcc() = ccall((:DCC_close, DLL_DCC), Int16, ())
+
+_set_mode_dcc(mode, force, table::Vector{Int16}) =
+    Int(ccall((:DCC_set_mode, DLL_DCC), Int16, (Int16, Int16, Ptr{Int16}),
+              Int16(mode), Int16(force), table))
+
+"""Modules DCC-100 présents (type 100), d'après les structures internes de la DLL."""
+function modules_detectes_dcc()
+    vus = Int16[]
+    for k in 0:7
+        info = try
+            info_dcc(k)
+        catch
+            nothing
+        end
+        info !== nothing && info.type == 100 && push!(vus, Int16(k))
+    end
+    return vus
+end
+
+"""Modules DCC-100 détectés ET initialisés par cette session (état 0)."""
+modules_prets_dcc() = Int16[k for k in modules_detectes_dcc() if etat_init_dcc(k) == 0]
+
+"""
+Reprend de force des modules DCC-100 restés verrouillés (DCC_set_mode,
+force_use = 1). La DLL n'accepte qu'un seul 1 par table : un appel par
+module. Ne pas l'utiliser pendant que le logiciel DCC ou SPCM tourne.
+"""
+function forcer_dcc(modules)
+    for m in modules
+        table = zeros(Int16, 32)         # le manuel parle de 8 entrées ; 32 par prudence
+        table[m + 1] = 1
+        _chk(_set_mode_dcc(0, 1, table), "DCC_set_mode (forcer)")
+    end
+    return nothing
+end
+
+"""
+Coupe les sorties des modules pris par cette session, les déverrouille
+(DCC_set_mode, in_use = 0), puis referme la DLL. DCC_close seul ne lève
+pas le verrou : le module resterait « utilisé » pour les programmes
+suivants, logiciel DCC compris. DCC_close est appelé même sans module prêt.
+"""
+function liberer_dcc()
+    prets = modules_prets_dcc()
+    for m in prets
+        try; couper_sorties_dcc(m); catch; end
+    end
+    if !isempty(prets)
+        try; _set_mode_dcc(0, 0, zeros(Int16, 32)); catch; end
+    end
+    try; fermer_dcc(); catch; end
+    return nothing
+end
 
 """
     avec_dcc(f, ini)
 
-DCC_init, puis `f(code_init)`, puis sorties coupées et DLL refermée,
-même en cas d'erreur.
+DCC_init, puis `f(code_init)`, puis sorties coupées, modules déverrouillés
+et DLL refermée, même en cas d'erreur.
 """
 function avec_dcc(f, ini::AbstractString)
     code = initialiser_dcc(ini)
     try
         return f(code)
     finally
-        try; couper_sorties_dcc(-1); catch; end
-        try; fermer_dcc(); catch; end
+        liberer_dcc()
     end
 end
 

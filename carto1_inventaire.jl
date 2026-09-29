@@ -71,33 +71,26 @@ function carto1()
     ini_dcc = ecrire_ini_dcc(joinpath(dossier, "c1_dcc.ini"))
     avec_dcc(ini_dcc) do code_dcc
         code_dcc < 0 && println("  DCC_init : $code_dcc ($(message_erreur_dcc(code_dcc)))")
-        vues = 0
-        for k in 0:7
+        detectes = modules_detectes_dcc()      # structures internes de la DLL seulement
+        verrou = false
+        for k in detectes
+            info = info_dcc(k)
             etat = etat_init_dcc(k)
-            info = try
-                info_dcc(k)
-            catch
-                nothing
-            end
-            present = (info !== nothing && info.type == 100) || etat in (0, -2, -4)
-            present || continue
-            vues += 1
             # L'état de surcharge se lit sur la carte : seulement si le module est prêt.
             s = etat == 0 ? (try surcharge_dcc(k) catch; nothing end) : nothing
-            protection = s === nothing ? "?" :
+            protection = s === nothing ? "surcharge ?" :
                          "surcharge C1 $(s.c1 ? "OUI" : "non"), C3 $(s.c3 ? "OUI" : "non")"
-            if info === nothing
-                @printf("  module %d : %s\n", k, get(MESSAGES_INIT_DCC, etat, "état $etat"))
-            else
-                @printf("  module %d : DCC-100 n° de série %-12s bus PCI %3d, slot %2d : %s ; %s\n",
-                        k, info.serie, info.bus, info.slot,
-                        etat == 0 ? "prête" : get(MESSAGES_INIT_DCC, etat, "état $etat"), protection)
-            end
+            @printf("  module %d : DCC-100 n° de série %-8s bus PCI %3d, slot %2d, utilisé %2d : %s ; %s\n",
+                    k, info.serie, info.bus, info.slot, info.utilise,
+                    etat == 0 ? "prête" : get(MESSAGES_INIT_DCC, etat, "état $etat"), protection)
+            etat == -4 && (verrou = true)
         end
-        vues == 0 && println("  aucun DCC-100 trouvé : ",
-                             get(MESSAGES_INIT_DCC, etat_init_dcc(0), "état $(etat_init_dcc(0))"))
+        isempty(detectes) && println("  aucun DCC-100 détecté",
+                                     code_dcc < 0 ? " (DCC_init : $(message_erreur_dcc(code_dcc)))" : "")
+        verrou && println("  → verrou : ferme le logiciel DCC et SPCM, puis lance dcc_deverrouiller.jl.")
     end
-    println("\nToutes les sorties des DCC-100 sont coupées. Colle cette sortie dans la conversation.")
+    println("\nLes sorties des DCC-100 pris par ce script sont coupées et les modules libérés.")
+    println("Colle cette sortie dans la conversation.")
     return nothing
 end
 
