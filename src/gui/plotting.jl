@@ -365,8 +365,12 @@ function refresh_plot_slot!(app, app_run, plot::PlotSlot)
         if isempty(starts)
             starts, ends = [NaN], [NaN]
         end
-        plot.spans.starts.val = starts
-        plot.spans.ends[] = ends   # one notify: vspan reads both
+        # Both notified: Makie ignores a silent `.val` write, so the band would
+        # keep stale starts against fresh ends. The render loop runs on this
+        # same thread and only redraws once this tick returns, so it never
+        # sees one updated without the other.
+        plot.spans.starts[] = starts
+        plot.spans.ends[] = ends
     end
 
     if !isempty(plot.readback_lines)
