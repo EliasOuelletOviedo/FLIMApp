@@ -8,8 +8,9 @@ the other threads into Observables. Each tick:
 1. publishes the analysis settings if the user changed any (GUI -> worker);
 2. copies what's new from the exchange rings (a few µs under their locks)
    and appends it to the GUI-side histories;
-3. refreshes the bound curves in place, one `notify` each, and the axis
-   limits at most once per `autoscale_interval_s`;
+3. refreshes the bound curves in place, one `notify` each, moving the
+   time-series axis limits with them (Histogram and Readback at most once
+   per `autoscale_interval_s`);
 4. updates the status labels and, once a second, the diagnostics (plan §9);
 5. closes the run once the worker and the scan have both stopped.
 
@@ -110,8 +111,9 @@ function refresh_tick!(app, app_run, blocks)
     # can; redrawing along the way would only slow the GUI down).
     live = !(app_run.running[] && app_run.run_mode == "Save")
     if state.dirty && live
-        for plot in values(state.plots)
+        for (slot, plot) in state.plots
             refresh_plot_slot!(app, app_run, plot)
+            update_data_limits!(app, app_run, plot_axis(blocks, slot), plot)
         end
         state.dirty = false
     end
@@ -128,11 +130,11 @@ function refresh_tick!(app, app_run, blocks)
     return nothing
 end
 
+plot_axis(blocks, slot::Symbol) = slot == :plot1 ? blocks.plot_1_axis : blocks.plot_2_axis
+
 function autoscale_both!(app, app_run, blocks)
-    for (slot, axis, show_ch1, show_ch2) in ((:plot1, blocks.plot_1_axis, app.layout.plot1_ch1, app.layout.plot1_ch2),
-                                             (:plot2, blocks.plot_2_axis, app.layout.plot2_ch1, app.layout.plot2_ch2))
-        plot = get(app_run.display.plots, slot, nothing)
-        plot === nothing || autoscale_plot_slot!(app, app_run, axis, plot, show_ch1, show_ch2)
+    for (slot, plot) in app_run.display.plots
+        autoscale_plot_slot!(app, app_run, plot_axis(blocks, slot), plot)
     end
     return nothing
 end

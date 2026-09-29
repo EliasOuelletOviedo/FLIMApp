@@ -6,7 +6,8 @@ plot slot's curves once, each bound to the history it shows (`SeriesLine`,
 gui/app_run.jl); the refresh tick (gui/refresh.jl) then refills those
 curves' point buffers in place — windowed to the time range and decimated
 to `max_points_per_line` — with one `notify` per curve per tick, and
-rescales the axes at most once per `autoscale_interval_s`. No plot object
+moves the time-series axis limits along with every such refresh (Histogram
+and Readback at most once per `autoscale_interval_s`). No plot object
 is created or deleted outside `render_plot!` (a plot-type or channel-toggle
 change).
 """
@@ -337,7 +338,7 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol;
     end
 
     refresh_plot_slot!(app, app_run, plot)
-    autoscale_plot_slot!(app, app_run, axis, plot, show_ch1, show_ch2)
+    autoscale_plot_slot!(app, app_run, axis, plot)
     return nothing
 end
 
@@ -385,7 +386,8 @@ function refresh_plot_slot!(app, app_run, plot::PlotSlot)
 end
 
 # -----------------------------------------------------------------------------
-# axis autoscaling (at most once per autoscale_interval_s, see refresh.jl)
+# axis limits: time series follow every data refresh (refresh.jl);
+# Histogram and Readback are rescaled at most once per autoscale_interval_s
 # -----------------------------------------------------------------------------
 
 """
@@ -398,148 +400,93 @@ function autoscale_values!(ax)
     ylims!(ax, -0.05, 1.25)
 end
 
-function autoscale_values!(app, ax, xs::AbstractVector; pad_ratio=0.05)
-    if isempty(xs)
-        return
+"""
+    data_limits(app, plot; pad_ratio=0.05)
+
+`(x_limits, y_limits)` for a running time-series plot, from the histories
+its curves are bound to (full resolution, not the decimated points), in one
+pass and without allocating. x: the last `time_range` seconds (at least
+`0…time_range` until that much data exists). y: the finite values inside
+that window — `nothing` if there are none yet. Both padded by `pad_ratio`.
+`nothing` if no curve has data yet.
+"""
+function data_limits(app, plot::PlotSlot; pad_ratio=0.05)
+    time_range = Float64(app.layout.time_range)
+
+    # x: each curve shows its own last `time_range` seconds (fill_points!).
+    xmin, xmax = Inf, -Inf
+    for line in plot.series_lines
+        n = min(length(line.xs), length(line.ys))
+        n == 0 && continue
+        last_x = line.xs[n]
+        first_x = line.xs[searchsortedfirst(view(line.xs, 1:n), last_x - time_range)]
+        xmin = min(xmin, first_x)
+        xmax = max(xmax, last_x)
+    end
+    isfinite(xmin) && isfinite(xmax) || return nothing
+    xmax = max(xmax, time_range)
+    xmin = max(xmin, xmax - time_range)
+
+    # y: every finite value inside [xmin, xmax].
+    ymin, ymax = Inf, -Inf
+    for line in plot.series_lines
+        n = min(length(line.xs), length(line.ys))
+        start = searchsortedfirst(view(line.xs, 1:n), xmin)
+        @inbounds for i in start:n
+            y = line.ys[i]
+            if isfinite(y)
+                ymin = min(ymin, y)
+                ymax = max(ymax, y)
+            end
+        end
     end
 
-    valid = .!isnan.(xs)
-    xs = xs[valid]
-    if isempty(xs)
-        return
-    end
-
-    time_range = app.layout.time_range
-    xmin, xmax = minimum(xs), maximum(xs)
-
-    if xmax < time_range
-        xmax = time_range
-    end
-
-    if xmax - xmin > time_range
-        xmin = xmax - time_range
-    end
-
+    # avoid zero-range
     if xmin == xmax
         xmin -= 0.5
         xmax += 0.5
     end
-
     xpad = (xmax - xmin) * pad_ratio
+    x_limits = (xmin - xpad, xmax + xpad)
 
-    xlims!(ax, xmin - xpad, xmax + xpad)
-    ylims!(ax, 0.0, 100.0)
-end
-
-function autoscale_values!(app, ax, xs::AbstractVector, ys::AbstractVector; pad_ratio=0.05)
-    if isempty(xs) || isempty(ys)
-        return
-    end
-    time_range = app.layout.time_range
-
-    # remove NaNs from the series
-    valid = .!isnan.(ys)
-    xs = xs[valid]
-    ys = ys[valid]
-    if isempty(xs)
-        return
-    end
-
-    xmin, xmax = minimum(xs), maximum(xs)
-
-    if xmax < time_range
-        xmax = time_range
-    end
-
-    if xmax - xmin > time_range
-        xmin = xmax - time_range
-    end
-
-    # compute y-range using only points inside the current x-window
-    in_win = (xs .>= xmin) .& (xs .<= xmax)
-    if any(in_win)
-        ymin, ymax = minimum(ys[in_win]), maximum(ys[in_win])
-    else
-        ymin, ymax = minimum(ys), maximum(ys)
-    end
-
-    # avoid zero‑range
-    if xmin == xmax
-        xmin -= 0.5
-        xmax += 0.5
-    end
+    isfinite(ymin) || return (x_limits, nothing)
     if ymin == ymax
         ymin -= 0.5
         ymax += 0.5
     end
-
-    xpad = (xmax - xmin) * pad_ratio
     ypad = (ymax - ymin) * pad_ratio
-
-    xlims!(ax, xmin - xpad, xmax + xpad)
-    ylims!(ax, ymin - ypad, ymax + ypad)
+    return (x_limits, (ymin - ypad, ymax + ypad))
 end
 
 """
-    accumulate_windowed!(xs_acc, ys_acc, timestamps, values, time_range)
+    update_data_limits!(app, app_run, axis, plot)
 
-Append `windowed_slice(timestamps, values, time_range)` onto `xs_acc`/`ys_acc`.
+While running, set `axis`'s limits to the window its curves were just
+refilled with (`data_limits`; y fixed to 0–100 % for Command) — called
+right after `refresh_plot_slot!`, so the limits and the data move together.
+One `limits` update, and only when something changed. Histogram and
+Readback keep their own limits (`autoscale_plot_slot!`).
 """
-function accumulate_windowed!(xs_acc::Vector{Float64}, ys_acc::Vector{Float64}, timestamps::AbstractVector{Float64}, values::AbstractVector{Float64}, time_range)
-    ts_w, val_w = windowed_slice(timestamps, values, time_range)
-    append!(xs_acc, ts_w)
-    append!(ys_acc, val_w)
+function update_data_limits!(app, app_run, axis, plot::PlotSlot)
+    app_run.running[] || return nothing
+    plot.selection in ("Histogram", "Readback") && return nothing
+    limits = data_limits(app, plot)
+    limits === nothing && return nothing
+
+    x_limits, y_limits = limits
+    plot.selection == "Command" && (y_limits = (0.0, 100.0))
+    new_limits = (x_limits, something(y_limits, axis.limits[][2]))
+    isequal(axis.limits[], new_limits) || (axis.limits[] = new_limits)
     return nothing
 end
 
 """
-    lookup_plot_series(app_run, plot_label, time_range, show_ch1, show_ch2)
-
-x/y values one plot label shows over the last `time_range` seconds, for
-autoscaling: whichever channel(s)/ROIs are shown (each ROI windowed on its
-own timestamps). `Command` ignores the channel toggles (it always shows
-both controller outputs).
-"""
-function lookup_plot_series(app_run, plot_label, time_range, show_ch1::Bool, show_ch2::Bool)
-    if plot_label == "Histogram"
-        return (app_run.hist_time[], app_run.ch1.histogram[])
-    end
-
-    xs = Float64[]
-    ys = Float64[]
-    shown = shown_channel_series(app_run, show_ch1, show_ch2)
-
-    if plot_label == "Photon counts"
-        for (roi_series, _) in shown, series in roi_series
-            accumulate_windowed!(xs, ys, series.timestamps, series.photons, time_range)
-            accumulate_windowed!(xs, ys, series.timestamps, series.photons_smooth, time_range)
-        end
-    elseif plot_label == "Lifetime"
-        for (roi_series, _) in shown, series in roi_series
-            accumulate_windowed!(xs, ys, series.timestamps, series.lifetime, time_range)
-            accumulate_windowed!(xs, ys, series.timestamps, series.lifetime_smooth, time_range)
-        end
-        accumulate_windowed!(xs, ys, app_run.timestamps, app_run.protocol_setpoint, time_range)
-    elseif plot_label == "Ion concentration"
-        for (roi_series, _) in shown, series in roi_series
-            accumulate_windowed!(xs, ys, series.timestamps, series.concentration, time_range)
-            accumulate_windowed!(xs, ys, series.timestamps, series.concentration_smooth, time_range)
-        end
-    elseif plot_label == "Command"
-        accumulate_windowed!(xs, ys, app_run.timestamps, app_run.command1, time_range)
-        accumulate_windowed!(xs, ys, app_run.timestamps, app_run.command2, time_range)
-    end
-
-    return (xs, ys)
-end
-
-"""
-    autoscale_plot_slot!(app, app_run, axis, plot, show_ch1, show_ch2)
+    autoscale_plot_slot!(app, app_run, axis, plot)
 
 Set `axis`'s limits for what `plot` shows: the rolling `time_range` window
-while running, the whole run once stopped.
+while running (`update_data_limits!`), the whole run once stopped.
 """
-function autoscale_plot_slot!(app, app_run, axis, plot::PlotSlot, show_ch1::Bool, show_ch2::Bool)
+function autoscale_plot_slot!(app, app_run, axis, plot::PlotSlot)
     label = plot.selection
 
     if label == "Histogram"
@@ -552,8 +499,7 @@ function autoscale_plot_slot!(app, app_run, axis, plot::PlotSlot, show_ch1::Bool
         xmax = lim.origin[1] + lim.widths[1]
         xlims!(axis, 0.0, max(Float64(xmax), 0.0))
     else
-        xs, ys = lookup_plot_series(app_run, label, app.layout.time_range, show_ch1, show_ch2)
-        label == "Command" ? autoscale_values!(app, axis, xs) : autoscale_values!(app, axis, xs, ys)
+        update_data_limits!(app, app_run, axis, plot)
     end
     return nothing
 end

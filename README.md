@@ -12,7 +12,7 @@ This application provides:
 
 ## Prerequisites
 
-- **Julia** 1.11.5 or later
+- **Julia** 1.13.1 or later
 
 ### Julia Packages
 

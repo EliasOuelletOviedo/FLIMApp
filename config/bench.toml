@@ -57,5 +57,5 @@ flush_interval_s = 1.0
 
 [display]
 refresh_hz = 30
-autoscale_interval_s = 1.0     # axis limits recomputed at most this often
+autoscale_interval_s = 1.0     # Histogram/Readback limits recomputed at most this often (time series follow every refresh)
 max_points_per_line = 4000     # longer windows are decimated before plotting

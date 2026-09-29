@@ -577,6 +577,8 @@ MENU_ATTRS = Dict{Symbol, Any}(
     :prompt                        => " ",
     :selection_cell_color_inactive => COLOR_1,
     :textcolor                     => TEXT,
+    :textcolor_active              => TEXT,
+    :textcolor_hover               => TEXT,
     :tellwidth                     => false,
     :width                         => nothing
 )

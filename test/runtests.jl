@@ -162,6 +162,22 @@ end
     @test starts == [1.0, 4.0]
     @test ends == [3.0, 5.0]
 
+    # Axis limits follow the data: the last time_range seconds, y over that
+    # window only (an old outlier and NaN values don't count).
+    app = AppState(true)
+    app.layout.time_range = 10
+    bound_line(xs, ys) = FLIMApp.SeriesLine(FLIMApp.Observable(FLIMApp.Point2f[]), xs, ys)
+    plot = FLIMApp.PlotSlot()
+    ys = [i < 15 ? 1000.0 : Float64(i) for i in 0:30]
+    ys[end] = NaN
+    push!(plot.series_lines, bound_line(collect(0.0:1.0:30.0), ys))
+    @test FLIMApp.data_limits(app, plot; pad_ratio=0.0) == ((20.0, 30.0), (20.0, 29.0))
+    # Until time_range seconds of data exist, x spans 0…time_range.
+    short = FLIMApp.PlotSlot()
+    push!(short.series_lines, bound_line([0.0, 1.0], [2.0, 2.0]))
+    @test FLIMApp.data_limits(app, short; pad_ratio=0.0) == ((0.0, 10.0), (1.5, 2.5))
+    @test FLIMApp.data_limits(app, FLIMApp.PlotSlot()) === nothing
+
     @test FLIMApp.normalize_to_own_max([1.0, 2.0, 4.0]) == [0.25, 0.5, 1.0]
     @test FLIMApp.normalize_to_own_max(Float64[]) == Float64[]
     @test FLIMApp.normalize_counts_to_fit([2.0, 4.0], [1.0, 8.0]) == [0.25, 0.5]
