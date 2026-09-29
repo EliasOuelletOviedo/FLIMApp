@@ -1,0 +1,44 @@
+== Cartes NI ==
+  S6110    PCI-6110     n° de série 1BC9D93
+  X6321    PCIe-6321    n° de série 1C31C12
+
+== Cartes SPC (DLL : C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll) ==
+  module 0 : SPC-150N   n° de série ?          bus PCI   4, slot  5, utilisé -1 : état -6 : module déjà utilisé et verrouillé par un autre programme (SPCM ouvert ?)
+  module 1 : SPC-150N   n° de série ?          bus PCI   4, slot  4, utilisé -1 : état -6 : module déjà utilisé et verrouillé par un autre programme (SPCM ouvert ?)
+  → verrou : ferme VS Code, vérifie les processus (voir le plan), puis lance spc_deverrouiller.jl.
+
+== Contrôleurs DCC-100 (DLL : C:\Program Files (x86)\BH\DCC\DLL\dcc64.dll) ==
+  module 0 : DCC-100 n° de série 812167       bus PCI   4, slot  8 : prête ; surcharge C1 non, C3 non
+  module 1 : DCC-100 n° de série 812168       bus PCI   4, slot 10 : prête ; surcharge C1 non, C3 non
+
+Toutes les sorties des DCC-100 sont coupées. Colle cette sortie dans la conversation.
+
+
+Avant (utilisé -1 = verrouillé par un autre programme) :
+  module 0 : bus 4, slot 5, utilisé -1, n° de série ?          état -6 : module déjà utilisé et verrouillé par un autre programme (SPCM ouvert ?)
+  module 1 : bus 4, slot 4, utilisé -1, n° de série ?          état -6 : module déjà utilisé et verrouillé par un autre programme (SPCM ouvert ?)
+
+Après la reprise forcée (utilisé 1 = pris par cette session) :
+  module 0 : bus 4, slot 5, utilisé  1, n° de série 3N0317     prête
+  module 1 : bus 4, slot 4, utilisé  1, n° de série 3N0318     prête
+
+Vérification, nouvelle initialisation sans forcer :
+  module 0 : bus 4, slot 5, utilisé  1, n° de série 3N0317     prête
+  module 1 : bus 4, slot 4, utilisé  1, n° de série 3N0318     prête
+
+RÉUSSI : verrou levé. Relance carto1_inventaire.jl, puis la suite.
+true
+
+== Cartes NI ==
+  S6110    PCI-6110     n° de série 1BC9D93
+  X6321    PCIe-6321    n° de série 1C31C12
+
+== Cartes SPC (DLL : C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll) ==
+  module 0 : SPC-150N   n° de série 3N0317     bus PCI   4, slot  5, utilisé  1 : prête
+  module 1 : SPC-150N   n° de série 3N0318     bus PCI   4, slot  4, utilisé  1 : prête
+
+== Contrôleurs DCC-100 (DLL : C:\Program Files (x86)\BH\DCC\DLL\dcc64.dll) ==
+  module 0 : DCC-100 n° de série 812167       bus PCI   4, slot  8 : module déjà utilisé par un autre programme (logiciel DCC ou SPCM ouvert ?) ; ?
+  module 1 : DCC-100 n° de série 812168       bus PCI   4, slot 10 : module déjà utilisé par un autre programme (logiciel DCC ou SPCM ouvert ?) ; ?
+
+Toutes les sorties des DCC-100 sont coupées. Colle cette sortie dans la conversation.
