@@ -170,6 +170,20 @@ function make_control_widgets!(button_grid, panelbtn_grid)
 end
 
 """
+    make_top_bar_widgets!(top_grid, app_run)
+
+The top bar: the SPC engine's status line (cards, CFD rates, last error —
+kept current by the refresh tick through `app_run.spc.status`) and the SPC
+button that opens the SPC window (gui/spc_window.jl).
+"""
+function make_top_bar_widgets!(top_grid, app_run)
+    spc_label = Label(top_grid[1, 1:4], app_run.spc.status; merge(LABEL_ATTRS, Dict{Symbol, Any}(
+        :halign => :left, :justification => :left, :tellwidth => false, :padding => (8, 0, 0, 0)))...)
+    spc_button = Button(top_grid[1, 5]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "SPC", :width => 64))...)
+    return (spc_label=spc_label, spc_button=spc_button)
+end
+
+"""
     draw_initial_plots!(app, app_run, blocks)
 
 Draw the initially-selected series (per `app.layout.plot1`/`.plot2`, gated
@@ -203,6 +217,7 @@ function make_gui(app, app_run)
     grids = make_gui_grids(fig)
     axes = make_plot_axes!(grids.left_grid, app, app_run)
     widgets = make_control_widgets!(grids.button_grid, grids.panelbtn_grid)
+    top_bar = make_top_bar_widgets!(grids.top_grid, app_run)
 
     apply_gui_layout_tweaks!(fig, grids)
 
@@ -227,6 +242,8 @@ function make_gui(app, app_run)
         lifetimes_menu      = widgets.lifetimes_menu,
         panel_buttons       = widgets.panel_buttons,
         info_label          = widgets.info_label,
+        spc_label           = top_bar.spc_label,
+        spc_button          = top_bar.spc_button,
         counts_axis         = axes.counts_axis,
         plot_1_axis         = axes.plot_1,
         plot_2_axis         = axes.plot_2,

@@ -43,6 +43,8 @@ Base.@kwdef struct GuiBlocks
     lifetimes_menu::Menu
     panel_buttons::Dict{Symbol, Button}
     info_label::Label
+    spc_label::Label
+    spc_button::Button
     # Axes
     counts_axis::Axis
     plot_1_axis::Axis

@@ -22,10 +22,10 @@ this script on each platform you want a binary for:
 Either way the raw PackageCompiler output also remains directly runnable
 from a terminal (`.../bin/FLIMApp`).
 
-The launcher on both platforms sets `JULIA_NUM_THREADS=3,1` (plan.md §2):
+The launcher on both platforms sets `JULIA_NUM_THREADS=4,1` (plan.md §2):
 one interactive thread for the GUI, and worker threads for the DAQ loop,
-the journal and the analysis, so neither a card read nor a fit can freeze
-the window. It also passes
+the journal, the analysis and the SPC engine, so neither a card read nor a
+fit can freeze the window. It also passes
 `--gcthreads=<cores>,1` (no environment-variable equivalent exists for this
 one, unlike JULIA_NUM_THREADS, so it has to be a CLI arg to the launched
 binary) -- maxing out GC mark-phase parallelism plus concurrent sweeping
@@ -115,12 +115,12 @@ if Sys.isapple()
     write(launcher,
         """
         #!/bin/bash
-        # FLIMApp launcher: locate the bundled app and run it with 3 worker
+        # FLIMApp launcher: locate the bundled app and run it with 4 worker
         # threads + 1 interactive thread (plan.md section 2), GC mark/sweep
         # parallelism maxed out (see create_app.jl's docstring for why --
         # reduces GC-pause tail latency), and the bundled bench config.
         DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-        export JULIA_NUM_THREADS=3,1
+        export JULIA_NUM_THREADS=4,1
         NCORES="\$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
         exec "\$DIR/../Resources/app/bin/FLIMApp" --gcthreads="\$NCORES",1 "\$DIR/../Resources/app/config/bench.toml"
         """)
@@ -137,7 +137,7 @@ elseif Sys.iswindows()
     write(bat,
         """
         @echo off
-        set JULIA_NUM_THREADS=3,1
+        set JULIA_NUM_THREADS=4,1
         start "FLIMApp" /high "%~dp0bin\\FLIMApp.exe" --gcthreads=%NUMBER_OF_PROCESSORS%,1 "%~dp0config\\bench.toml"
         """)
 

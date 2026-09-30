@@ -11,8 +11,10 @@ the other threads into Observables. Each tick:
 3. refreshes the bound curves in place, one `notify` each, moving the
    time-series axis limits with them (Histogram and Readback at most once
    per `autoscale_interval_s`);
-4. updates the status labels and, once a second, the diagnostics (plan §9);
-5. closes the run once the worker and the scan have both stopped.
+4. drains the SPC engine's results into the SPC window and the top bar
+   (`spc_tick!`, gui/spc_view.jl);
+5. updates the status labels and, once a second, the diagnostics (plan §9);
+6. closes the run once the worker and the scan have both stopped.
 
 Nothing here waits for another thread.
 """
@@ -101,6 +103,9 @@ function refresh_tick!(app, app_run, blocks)
     end
 
     copy_readback_view!(state, ex.readback) && (state.dirty = true)
+
+    # SPC engine results -> SPC window and top bar (images at most 10 Hz)
+    spc_tick!(app_run.spc, started_ns)
 
     progress = ex.save_progress[]
     if app_run.run_open && app_run.run_mode == "Save" && !isequal(progress, app_run.save_progress[])
@@ -292,6 +297,7 @@ function diagnostics_text(app_run)::String
         "GC: most in one tick $(ms(state.gc_tick_max_s))   longest wait for a safepoint (since launch) $(ms(Int(gc.max_time_to_safepoint) / 1e9))",
         "Journal: $(pending_journal(ex.journal)) pending   $(ex.journal.dropped[]) dropped",
         "Display lost: $(state.frames_lost) frames, $(state.slots_lost) slots",
+        spc_diagnostics_text(app_run.spc),
         "Memory: $(round(Sys.maxrss() / 2^20, digits=0)) MB peak",
         "Threads: $(Threads.nthreads(:interactive)) interactive + $(Threads.nthreads(:default)) default",
         "Config: $(app_run.config.source) ($(app_run.config.backend))"

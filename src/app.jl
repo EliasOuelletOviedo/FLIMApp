@@ -4,16 +4,18 @@ app.jl
 Application start-up and shutdown (plan §2, §5, §6, §7):
 
 - `run_app` loads config/bench.toml, spawns the DAQ loop and journal
-  threads, builds and shows the window, warms up the GUI code paths, and
-  starts the 30 Hz refresh tick;
+  threads, starts the SPC engine (FLIMCore, if config/spc.toml asks for it),
+  builds and shows the window, warms up the GUI code paths, and starts the
+  30 Hz refresh tick;
 - closing the window stops everything the way STOP does (the loop sees the
   stop flag within one readback block and zeroes every output), then
-  disconnects the cards and lets the journal write what's left.
+  disconnects the cards, stops the SPC engine (which frees the SPC-150N)
+  and lets the journal write what's left.
 
-Launch with 3 worker threads and 1 interactive thread (scripts/launch.bat
+Launch with 4 worker threads and 1 interactive thread (scripts/launch.bat
 on the bench, at high priority):
 
-    julia --project -t 3,1 scripts/app.jl config/bench.toml
+    julia --project -t 4,1 scripts/app.jl config/bench.toml
 """
 
 using GLMakie
@@ -25,19 +27,21 @@ const LAST_APP_RUN = Ref{Union{Nothing, AppRun}}(nothing)
     check_threads()
 
 Warn unless Julia runs with an interactive thread for the GUI and at least
-three worker threads (DAQ loop, journal, analysis): with fewer, a blocking
-card read or a fit shares a thread with the window, which then freezes.
+four worker threads (DAQ loop, journal, analysis, SPC engine): with fewer, a
+blocking card read or a fit shares a thread with the window, which then
+freezes.
 """
 function check_threads()
     n_interactive = Threads.nthreads(:interactive)
     n_default = Threads.nthreads(:default)
-    if n_interactive == 0 || n_default < 3
+    if n_interactive == 0 || n_default < 4
         @warn """
         Julia is running with $n_default worker thread(s) and $n_interactive interactive thread(s).
         The GUI needs the interactive thread to itself, and the DAQ loop, the
-        journal and the analysis each need a worker thread; otherwise a card
-        read or a lifetime fit can freeze the window (plan.md §2). Start with:
-            julia --project -t 3,1 scripts/app.jl config/bench.toml
+        journal, the analysis and the SPC engine each need a worker thread;
+        otherwise a card read or a lifetime fit can freeze the window (plan.md §2).
+        Start with:
+            julia --project -t 4,1 scripts/app.jl config/bench.toml
         (scripts/launch.bat does this at high priority on Windows).
         """
     end
@@ -92,6 +96,7 @@ function warm_up_gui!(app, app_run, blocks)
     render_plot!(app, app_run, blocks, :plot2)
     reset_diagnostics!(app_run.display)
     app_run.display.diagnostics[] = diagnostics_text(app_run)
+    warm_up_spc_display!(app_run.spc)
     return nothing
 end
 
@@ -99,9 +104,10 @@ end
     shutdown_app!(app_run)
 
 Window closed: stop the analysis and the scan (outputs to zero within one
-readback block), disconnect the cards, stop the DAQ loop, then let the
-journal write everything queued and close. Returns immediately; the
-journal is released once the loop has finished (5 s at most).
+readback block), disconnect the cards, stop the DAQ loop and the SPC engine
+(which stops its measurement and frees the SPC-150N), then let the journal
+write everything queued and close. Returns immediately; the journal is
+released once the loop and the SPC engine have finished (5 s at most).
 """
 function shutdown_app!(app_run::AppRun)
     ex = app_run.exchange
@@ -113,10 +119,12 @@ function shutdown_app!(app_run::AppRun)
     send_command!(ex, DisconnectCommand())
     send_command!(ex, QuitCommand())
     journal_event!(ex.journal, :info, "window closed")
+    spc_stopping = stop_spc!(app_run.spc)
 
     loop = app_run.loop_task
     Threads.@spawn begin
         loop === nothing || timedwait(() -> istaskdone(loop), 5.0; pollint=0.05)
+        spc_stopping === nothing || timedwait(() -> istaskdone(spc_stopping), 5.0; pollint=0.05)
         ex.shutdown[] = true
     end
     return nothing
@@ -157,6 +165,10 @@ function run_app(config_path::AbstractString = default_bench_config_path())
     start_background_threads!(app_run)
     journal_event!(app_run.exchange.journal, :info, "app started (config $(cfg.source), backend $(cfg.backend))")
 
+    # Plan.pdf, start-up step 3: the GUI starts the SPC engine, which
+    # initializes and checks the SPC-150N on its own thread.
+    app_run.spc.settings.connexion_au_demarrage && spc_connect!(app_run.spc)
+
     @info "Creating GUI..."
     fig, blocks = make_gui(app_state, app_run)
     make_handlers(app_state, app_run, blocks)
@@ -177,10 +189,10 @@ end
 """
     wait_for_window(fig; timeout_s=10.0)
 
-Block until the window is closed, then until the DAQ loop and journal of
-the last `run_app` have finished (at most `timeout_s`) — for scripts and
-the compiled app, which would otherwise exit before the outputs are zeroed
-and the journal closed.
+Block until the window is closed, then until the DAQ loop, the SPC engine
+and the journal of the last `run_app` have finished (at most `timeout_s`) —
+for scripts and the compiled app, which would otherwise exit before the
+outputs are zeroed, the SPC-150N freed and the journal closed.
 """
 function wait_for_window(fig; timeout_s::Real = 10.0)
     screen = GLMakie.Makie.getscreen(fig.scene)
@@ -189,7 +201,7 @@ function wait_for_window(fig; timeout_s::Real = 10.0)
     app_run = LAST_APP_RUN[]
     if app_run !== nothing
         shutdown_app!(app_run)
-        for task in (app_run.loop_task, app_run.journal_task)
+        for task in (app_run.loop_task, app_run.spc.stopping, app_run.journal_task)
             task === nothing || timedwait(() -> istaskdone(task), Float64(timeout_s); pollint=0.05)
         end
     end

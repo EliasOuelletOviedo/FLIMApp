@@ -8,6 +8,7 @@ Wires up:
   handlers_protocol.jl / handlers_console.jl for each panel's own controls)
 - START/PAUSE/RESUME/STOP button actions
 - IRF/data-folder path selection and DAQ connect/disconnect/acknowledge
+- the SPC button, which opens the SPC window (gui/spc_window.jl)
 
 Handlers never do the work themselves (plan §2): the DAQ buttons only drop
 a command for the DAQ loop thread, START spawns the analysis worker; their
@@ -78,6 +79,7 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
     panel_grid = blocks.panel_grid
     protocol_popup_screen = Ref{Union{Nothing, GLMakie.Screen}}(nothing)
     roi_popup_screen = Ref{Union{Nothing, GLMakie.Screen}}(nothing)
+    spc_window_screen = Ref{Union{Nothing, GLMakie.Screen}}(nothing)
 
     panel_handlers = Dict{Symbol, Function}(
         :layout     => (;force=false) -> layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force=force),
@@ -174,6 +176,11 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
             request_stop!(ex)
             send_command!(ex, DisconnectCommand())
         end
+    end
+
+    # SPC window: SPC-150N controls and live images (gui/spc_window.jl).
+    on(blocks.spc_button.clicks) do _
+        open_spc_window!(app_run, spc_window_screen)
     end
 
     for (key, btn) in panel

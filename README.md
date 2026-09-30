@@ -52,12 +52,19 @@ FLIMApp/
 │   ├── handlers_console.jl     # Console panel controls
 │   ├── handlers.jl             # Event handler orchestrator
 │   ├── GUI.jl                  # Makie GUI construction
-│   └── io/
-│       ├── SdtFile.jl          # SDT block parser; used by lifetime_analysis.jl's read_sdt_frame
-│       ├── DAQmx.jl            # Minimal NI-DAQmx bindings (ccall on nicaiu); used by daq.jl
-│       └── ImageJROI.jl        # WIP: ImageJ ROI reader (not yet wired in)
+│   ├── io/
+│   │   ├── SdtFile.jl          # SDT block parser; used by lifetime_analysis.jl's read_sdt_frame
+│   │   ├── DAQmx.jl            # Minimal NI-DAQmx bindings (ccall on nicaiu); used by daq.jl
+│   │   └── ImageJROI.jl        # WIP: ImageJ ROI reader (not yet wired in)
+│   ├── spc/                    # FLIMCore: SPC-150N engine (see "SPC-150N cards" below)
+│   └── gui/spc_view.jl, gui/spc_window.jl   # its GUI side: top bar + SPC window
+├── config/
+│   ├── bench.toml              # NI wiring, timing, limits, journal
+│   └── spc.toml                # SPC-150N settings (replaces reglages_spc.jl)
+├── scripts/spc/                # imagerie.jl, single.jl: FLIMCore launchers (replace the bench scripts)
 ├── test/
-│   └── runtests.jl             # Test suite (run with `Pkg.test()`)
+│   ├── runtests.jl             # Test suite (run with `Pkg.test()`)
+│   └── test_flimcore.jl        # FLIMCore tests (also runnable alone: julia -t 4 test/test_flimcore.jl)
 ├── scripts/analysis/           # Ad-hoc profiling/benchmark/spike scripts (not run by CI)
 ├── build/
 │   ├── create_app.jl           # Standalone executable build (PackageCompiler)
@@ -131,6 +138,62 @@ The build takes tens of minutes and bundles Julia + all libraries
    - **Time range**: Duration of display window (seconds)
    - **Binning**: Number of frames to sum together
    - **Plot selection**: Choose what quantities to display
+
+## SPC-150N cards (FLIMCore)
+
+The two SPC-150N TCSPC cards are driven by **FLIMCore** (`src/spc/`), as laid
+out in Plan.pdf. One task (`Threads.@spawn`, the SPC engine) is the only
+code that calls the SPC DLL (`src/spc/SPCLite.jl`); the GUI sends it
+commands and reads its results through two `Channel`s, and never makes a
+`ccall`. The standalone DCC software keeps the detectors: the app never
+calls the DCC-100 DLL, and only sees the detectors through the CFD rate.
+
+**Start-up and shutdown on the bench**
+
+1. Power the Magma and Simple-Tau chassis, then the PC.
+2. Open the **standalone DCC software** (not SPCM's DCC panel). Set M1 (C1 and
+   C3 at 82 %, b0, cooling 5 V / 1.98 A) and click "Enable outputs". SPCM
+   must stay closed: it locks the SPC-150N.
+3. Launch the app (`scripts\launch.bat`). With `connexion_au_demarrage = true`
+   in `config/spc.toml`, the engine initializes the cards and checks them:
+   modules 0 and 1 ready, serial numbers 3N0317 and 3N0318, SYNC on both,
+   settings applied as requested, CFD above `seuil_cfd`. The top bar shows
+   the result; the **SPC** button opens the SPC window with the details.
+4. During measurements the engine rereads the rates every 0.5 s and raises
+   an alert when SYNC is lost or the CFD rate collapses (overload shutdown in
+   the DCC software).
+5. Close the window: the engine stops any measurement and frees the cards,
+   even after an error (also on Ctrl+C, through `atexit`). Then turn the
+   outputs off in the DCC software.
+
+**SPC window**: CONNECT/DISCONNECT, CHECK, IMAGE (continuous, or
+`duree_s`), SINGLE, UNLOCK (cards left locked by a crashed session: asks for
+a second click, SPCM must be closed). Per card, the intensity and mean
+arrival time images (refreshed at most 10 times a second, summing
+`trames_par_image` frames), the decays and the CFD rate. The geometry,
+display and Single fields are written back to `config/spc.toml`.
+
+**Settings**: `config/spc.toml`, reread at every measurement start. Copy your
+SPCM values into `[spc_module]`. `[dcc]` records the DCC settings the app
+cannot read.
+
+**Files**: every acquisition goes to `~/FLIMApp_spc/` (`[enregistrement]
+dossier`): for imaging, per card, the raw FIFO stream (`.spc`), the
+parameters read back from the card (`_parametres.ini`), what is needed to
+reprocess it (`_acquisition.ini`, with the geometry and the declared DCC
+settings), the summed images (`.jls`, `_intensite.bmp`, `_temps_moyen.bmp`)
+and the decay (`_declin.svg`); for Single, `.csv`, `.svg` and
+`_parametres.ini`, as the bench scripts wrote them.
+
+**Without the cards**: `[source] type = "simulation"` (a synthetic scanner
+at 31.25 frames/s) or `"rejeu"` (replays recorded `.spc` files listed in
+`rejeu`, in real time) run the whole chain on any machine.
+
+**Scripts**: `scripts/spc/imagerie.jl` and `scripts/spc/single.jl` replace
+imagerie_photons.jl and histogrammes_single.jl (same outputs);
+`julia -t auto scripts/spc/imagerie.jl <name>` reprocesses a recorded
+acquisition without the cards. `SPC_REGLAGES=<file>` points them to another
+settings file.
 
 ## File Format
 

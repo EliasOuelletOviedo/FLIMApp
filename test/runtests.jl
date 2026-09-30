@@ -7,9 +7,12 @@ using ZipFile
 # These tests cover the GUI-free logic: protocol schedule math, smoothing,
 # state persistence, spinner stepping, plot windowing, the MLE lifetime fit
 # on a synthetic decay with a known lifetime, the bench config, the
-# exchanges between threads, the journal, and the DAQ loop on its simulated
-# backend. The GUI itself (Makie widgets/handlers) is exercised manually via
-# run_app().
+# exchanges between threads, the journal, the DAQ loop on its simulated
+# backend, and the SPC-150N engine (FLIMCore, test_flimcore.jl) with the
+# GUI side of it. The GUI itself (Makie widgets/handlers) is exercised
+# manually via run_app().
+
+const FLIMCore = FLIMApp.FLIMCore
 
 # A config for tests: simulated cards, journal in a temporary folder.
 test_bench_config(overrides = Dict{String, Any}()) = FLIMApp.bench_config_from_dict(
@@ -1118,6 +1121,63 @@ end
     finally
         rm(sdt_path; force=true)
     end
+end
+
+include("test_flimcore.jl")
+
+@testset "SPC window state, without a window" begin
+    # The GUI side of the engine (gui/spc_view.jl), on the simulated
+    # scanner: settings in a temporary file, never config/spc.toml.
+    path = joinpath(mktempdir(), "spc.toml")
+    FLIMCore.ecrire_reglages(path, FLIMCore.Reglages(source = "simulation", vitesse = 4.0, dossier = mktempdir(),
+                                                     seuil_cfd = 10.0, trames_par_image = 0))
+    queue = FLIMApp.JournalQueue(1000)
+    view = FLIMApp.SpcView(path, queue)
+    @test sort(collect(keys(view.cards))) == [0, 1] && view.status[] == "SPC: not connected"
+    view.window_open = true                     # publish images as if the window were open
+    tick() = FLIMApp.spc_tick!(view, time_ns())
+    await(f) = timedwait(() -> (tick(); f()), 60.0; pollint = 0.02) === :ok
+
+    FLIMApp.spc_connect!(view)
+    @test await(() -> FLIMApp.spc_state(view) == :pret && view.check !== nothing)
+    @test view.check.ok && view.check.source == "simulation"
+
+    # UNLOCK only acts on a second click.
+    FLIMApp.spc_unlock_pressed!(view)
+    @test view.unlock_armed_until > time()
+    FLIMApp.spc_unlock_pressed!(view)
+    @test await(() -> any(a -> occursin("aucun module verrouillé", a.texte), view.alerts))
+
+    FLIMApp.spc_toggle_imaging!(view)
+    @test await(() -> FLIMApp.spc_state(view) == :imagerie)
+    @test await(() -> all(c -> size(c.intensity[]) == (1111, 576), values(view.cards)))   # x = pixel, y = line
+    card = view.cards[0]
+    @test await(() -> count(isfinite, card.mean_time[]) > 100)      # running sum: enough photons per block
+    @test card.intensity_range[][2] >= 1 && 0 < card.time_range[][1] < card.time_range[][2] < 12.5
+    @test length(card.decay[]) == 256 && any(p -> p[2] > 1, card.decay[])
+    @test await(() -> occursin("SPC: imaging", view.status[]) && occursin("card 1: CFD", view.status[]))
+    @test await(() -> !isempty(card.rates[]))
+
+    # Settings edited in the window are written back; invalid ones refused.
+    @test FLIMApp.spc_edit_setting!(view, :binning_temps, 8)
+    @test FLIMCore.lire_reglages(path).binning_temps == 8
+    @test !FLIMApp.spc_edit_setting!(view, :binning_temps, 0) && view.settings.binning_temps == 8
+    tick()
+    @test occursin("setting refused", view.status[])
+    @test FLIMApp.spc_edit_setting!(view, :binning_temps, 4)          # a good value clears the message
+    tick()
+    @test !occursin("refused", view.status[])
+
+    FLIMApp.spc_toggle_imaging!(view)           # STOP
+    @test await(() -> FLIMApp.spc_state(view) == :pret && view.last_fin !== nothing)
+    @test !view.last_fin.erreur && any(f -> endswith(f, "module0.spc"), view.last_fin.fichiers)
+
+    FLIMApp.spc_disconnect!(view)
+    @test await(() -> view.engine === nothing)
+    @test timedwait(() -> istaskdone(view.stopping), 10.0) === :ok && fetch(view.stopping)
+    @test view.status[] == "SPC: not connected"
+    entries = FLIMApp.drain_journal!(FLIMApp.JournalEntry[], queue)
+    @test any(e -> e isa FLIMApp.JournalEvent && occursin("SPC imaging ended", e.message), entries)
 end
 
 end # @testset FLIMApp

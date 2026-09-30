@@ -27,9 +27,11 @@ using ZipFile
 #
 # Files are grouped by the thread that runs them (plan.md §8): gui/ runs on
 # the main thread only, analysis/ on the analysis worker, loop/ on the DAQ
-# loop (the only code that touches the NI cards), journal.jl on the journal
+# loop (the only code that touches the NI cards), spc/ on the SPC engine
+# (the only code that touches the SPC-150N cards), journal.jl on the journal
 # thread. Files at the top level are pure or shared definitions; the threads
-# share data only through exchange.jl.
+# share data only through exchange.jl — and, for the SPC engine, through
+# FLIMCore's two channels (commands and results).
 
 # --- Shared definitions ------------------------------------------------------
 
@@ -72,11 +74,19 @@ include("loop/daq_loop.jl")
 include("analysis/lifetime_analysis.jl")
 include("analysis/acquisition.jl")
 
+# --- SPC engine thread ---------------------------------------------------------
+
+# FLIMCore: the SPC-150N engine (the only task that calls the SPC DLL), its
+# photon sources (cards, .spc replay, simulation) and the pure functions of
+# the bench scripts. Its own module, standard library only (Plan.pdf).
+include("spc/FLIMCore.jl")
+
 # --- Main thread (GUI) ---------------------------------------------------------
 
 include("gui/gui_themes.jl")
 include("gui/gui_blocks.jl")
 include("gui/path_utils.jl")
+include("gui/spc_view.jl")
 include("gui/app_run.jl")
 include("gui/plotting.jl")
 include("gui/session_save.jl")
@@ -84,6 +94,7 @@ include("gui/runtime.jl")
 include("gui/refresh.jl")
 include("gui/protocol_popup.jl")
 include("gui/roi_popup.jl")
+include("gui/spc_window.jl")
 include("gui/handlers_layout.jl")
 include("gui/handlers_controller.jl")
 include("gui/handlers_protocol.jl")

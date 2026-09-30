@@ -242,6 +242,8 @@ Runtime state of the GUI thread. NOT serialized.
   ROIs were drawn on — see `roi_voltage_calibration_size` (roi_geometry.jl).
   Defaults to `(1024, 1024)`, the calibration reference.
 - `display::DisplayState`: refresh-tick bookkeeping and diagnostics
+- `spc::SpcView`: the SPC-150N engine handle, its settings (config/spc.toml)
+  and what the SPC window shows (gui/spc_view.jl)
 """
 mutable struct AppRun
     config::BenchConfig
@@ -272,6 +274,7 @@ mutable struct AppRun
     roi_order::Vector{Int}
     imported_image_size::Tuple{Int,Int}
     display::DisplayState
+    spc::SpcView
 end
 
 function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); source = "defaults"),
@@ -292,6 +295,7 @@ function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); s
         Observable(RoiCoordinates[]),
         Int[],
         (1024, 1024),
-        DisplayState()
+        DisplayState(),
+        SpcView(spc_settings_path(cfg), exchange.journal)
     )
 end

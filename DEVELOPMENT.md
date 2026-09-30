@@ -68,6 +68,34 @@ it yourself after `using FLIMApp`.
 
 **Violation of this order will cause MethodError or undefined reference errors!**
 
+## SPC-150N engine (FLIMCore)
+
+`src/spc/FLIMCore.jl` is its own module (standard library only), included
+by FLIMApp and loadable alone (`include("src/spc/FLIMCore.jl")`, as the
+scripts in `scripts/spc/` and `test/test_flimcore.jl` do). Its rules, from
+Plan.pdf:
+
+- **One task touches the SPC DLL**: the engine (`_boucle_moteur`,
+  `src/spc/moteur.jl`). GUI callbacks only call `FLIMCore.commander!`; the
+  refresh tick drains `engine.resultats` (`spc_tick!`, `gui/spc_view.jl`).
+- **Ready modules only**: a DLL call on an absent or uninitialized module
+  can kill Julia; try/catch cannot help. The engine only calls a source on
+  the modules `ouvrir!` returned as ready.
+- **Release guaranteed**: try/finally around the engine's whole life;
+  window close and `atexit` both call `arreter_moteur`.
+- **The engine never waits for the GUI**: a full results channel drops
+  (`perdus`), an `ImageTrame` without a free buffer is not published
+  (`trames_sautees`); recording and the saved sums are unaffected. Read
+  frames go back with `FLIMCore.rendre!`.
+- **Photon sources** share one interface (`src/spc/sources.jl`): the
+  cards, a `.spc` replay, a simulation; the SPC-QC-104 will be another one.
+- `ranger_photons` is imagerie_photons.jl's block processing, unchanged;
+  the `Rangeur` does the same frame by frame, and the tests check both give
+  identical results, to the bit.
+- Code updates: Revise during development, otherwise restart Julia; the
+  launchers call `FLIMCore.garde_version()` (bump `VERSION_CORE` when
+  FLIMCore changes).
+
 ## Global Variables
 
 Global variables are minimized but necessary for:

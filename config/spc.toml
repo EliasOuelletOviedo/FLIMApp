@@ -1,0 +1,70 @@
+# Réglages des SPC-150N pour FLIMCore (src/spc/FLIMCore.jl), relus à chaque
+# démarrage de mesure. Le GUI réécrit ce fichier quand tu changes un réglage
+# dans la fenêtre SPC : les commentaires sont regénérés, garde tes notes
+# ailleurs.
+#
+# [spc_module] remplace reglages_spc.jl : recopie les valeurs de SPCM
+# (panneau « System Parameters ») qui te donnent un beau déclin. Plages :
+# manuel de la DLL SPCM, section [spc_module]. Une clé inconnue de la DLL
+# est signalée par le tableau « demandé → appliqué ».
+
+[source]
+type = "cartes"                  # "cartes" (les SPC-150N), "rejeu" (fichiers .spc ci-dessous) ou "simulation"
+rejeu = []                       # fichiers .spc à rejouer, un par carte (écrits par l'imagerie, avec leur _acquisition.ini)
+vitesse = 1.0                    # rejeu et simulation : 1 = temps réel ; 0 = le plus vite possible
+connexion_au_demarrage = true    # le GUI lance le moteur et vérifie les cartes à l'ouverture
+
+[spc_module]
+cfd_limit_low = -50.0            # mV, seuil du CFD (-500 à 0)
+cfd_zc_level = 0.0               # mV, passage par zéro du CFD (-96 à 96)
+rate_count_time = 0.25           # s, intégration des compteurs de taux (relus toutes les 0,5 s)
+sync_freq_div = 4                # diviseur du SYNC : 1, 2 ou 4
+sync_threshold = -50.0           # mV, seuil du SYNC (-500 à -20)
+sync_zc_level = 0.0              # mV, passage par zéro du SYNC (-96 à 96)
+tac_gain = 4                     # 1 à 15 ; fenêtre = tac_range / tac_gain (12,5 ns ici)
+tac_limit_high = 95.0            # % de la fenêtre
+tac_limit_low = 5.0              # % de la fenêtre
+tac_offset = 0.0                 # % (0 à 50 pour la SPC-150N)
+tac_range = 50.0                 # ns (50 à 5000)
+
+[verification]
+series = ["3N0317", "3N0318"]    # n° de série attendus, module 0 puis module 1
+seuil_cfd = 100.0                # /s : en dessous, détecteurs éteints (Enable outputs dans le logiciel DCC ?)
+
+[imagerie]
+modules = [0, 1]                 # cartes enregistrées
+duree_s = 0.0                    # 0 : en continu jusqu'à « Arrêter »
+temps_pixel_ns = 50.0            # horloge de pixel interne, comme dans SPCM
+pixels_par_ligne = 0             # 0 : toute la période de ligne
+decalage_pixels = 0              # pixels ignorés après chaque début de ligne
+lignes_par_image = 0             # 0 : nombre de lignes mesuré entre deux trames
+decalage_lignes = 0              # lignes ignorées après chaque début de trame
+ligne_front_montant = true       # front actif de l'horloge de ligne (M1)
+trame_front_montant = true       # front actif de l'horloge de trame (M2)
+
+[affichage]
+binning_temps = 4                # pixels regroupés (n × n) pour le temps moyen
+photons_min = 20                 # sous ce nombre de photons, pas de temps moyen
+trames_par_image = 10            # trames additionnées par image affichée ; 0 : tout depuis le début
+
+[single]
+modules = [0, 1]                 # cartes mesurées en même temps
+temps_collecte_s = 1.0           # durée de chaque histogramme
+n_histogrammes = 5               # histogrammes successifs, chacun repart de zéro
+resolution_adc = 12              # 12 bits = 4096 canaux ; ou 10, 8, 6
+arret_debordement = true         # arrêt dès qu'un canal atteint 65535 coups
+inverser = false                 # déclin à l'envers (montée lente, chute brutale) : true
+
+[enregistrement]
+dossier = ""                     # "" : ~/FLIMApp_spc (sous-dossiers imagerie et single)
+flux_brut = true                 # garder le flux FIFO de chaque carte (.spc) : environ 4 octets par photon
+
+[dcc]
+# Réglages du logiciel DCC autonome, déclarés ici : le GUI ne peut pas les
+# lire. Recopiés dans le _acquisition.ini de chaque acquisition.
+gain_c1_pourcent = 82.0
+gain_c3_pourcent = 82.0
+module = "M1"
+refroidissement_a = 1.98
+refroidissement_v = 5.0
+sorties_numeriques = "b0"

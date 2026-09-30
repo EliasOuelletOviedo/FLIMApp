@@ -1,6 +1,6 @@
 # Entry point on the bench (plan.md §8):
 #
-#     julia --project -t 3,1 scripts/app.jl [config/bench.toml]
+#     julia --project -t 4,1 scripts/app.jl [config/bench.toml]
 #
 # scripts/launch.bat runs this at high priority on Windows. Blocks until the
 # window is closed and the DAQ loop has zeroed the outputs.
