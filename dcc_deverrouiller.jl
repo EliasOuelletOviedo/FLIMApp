@@ -64,7 +64,8 @@ function dcc_deverrouiller()
     end
     println()
     println(ok ? "RÉUSSI : verrou levé. Relance carto1_inventaire.jl, puis la suite." :
-                 "Le verrou revient : le logiciel DCC ou SPCM tient encore les modules, ou il faut " *
+                 "Le verrou revient (détecteurs peut-être encore allumés) : le logiciel DCC ou SPCM " *
+                 "tient encore les modules, ou il faut " *
                  "éteindre le PC puis les châssis, rallumer les châssis puis le PC, et recommencer.")
     return ok
 end

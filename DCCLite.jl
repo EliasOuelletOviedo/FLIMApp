@@ -4,19 +4,26 @@
 Interface minimale vers la DLL des contrôleurs de détecteurs DCC-100 de
 Becker & Hickl (dcc64.dll), par ccall.
 
-Elle sert à l'inventaire : quels DCC-100 sont là, leur numéro de série,
-leur place sur le bus PCI et l'état de leurs protections. Elle n'allume
-jamais rien. Au contraire, DCC_init coupe toutes les sorties par sécurité :
-pour allumer un détecteur, utilise le logiciel DCC de B&H.
+Elle sert à l'inventaire (quels DCC-100 sont là, numéro de série, place
+sur le bus PCI, état des protections) et à l'allumage des détecteurs sans
+le logiciel DCC :
+
+- les réglages des connecteurs (gain, alimentations, sortie numérique,
+  refroidissement) passent par le fichier .ini lu par DCC_init, avec les
+  clés du manuel : aucun numéro de paramètre à deviner ;
+- DCC_init coupe toujours toutes les sorties ; `activer_sorties_dcc` les
+  active ensuite, comme le bouton « Enable outputs ».
 
 Libération : DCC_close seul laisse les modules verrouillés. `liberer_dcc`
-coupe les sorties, déverrouille (DCC_set_mode, in_use = 0), puis referme.
+coupe les sorties, déverrouille (DCC_set_mode, in_use = 0), puis referme ;
+`liberer_dcc(couper = false)` laisse les sorties telles quelles.
 Comme pour les SPC, seules les fonctions qui lisent les structures internes
-de la DLL (DCC_get_module_info, DCC_get_init_status) servent pour tous les
-modules ; tout ce qui touche une carte ne vise qu'un module prêt.
+de la DLL (DCC_get_module_info, DCC_get_init_status, DCC_get_parameters)
+servent sans risque ; tout ce qui touche une carte ne vise qu'un module prêt.
 
 Références :
-- « DCC Dynamic Link Library », manuel 2023 (prototypes, codes d'état) ;
+- « DCC Dynamic Link Library », manuel 2023 (prototypes, codes d'état, clés
+  du fichier .ini) ;
 - adaptateur Micro-Manager BH_DCC_DCU : la première ligne du fichier .ini
   doit être un commentaire commençant par « DCC100 » (non documenté).
 
@@ -27,10 +34,16 @@ module DCCLite
 
 using Libdl, Printf
 
+"""Version de ce fichier : les scripts s'arrêtent si Julia en a chargé une plus ancienne."""
+const VERSION_LITE = 8
+
 export DLL_DCC, DCCError, message_erreur_dcc, ecrire_ini_dcc, avec_dcc
 export initialiser_dcc, fermer_dcc, liberer_dcc, forcer_dcc, etat_init_dcc, actif_dcc
 export info_dcc, modules_detectes_dcc, modules_prets_dcc
 export surcharge_dcc, limite_courant_dcc, couper_sorties_dcc, MESSAGES_INIT_DCC
+export CLES_DCC, verifier_reglages_dcc, ecrire_ini_dcc_reglages, activer_sorties_dcc
+export limite_gain_dcc, effacer_surcharge_dcc, parametres_bruts_dcc, compter_flottant_dcc
+export afficher_reglages_dcc
 
 function _chercher_bh(nom::AbstractString)
     for racine in (get(ENV, "ProgramFiles(x86)", raw"C:\Program Files (x86)"),
@@ -223,21 +236,183 @@ function forcer_dcc(modules)
 end
 
 """
+    liberer_dcc(; couper=true) -> modules dont la coupure a échoué
+
 Coupe les sorties des modules pris par cette session, les déverrouille
 (DCC_set_mode, in_use = 0), puis referme la DLL. DCC_close seul ne lève
 pas le verrou : le module resterait « utilisé » pour les programmes
 suivants, logiciel DCC compris. DCC_close est appelé même sans module prêt.
+`couper = false` laisse les sorties telles quelles (détecteurs allumés).
+Renvoie les modules où DCC_enable_outputs(m, 0) a échoué : à signaler.
 """
-function liberer_dcc()
-    prets = modules_prets_dcc()
-    for m in prets
-        try; couper_sorties_dcc(m); catch; end
+function liberer_dcc(; couper::Bool = true)
+    echecs = Int16[]
+    prets = try
+        modules_prets_dcc()
+    catch
+        println("ATTENTION : liste des modules DCC illisible, sorties non vérifiées")
+        Int16[]
+    end
+    if couper
+        for m in prets
+            code = try
+                couper_sorties_dcc(m)
+            catch
+                -1
+            end
+            code < 0 && push!(echecs, m)
+        end
     end
     if !isempty(prets)
         try; _set_mode_dcc(0, 0, zeros(Int16, 32)); catch; end
     end
     try; fermer_dcc(); catch; end
+    return echecs
+end
+
+# =====================================================================
+# Réglages des connecteurs et allumage
+# =====================================================================
+
+"""
+Clés des connecteurs dans le fichier .ini (manuel de la DLL DCC, section
+[dcc_moduleN]), avec leurs bornes. Les majuscules comptent.
+"""
+const CLES_DCC = (
+    ("c1_p12V", 0, 1), ("c1_p5V", 0, 1), ("c1_m5V", 0, 1), ("c1_gain_HV", 0, 100),
+    ("c2_p12V", 0, 1), ("c2_p5V", 0, 1), ("c2_m5V", 0, 1), ("c2_digout", 0, 255),
+    ("c3_p12V", 0, 1), ("c3_p5V", 0, 1), ("c3_m5V", 0, 1), ("c3_gain_HV", 0, 100),
+    ("c3_cooling", 0, 1), ("c3_coolVolt", 0, 5), ("c3_coolCurr", 0, 2),
+)
+
+const _CLES_FLOTTANTES_DCC = ("c1_gain_HV", "c3_gain_HV", "c3_coolVolt", "c3_coolCurr")
+
+"""
+    verifier_reglages_dcc(reglages)
+
+`reglages` : Dict numéro de module de la DLL (0 à 7) => Dict clé => valeur.
+Lève une erreur sur une clé inconnue (faute de frappe) ou une valeur hors
+bornes, avant que quoi que ce soit ne soit envoyé à la carte.
+"""
+function verifier_reglages_dcc(reglages::AbstractDict)
+    bornes = Dict(c => (lo, hi) for (c, lo, hi) in CLES_DCC)
+    for (m, p) in reglages
+        (m isa Integer && 0 <= m <= 7) ||
+            error("module DCC $m : numéro de 0 à 7 attendu (0 = M1 dans SPCM)")
+        for (cle, v) in p
+            haskey(bornes, cle) ||
+                error("module DCC $m : clé « $cle » inconnue. Clés possibles : " *
+                      join(first.(CLES_DCC), ", "))
+            lo, hi = bornes[cle]
+            (v isa Real && lo <= v <= hi) ||
+                error("module DCC $m : $cle = $v, attendu entre $lo et $hi")
+            (hi == 1 && !(v in (0, 1))) && error("module DCC $m : $cle vaut 0 ou 1")
+            (cle == "c2_digout" && !isinteger(v)) && error("module DCC $m : c2_digout est un entier (0 à 255)")
+        end
+    end
     return nothing
+end
+
+function _valeur_ini_dcc(cle, v)
+    cle == "c2_digout" && return "0x" * string(Int(v); base = 16)   # format du manuel
+    cle in _CLES_FLOTTANTES_DCC && return string(Float64(v))
+    return string(Int(v))
+end
+
+"""
+    ecrire_ini_dcc_reglages(chemin, reglages; simulation=0) -> chemin
+
+Fichier d'initialisation où SEULS les modules de `reglages` sont actifs,
+avec leurs réglages de connecteurs. Les autres modules restent inactifs :
+DCC_init ne les touche pas. Les sorties restent coupées après DCC_init ;
+`activer_sorties_dcc` les active.
+"""
+function ecrire_ini_dcc_reglages(chemin::AbstractString, reglages::AbstractDict;
+                                 simulation::Integer = 0)
+    verifier_reglages_dcc(reglages)
+    mkpath(dirname(abspath(chemin)))
+    open(chemin, "w") do io
+        println(io, "; DCC100")                       # exigé en première ligne
+        println(io, "; écrit par DCCLite.jl : seuls les modules réglés sont actifs ;")
+        println(io, "; DCC_init laisse toutes les sorties coupées")
+        println(io)
+        println(io, "[dcc_base]")
+        println(io, "simulation = ", simulation)
+        for k in 1:8
+            println(io)
+            println(io, "[dcc_module$k]")
+            p = get(reglages, k - 1, nothing)
+            println(io, "active = ", p === nothing ? 0 : 1)
+            p === nothing && continue
+            for (cle, _, _) in CLES_DCC
+                haskey(p, cle) && println(io, cle, " = ", _valeur_ini_dcc(cle, p[cle]))
+            end
+        end
+    end
+    return abspath(chemin)
+end
+
+"""
+Active les sorties du module `m`, comme le bouton « Enable outputs » : sur
+une DCC-100, tous les connecteurs à la fois. Module prêt seulement.
+"""
+activer_sorties_dcc(m::Integer) =
+    _chk(ccall((:DCC_enable_outputs, DLL_DCC), Int16, (Int16, Int16), Int16(m), Int16(1)),
+         "DCC_enable_outputs")
+
+"""Limite du gain/HV en % (EEPROM de la carte) du connecteur 1 ou 3. Module prêt seulement."""
+function limite_gain_dcc(m::Integer, connecteur::Integer)
+    connecteur in (1, 3) || throw(ArgumentError("seuls les connecteurs 1 et 3 ont un gain"))
+    v = Ref{Int16}(0)
+    _chk(ccall((:DCC_get_gain_HV_limit, DLL_DCC), Int16, (Int16, Int16, Ptr{Int16}),
+               Int16(m), Int16(connecteur == 1 ? 0 : 1), v), "DCC_get_gain_HV_limit")
+    return Int(v[])
+end
+
+"""
+Efface les drapeaux de surcharge du module `m`. La DLL réactive alors les
+sorties coupées par la surcharge : n'appeler qu'après avoir supprimé la
+cause, avec l'accord de l'utilisateur. Module prêt seulement.
+"""
+effacer_surcharge_dcc(m::Integer) =
+    _chk(ccall((:DCC_clear_overload, DLL_DCC), Int16, (Int16,), Int16(m)), "DCC_clear_overload")
+
+"""
+Paramètres du module `m` tels que la DLL les tient (DCC_get_parameters),
+dans un tampon d'octets. La disposition de la structure DCCdata n'est pas
+publiée : on s'en sert seulement pour y retrouver des valeurs
+(`compter_flottant_dcc`), jamais pour écrire.
+"""
+function parametres_bruts_dcc(m::Integer)
+    b = zeros(UInt8, 4096)                # bien plus que sizeof(DCCdata)
+    _chk(ccall((:DCC_get_parameters, DLL_DCC), Int16, (Int16, Ptr{UInt8}), Int16(m), b),
+         "DCC_get_parameters")
+    return b
+end
+
+"""Résumé lisible des réglages `p` du module `m`, connecteur par connecteur."""
+function afficher_reglages_dcc(m, p; io::IO = stdout)
+    oui(c) = get(p, c, 0) == 1 ? "oui" : "non"
+    println(io, "Module DCC $m (M$(m + 1) dans SPCM) :")
+    @printf(io, "  connecteur 1 : +12 V %s, +5 V %s, -5 V %s, gain %.2f %%\n",
+            oui("c1_p12V"), oui("c1_p5V"), oui("c1_m5V"), get(p, "c1_gain_HV", 0.0))
+    @printf(io, "  connecteur 2 : +12 V %s, +5 V %s, -5 V %s, sorties b7…b0 = %s\n",
+            oui("c2_p12V"), oui("c2_p5V"), oui("c2_m5V"),
+            string(Int(get(p, "c2_digout", 0)); base = 2, pad = 8))
+    @printf(io, "  connecteur 3 : +12 V %s, +5 V %s, -5 V %s, gain %.2f %%, refroidisseur %s (%.2f V, limite %.2f A)\n",
+            oui("c3_p12V"), oui("c3_p5V"), oui("c3_m5V"), get(p, "c3_gain_HV", 0.0),
+            oui("c3_cooling"), get(p, "c3_coolVolt", 0.0), get(p, "c3_coolCurr", 0.0))
+    return nothing
+end
+
+"""Nombre de flottants 32 bits égaux à `v` (à 1 % près) dans le tampon `b`."""
+function compter_flottant_dcc(b::Vector{UInt8}, v::Real; tolerance = 0.01)
+    n = 0
+    for o in 0:length(b) - 4
+        x = reinterpret(Float32, b[o + 1:o + 4])[1]
+        isfinite(x) && abs(x - v) <= tolerance * max(abs(v), 1.0) && (n += 1)
+    end
+    return n
 end
 
 """

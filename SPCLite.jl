@@ -27,11 +27,15 @@ module SPCLite
 
 using Libdl, Printf
 
+"""Version de ce fichier : les scripts s'arrêtent si Julia en a chargé une plus ancienne."""
+const VERSION_LITE = 8
+
 export SPCError, chk_spc, message_erreur, DLL_SPCM
 export ecrire_ini, lire_ini, avec_spc, avec_spc_tous, initialiser, liberer, liberer_tous
 export modules_detectes, modules_prets, forcer_module, forcer_modules, chercher_bh
 export etat_init, info_module, type_module, eeprom, mode_dll, explication_init
 export lire_parametres, appliquer_ini, sync_etat, effacer_taux, taux
+export comparer_parametres, afficher_parametres, ecart_peigne
 export demarrer, arreter, etat_mesure, lire_fifo!, fifo_init, remplissage_fifo
 export configurer_memoire, definir_page, effacer_memoire, lire_bloc
 export Decodeur, decoder!, reinitialiser!, PERIODE_MT
@@ -465,6 +469,83 @@ function lire_parametres(m::Integer;
                   buf, abspath(fichier), C_NULL, Cint(0)),
             "SPC_save_parameters_to_inifile")
     return lire_ini(fichier)
+end
+
+"""
+    comparer_parametres(demandes, lus) -> Vector
+
+Pour chaque clé demandée (fichier .ini), la valeur que la carte applique
+vraiment (relue par `lire_parametres`). statut : :ok ; :ecart, valeur
+recalculée loin de la demande ; :absente, clé inconnue de la DLL (faute de
+frappe, le plus souvent : la DLL ignore alors la ligne sans rien dire).
+Tolérance : les entiers doivent être identiques ; les seuils en mV et les
+pourcentages (arrondis par les convertisseurs de la carte) à 3 % ou une
+unité près ; les autres réels (temps en s ou en ns) à 3 % près.
+"""
+function comparer_parametres(demandes::AbstractDict, lus::AbstractDict)
+    sortie = NamedTuple{(:cle, :demande, :applique, :statut),Tuple{String,Any,Float64,Symbol}}[]
+    en_mv_ou_pourcent(cle) = occursin(r"limit|zc_level|threshold|offset", cle)
+    for cle in sort!(String.(collect(keys(demandes))))
+        d = demandes[cle]
+        a = Float64(get(lus, lowercase(cle), NaN))
+        tolerance = d isa Real ? max(0.03 * abs(d), en_mv_ou_pourcent(lowercase(cle)) ? 1.0 : 1e-12) : 0.0
+        statut = isnan(a) ? :absente :
+                 d isa Integer ? (a == d ? :ok : :ecart) :
+                 d isa Real ? (abs(a - d) <= tolerance ? :ok : :ecart) : :ok
+        push!(sortie, (cle = cle, demande = d, applique = a, statut = statut))
+    end
+    return sortie
+end
+
+"""
+    afficher_parametres(m, reglages, imposes, lus; io=stdout)
+
+Tableau « demandé → appliqué par la carte » pour les clés de
+reglages_spc.jl, puis les clés imposées par le script. Signale les clés
+inconnues de la DLL et les valeurs que la carte n'a pas prises.
+"""
+function afficher_parametres(m, reglages::AbstractDict, imposes::AbstractDict, lus::AbstractDict;
+                             io::IO = stdout)
+    valeur(a) = isnan(a) ? "—" : @sprintf("%.5g", a)
+    println(io, "Module $m : reglages_spc.jl → valeur appliquée par la carte")
+    for l in comparer_parametres(reglages, lus)
+        note = haskey(imposes, l.cle) ? "  (remplacé par ce script : $(imposes[l.cle]))" :
+               l.statut == :absente ? "  ← CLÉ INCONNUE de la DLL, ligne ignorée (faute de frappe ?)" :
+               l.statut == :ecart ? "  ← DIFFÉRENT de la demande" : ""
+        @printf(io, "  %-16s %10s → %-10s%s\n", l.cle, string(l.demande), valeur(l.applique), note)
+    end
+    println(io, "  imposés par ce script : ",
+            join(("$k = $(imposes[k])" for k in sort!(String.(collect(keys(imposes))))), ", "))
+    for l in comparer_parametres(imposes, lus)
+        l.statut == :ok && continue
+        println(io, "  ← ", l.cle, " : la carte applique ", valeur(l.applique), " au lieu de ", l.demande)
+    end
+    return nothing
+end
+
+"""
+    ecart_peigne(h, a, b, g) -> (ecart, sigma)
+
+Peigne d'une courbe entre les indices `a` et `b`, par groupes de `g`
+canaux : `ecart` ≈ rapport des groupes forts aux groupes faibles, moins 1
+(0 pour une courbe lisse) ; `sigma`, son incertitude due au bruit de
+comptage. Chaque groupe est comparé à la moyenne de ses deux voisins, ce
+qui annule la pente du déclin. Un écart de plusieurs %, bien au-dessus de
+4 sigma, trahit la non-linéarité de l'ADC quand sa correction d'erreur est
+coupée (dither_range = 0).
+"""
+function ecart_peigne(h::AbstractVector, a::Integer, b::Integer, g::Integer)
+    J = (b - a + 1) ÷ g
+    J >= 6 || return (ecart = 0.0, sigma = Inf)
+    G = [sum(Float64, view(h, a + (j - 1) * g:a + j * g - 1)) for j in 1:J]
+    moyenne = sum(G) / J
+    moyenne > 0 || return (ecart = 0.0, sigma = Inf)
+    D = 0.0
+    for j in 2:J - 1
+        D += (isodd(j) ? 1 : -1) * (G[j] - (G[j - 1] + G[j + 1]) / 2)
+    end
+    delta = min(abs(D) / (J - 2) / (2 * moyenne), 0.99)   # G ≈ moyenne × (1 ± delta)
+    return (ecart = 2 * delta / (1 - delta), sigma = sqrt(4 / (moyenne * (J - 2))))
 end
 
 """

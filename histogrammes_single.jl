@@ -17,16 +17,21 @@
 #   *_module<m>.svg             les N histogrammes (gris) et leur somme (bleu), en log ;
 #   *_module<m>_parametres.ini  tous les paramètres relus dans la carte.
 #
-# Avant : SPCM fermé ; logiciel DCC ouvert, détecteur allumé ; laser allumé.
-# Le scanner peut tourner ou non. Réglages du détecteur et du TAC :
-# reglages_spc.jl, les mêmes que pour l'imagerie.
+# Avant : SPCM fermé ; détecteurs allumés (logiciel DCC, ou
+# test_dcc2_allumage.jl avec garder_allume = true) ; laser allumé. Le
+# scanner peut tourner ou non. Réglages du détecteur et du TAC :
+# reglages_spc.jl, les mêmes que pour l'imagerie ; au départ, le script
+# affiche ce que chaque carte en a vraiment retenu.
 #
 # Sens du temps : dans la mémoire de la carte, le temps croît avec le numéro
 # de canal, comme dans SPCM. Si le déclin sort à l'envers (montée lente,
 # chute brutale), mets inverser = true et signale-le-moi.
 
+Base.exit_on_sigint(false)          # Ctrl+C passe par la libération des cartes, même hors REPL
 isdefined(Main, :SPCLite) || include("SPCLite.jl")
 using .SPCLite
+(isdefined(SPCLite, :VERSION_LITE) && SPCLite.VERSION_LITE >= 8) ||
+    error("Julia a gardé une ancienne version de SPCLite.jl : redémarre Julia, puis relance ce script.")
 using Printf, Dates
 include("reglages_spc.jl")
 
@@ -80,14 +85,25 @@ function texte_fin_single(etat::UInt16)
     return @sprintf("fin inattendue (état 0x%04X)", etat)
 end
 
-"""Une ligne par module et par mesure : coups, pic, temps moyen, fin."""
+"""Deux lignes par module et par mesure : coups et fin, puis forme de la courbe."""
 function resume_single(m, h, dt_ns, etat, duree)
     total = sum(Int, h)
     pic, k = findmax(h)
-    tmoy = total > 0 ? sum((i - 0.5) * dt_ns * h[i] for i in eachindex(h)) / total : NaN
-    @printf("  module %d : %d coups en %.2f s (%.3g /s) ; pic %d coups à %.3f ns ; temps moyen %.3f ns ; %s\n",
-            m, total, duree, total / max(duree, 1e-3), pic, (k - 0.5) * dt_ns, tmoy,
-            texte_fin_single(etat))
+    @printf("  module %d : %d coups en %.2f s (%.3g /s) ; %s\n",
+            m, total, duree, total / max(duree, 1e-3), texte_fin_single(etat))
+    total > 0 || return nothing
+    seuil = max(1, Int(pic) ÷ 100)                         # ignore les coups isolés
+    a, b = findfirst(>=(seuil), h), findlast(>=(seuil), h)
+    tmoy = sum((i - 0.5) * dt_ns * h[i] for i in eachindex(h)) / total
+    # Peigne (non-linéarité de l'ADC), groupes de 1 à 16 canaux (≤ 50 ps),
+    # signalé seulement s'il dépasse 5 % et 4 fois le bruit de comptage
+    gs = [g for g in (1, 2, 4, 8, 16) if g == 1 || g * dt_ns <= 0.05]
+    nets = [(p = ecart_peigne(h, a, b, g); p.ecart > max(0.05, 4 * p.sigma) ? p.ecart : 0.0) for g in gs]
+    ecart, ig = findmax(nets)
+    @printf("             signal de %.2f à %.2f ns ; pic %d coups à %.2f ns ; temps moyen %.2f ns%s\n",
+            (a - 1) * dt_ns, b * dt_ns, pic, (k - 0.5) * dt_ns, tmoy,
+            ecart > 0 ? @sprintf(" ; PEIGNE %.0f %% (groupes de %d canaux)", 100 * ecart, gs[ig]) : "")
+    return nothing
 end
 
 # ---------------------------------------------------------------------
@@ -169,13 +185,14 @@ function histogrammes_single(r, reglages)
     N = r.n_histogrammes
     dossier = joinpath(@__DIR__, "resultats", "single")
     mkpath(dossier)
-    p = merge(reglages, Dict{String,Any}(
+    imposes = Dict{String,Any}(                          # propres au mode Single
         "mode" => 0,                                     # histogramme dans la carte
         "adc_resolution" => r.resolution_adc,
         "collect_time" => r.temps_collecte_s,
         "stop_on_time" => 1,                             # la carte s'arrête seule
-        "stop_on_ovfl" => r.arret_debordement ? 1 : 0,
-        "dead_time_comp" => get(reglages, "dead_time_comp", 1)))
+        "stop_on_ovfl" => r.arret_debordement ? 1 : 0)
+    haskey(reglages, "dead_time_comp") || (imposes["dead_time_comp"] = 1)
+    p = merge(reglages, imposes)
     ini = ecrire_ini(joinpath(dossier, "single.ini"), p)
     debut = now()
 
@@ -200,6 +217,12 @@ function histogrammes_single(r, reglages)
             catch
                 "?"
             end
+            # Ce que la carte applique vraiment, à comparer avec SPCM
+            afficher_parametres(m, reglages, imposes, lus[m])
+            @printf("  → %d canaux de %.2f ps, fenêtre %.3f ns\n", n[m], fenetre[m] / n[m] * 1e3, fenetre[m])
+            get(lus[m], "dither_range", NaN) == 0 &&
+                @warn "module $m : dither_range = 0, la correction d'erreur de l'ADC est coupée : " *
+                      "la courbe aura un peigne. Mets dans reglages_spc.jl la valeur de SPCM."
         end
         H = Dict(m => zeros(UInt16, n[m], N) for m in modules)
         etats = Dict(m => zeros(UInt16, N) for m in modules)

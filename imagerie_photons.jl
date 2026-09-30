@@ -19,35 +19,104 @@
 #   *_parametres.ini    tous les paramètres relus dans la carte ;
 #   *.jls               matrices complètes (Serialization), pour tes analyses.
 #
-# Avant : SPCM fermé ; logiciel DCC ouvert, détecteur allumé ; scanner en
-# marche ; laser allumé. Réglages du détecteur et du TAC : reglages_spc.jl.
+# Avant : SPCM fermé ; détecteurs allumés (logiciel DCC, ou
+# test_dcc2_allumage.jl avec garder_allume = true) ; scanner en marche ;
+# laser allumé. Réglages du détecteur et du TAC : reglages_spc.jl ; au
+# départ, le script affiche ce que chaque carte en a vraiment retenu.
 #
-# Premier essai : laisse pixels_par_ligne = 0 et lignes_par_image = 0. Tu vois
-# alors toute la période de ligne et toutes les lignes, retours du scanner
-# compris. Repère la zone utile, règle decalage_pixels, pixels_par_ligne,
-# decalage_lignes et lignes_par_image, puis mets dans `rejouer` le nom affiché
-# à la fin (par exemple "20260929_153012_module0") : le script retraite alors
+# Géométrie de l'image : chaque réglage laissé à `nothing` ci-dessous vient
+# de reglages_spc.jl si tu y as recopié le réglage SPCM correspondant, sinon
+# de sa valeur par défaut (le script affiche d'où vient chaque valeur) :
+#   temps_pixel_ns      ← pixel_time (en secondes)       sinon 50 ns
+#   pixels_par_ligne    ← scan_size_x                    sinon 0 : toute la ligne
+#   decalage_pixels     ← scan_borders, bord gauche      sinon 0
+#   lignes_par_image    ← scan_size_y                    sinon 0 : toutes les lignes
+#   decalage_lignes     ← scan_borders, bord haut        sinon 0
+#   ligne/trame_front_montant ← scan_polarity, bits 0/1  sinon front montant
+# Une valeur écrite ici l'emporte sur reglages_spc.jl.
+#
+# Premier essai sans réglage SPCM : tu vois toute la période de ligne et
+# toutes les lignes, retours du scanner compris. Repère la zone utile, règle
+# les décalages et la taille, puis mets dans `rejouer` le nom affiché à la
+# fin (par exemple "20260929_153012_module0") : le script retraite alors
 # cette acquisition sans toucher aux cartes. rejouer = "" : nouvelle acquisition.
 
+Base.exit_on_sigint(false)          # Ctrl+C passe par la libération des cartes, même hors REPL
 isdefined(Main, :SPCLite) || include("SPCLite.jl")
 using .SPCLite
+(isdefined(SPCLite, :VERSION_LITE) && SPCLite.VERSION_LITE >= 8) ||
+    error("Julia a gardé une ancienne version de SPCLite.jl : redémarre Julia, puis relance ce script.")
 using Printf, Dates, Serialization
 include("reglages_spc.jl")
 
 imagerie_reglages = (
-    modules = [0, 1],            # cartes à enregistrer
-    duree_s = 2.0,               # acquisition (environ 60 trames à 31,25 Hz)
-    temps_pixel_ns = 50.0,       # horloge de pixel interne, comme dans SPCM
-    pixels_par_ligne = 0,        # 0 : toute la période de ligne
-    decalage_pixels = 0,         # pixels ignorés après chaque début de ligne
-    lignes_par_image = 0,        # 0 : nombre de lignes mesuré entre deux trames
-    decalage_lignes = 0,         # lignes ignorées après chaque début de trame
-    ligne_front_montant = true,  # front actif de l'horloge de ligne (M1)
-    trame_front_montant = true,  # front actif de l'horloge de trame (M2)
-    binning_temps = 4,           # pixels regroupés (n × n) pour le temps moyen
-    photons_min = 20,            # sous ce nombre de photons, pas de temps moyen
-    rejouer = "",                # "" : acquisition ; sinon nom d'une acquisition à retraiter
+    modules = [0, 1],               # cartes à enregistrer
+    duree_s = 2.0,                  # acquisition (environ 60 trames à 31,25 Hz)
+    temps_pixel_ns = nothing,       # horloge de pixel interne
+    pixels_par_ligne = nothing,     # pixels gardés par ligne
+    decalage_pixels = nothing,      # pixels ignorés après chaque début de ligne
+    lignes_par_image = nothing,     # lignes gardées par image
+    decalage_lignes = nothing,      # lignes ignorées après chaque début de trame
+    ligne_front_montant = nothing,  # front actif de l'horloge de ligne (M1)
+    trame_front_montant = nothing,  # front actif de l'horloge de trame (M2)
+    binning_temps = 4,              # pixels regroupés (n × n) pour le temps moyen
+    photons_min = 20,               # sous ce nombre de photons, pas de temps moyen
+    rejouer = "",                   # "" : acquisition ; sinon nom d'une acquisition à retraiter
 )
+
+"""
+    geometrie_img(r, reglages) -> (r_complet, provenance)
+
+Remplace chaque réglage de géométrie laissé à `nothing` par le réglage
+SPCM de `reglages` (reglages_spc.jl), ou à défaut par sa valeur par défaut.
+`provenance` dit d'où vient chaque valeur.
+"""
+function geometrie_img(r, reglages)
+    lire(cle) = get(reglages, cle, nothing)
+    bords, pol, pt = lire("scan_borders"), lire("scan_polarity"), lire("pixel_time")
+    pt === nothing || pt <= 1e-3 ||
+        error("pixel_time = $pt dans reglages_spc.jl : il s'écrit en secondes (50 ns = 50e-9)")
+    choix(ici, spcm, cle, defaut) =
+        ici !== nothing ? (ici, "imagerie_reglages") :
+        spcm !== nothing ? (spcm, "reglages_spc.jl, $cle") : (defaut, "valeur par défaut")
+    c = (
+        temps_pixel_ns = choix(r.temps_pixel_ns, pt === nothing ? nothing : pt * 1e9, "pixel_time", 50.0),
+        pixels_par_ligne = choix(r.pixels_par_ligne, lire("scan_size_x"), "scan_size_x", 0),
+        decalage_pixels = choix(r.decalage_pixels,
+                                bords === nothing ? nothing : (Int(bords) >> 16) & 0xffff, "scan_borders", 0),
+        lignes_par_image = choix(r.lignes_par_image, lire("scan_size_y"), "scan_size_y", 0),
+        decalage_lignes = choix(r.decalage_lignes,
+                                bords === nothing ? nothing : Int(bords) & 0xffff, "scan_borders", 0),
+        ligne_front_montant = choix(r.ligne_front_montant,
+                                    pol === nothing ? nothing : isodd(Int(pol)), "scan_polarity", true),
+        trame_front_montant = choix(r.trame_front_montant,
+                                    pol === nothing ? nothing : isodd(Int(pol) >> 1), "scan_polarity", true),
+    )
+    v = map(first, c)
+    complet = merge(r, (temps_pixel_ns = Float64(v.temps_pixel_ns),
+                        pixels_par_ligne = round(Int, v.pixels_par_ligne),
+                        decalage_pixels = round(Int, v.decalage_pixels),
+                        lignes_par_image = round(Int, v.lignes_par_image),
+                        decalage_lignes = round(Int, v.decalage_lignes),
+                        ligne_front_montant = Bool(v.ligne_front_montant),
+                        trame_front_montant = Bool(v.trame_front_montant)))
+    return complet, map(last, c)
+end
+
+function afficher_geometrie_img(r, provenance)
+    println("Géométrie de l'image :")
+    for (cle, texte) in ((:temps_pixel_ns, "temps de pixel (ns)"),
+                         (:pixels_par_ligne, "pixels par ligne (0 : toute la ligne)"),
+                         (:decalage_pixels, "bord gauche (pixels)"),
+                         (:lignes_par_image, "lignes par image (0 : toutes)"),
+                         (:decalage_lignes, "bord haut (lignes)"),
+                         (:ligne_front_montant, "ligne (M1) sur front montant"),
+                         (:trame_front_montant, "trame (M2) sur front montant"))
+        x = getfield(r, cle)
+        texte_x = x isa Bool ? (x ? "oui" : "non") : x isa AbstractFloat ? @sprintf("%.4g", x) : string(x)
+        @printf("  %-38s %-6s (%s)\n", texte, texte_x, getfield(provenance, cle))
+    end
+end
 
 # ---------------------------------------------------------------------
 # Acquisition : on garde le flux brut, lu en continu sur chaque carte
@@ -325,6 +394,20 @@ function traiter_img(prefixe, brut, tic_s, fenetre_ns, duree_s, deborde, m, r)
     @printf("  Image %d × %d pixels ; fenêtre TAC %.3f ns\n", res.nx, res.ny, fenetre_ns)
     isnan(bas) || @printf("  Temps moyen (2e à 98e centile, binning %d) : %.3f à %.3f ns\n",
                           r.binning_temps, bas, haut)
+    # Peigne du déclin (non-linéarité de l'ADC) : groupes de 1 à 16 canaux
+    # (≤ 50 ps), signalé seulement au-dessus de 5 % et de 4 fois le bruit
+    d = res.declin
+    pic = maximum(d)
+    if pic > 0
+        seuil = max(1, pic ÷ 100)
+        a, b = findfirst(>=(seuil), d), findlast(>=(seuil), d)
+        gs = [g for g in (1, 2, 4, 8, 16) if g == 1 || g * dt_ns <= 0.05]
+        nets = [(p = ecart_peigne(d, a, b, g); p.ecart > max(0.05, 4 * p.sigma) ? p.ecart : 0.0) for g in gs]
+        ecart, ig = findmax(nets)
+        @printf("  Déclin de %.2f à %.2f ns%s\n", (a - 1) * dt_ns, b * dt_ns,
+                ecart > 0 ? @sprintf(" ; PEIGNE %.0f %% (groupes de %d canaux) : correction d'erreur de l'ADC coupée ?",
+                                     100 * ecart, gs[ig]) : "")
+    end
     println("  Fichiers : ", prefixe, "_intensite.bmp, _temps_moyen.bmp, _declin.svg, .jls")
     println("  Pour retraiter sans les cartes : rejouer = \"", basename(prefixe), "\"")
     return res
@@ -338,14 +421,13 @@ de l'image, binning…), sans toucher aux cartes. `nom` : par exemple
 "20260929_153012_module0", ou un chemin complet sans extension.
 """
 function retraiter_img(nom, r)
-    base = replace(nom, r"\.spc$"i => "")
-    prefixe = occursin(r"[/\\]", base) ?
-              (isabspath(base) ? base : joinpath(@__DIR__, base)) :
-              joinpath(@__DIR__, "resultats", "imagerie", base)
+    prefixe = prefixe_img(nom)
     isfile(prefixe * ".spc") || error("introuvable : $(prefixe).spc")
     meta = lire_ini(prefixe * "_acquisition.ini"; section = "acquisition")
     _, brut = lire_spc_img(prefixe * ".spc")
-    println("Retraitement de ", prefixe, ".spc (sans les cartes)")
+    println("Retraitement de ", prefixe, ".spc, sans les cartes.")
+    println("Aucune acquisition : reglages_spc.jl ne change rien à ces données (réglages de")
+    println("l'acquisition : ", prefixe, "_parametres.ini). Pour mesurer à nouveau : rejouer = \"\".")
     return traiter_img(prefixe, brut, meta["tic_s"], meta["fenetre_ns"], meta["duree_s"],
                        get(meta, "fifo_deborde", 0.0) != 0, round(Int, get(meta, "module", -1.0)), r)
 end
@@ -354,15 +436,18 @@ end
 # Programme
 # ---------------------------------------------------------------------
 
-function imagerie(r, reglages)
+function imagerie(r_demande, reglages)
     dossier = joinpath(@__DIR__, "resultats", "imagerie")
     mkpath(dossier)
+    r, provenance = geometrie_img(r_demande, reglages)
+    afficher_geometrie_img(r, provenance)
     front = 0x0600 |                                   # marqueurs M1 (ligne) et M2 (trame)
             (r.ligne_front_montant ? 0x2000 : 0x0000) |
             (r.trame_front_montant ? 0x4000 : 0x0000)
-    p = merge(reglages, Dict{String,Any}(
+    imposes = Dict{String,Any}(                        # propres au mode FIFO de ce script
         "mode" => 1, "adc_resolution" => 12, "stop_on_time" => 0,
-        "routing_mode" => Int(front), "macro_time_clk" => 0))
+        "routing_mode" => Int(front), "macro_time_clk" => 0)
+    p = merge(reglages, imposes)
     ini = ecrire_ini(joinpath(dossier, "imagerie.ini"), p)
 
     acq = avec_spc_tous(ini) do prets
@@ -374,6 +459,12 @@ function imagerie(r, reglages)
         end
         infos = Dict(m => fifo_init(m) for m in modules)
         lus = Dict(m => lire_parametres(m; fichier = joinpath(dossier, "relu_$(m).ini")) for m in modules)
+        for m in modules
+            afficher_parametres(m, reglages, imposes, lus[m])   # ce que la carte a vraiment pris
+            get(lus[m], "dither_range", NaN) == 0 &&
+                @warn "module $m : dither_range = 0, la correction d'erreur de l'ADC est coupée : " *
+                      "le déclin aura un peigne. Mets dans reglages_spc.jl la valeur de SPCM."
+        end
         println("Acquisition de $(r.duree_s) s sur les modules $(Int.(modules))…")
         bruts, deborde = acquerir_brut_img(modules, r.duree_s)
         return (modules = modules, infos = infos, lus = lus, bruts = bruts, deborde = deborde)
@@ -402,8 +493,33 @@ function imagerie(r, reglages)
     return nothing
 end
 
+"""Préfixe complet d'une acquisition, à partir de son nom ou d'un chemin."""
+function prefixe_img(nom)
+    base = replace(nom, r"\.spc$"i => "")
+    return occursin(r"[/\\]", base) ? (isabspath(base) ? base : joinpath(@__DIR__, base)) :
+           joinpath(@__DIR__, "resultats", "imagerie", base)
+end
+
+"""
+Retraite l'acquisition nommée dans `rejouer` avec la géométrie actuelle. Les
+fronts de ligne et de trame, eux, ont été fixés par la carte à l'acquisition :
+on les relit dans son _parametres.ini (routing_mode, bits 13 et 14).
+"""
+function rejouer_img(r_demande, reglages)
+    r, provenance = geometrie_img(r_demande, reglages)
+    fichier = prefixe_img(r_demande.rejouer) * "_parametres.ini"
+    routage = isfile(fichier) ? get(lire_ini(fichier), "routing_mode", NaN) : NaN
+    if !isnan(routage)
+        bits = round(Int, routage)
+        r = merge(r, (ligne_front_montant = (bits & 0x2000) != 0, trame_front_montant = (bits & 0x4000) != 0))
+        provenance = merge(provenance, (ligne_front_montant = "acquisition", trame_front_montant = "acquisition"))
+    end
+    afficher_geometrie_img(r, provenance)
+    return retraiter_img(r_demande.rejouer, r)
+end
+
 if isempty(imagerie_reglages.rejouer)
     imagerie(imagerie_reglages, REGLAGES_SPC)
 else
-    retraiter_img(imagerie_reglages.rejouer, imagerie_reglages)
+    rejouer_img(imagerie_reglages, REGLAGES_SPC)
 end
