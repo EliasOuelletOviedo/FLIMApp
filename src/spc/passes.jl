@@ -18,29 +18,35 @@ const MARQUEUR_DEBUT = 1     # M0 : bit 0 des marqueurs
 const MARQUEUR_FIN = 4       # M3 : bit 3
 
 """
-    Passes(; canaux=256)
+    Passes(; canaux=256, duree=0)
 
-Découpe un flux FIFO en passes, au fil des lectures (`passes!`). Entre un
-M0 et le M3 suivant, chaque photon va dans `histo[canal, code + 1]`
-(`canaux` canaux de temps croissant, 16 codes de routage). À chaque fin de
-passe, `f(p, t_debut, t_fin, pertes)` (temps en tics, `pertes` : GAP
-décodés depuis la passe précédente), puis l'histogramme repart de zéro.
+Découpe un flux FIFO en passes, au fil des lectures (`passes!`). Une passe
+commence à un M0 ; elle finit au M3 suivant (`duree = 0`), ou `duree` tics
+après son M0 (`duree > 0` : M0 seul, la passe dure le scan programmé ; les
+M3 sont ignorés). Pendant la passe, chaque photon va dans
+`histo[canal, code + 1]` (`canaux` canaux de temps croissant, 16 codes de
+routage). À chaque fin de passe, `f(p, t_debut, t_fin, pertes)` (temps en
+tics, `pertes` : GAP décodés depuis la passe précédente), puis
+l'histogramme repart de zéro. `intervalle` : tics entre le M0 de la passe
+qui finit et le M0 précédent (-1 pour la première), de quoi voir un M0
+perdu ou en trop.
 
 À temps égal, une fin passe avant un début, et un début avant un photon :
-un photon pile sur M0 est dans la passe, pile sur M3 il n'y est plus. Les
-événements du dernier tic lu attendent la lecture suivante.
+un photon pile sur M0 est dans la passe, pile sur sa fin il n'y est plus.
+Les événements du dernier tic lu attendent la lecture suivante.
 
 Les photons du code réservé (`CODE_HORS_ROI` : déplacements, pauses) sont
 jetés et comptés dans `hors_roi` ; les autres photons hors passe (décalage
 d'un échantillon entre le code et le signal de passe) dans `hors_passe`.
-Un M0 sans M3 (marqueur perdu) abandonne la passe en cours
-(`passes_abandonnees`). `dernier` : le dernier temps lu (tics).
+Un M0 pendant une passe (M3 perdu, ou M0 en trop) abandonne la passe en
+cours (`passes_abandonnees`). `dernier` : le dernier temps lu (tics).
 
 Pour le diagnostic (`EtatClamp`) : `marqueurs_vus` compte les fronts de
 chaque marqueur M0–M3 depuis le début, `photons_par_code` les photons lus
 pendant les passes par code de routage (le code réservé compris, avant
-d'être jeté), `duree_min`/`duree_max`/`duree_derniere` les durées M3 − M0
-des passes terminées (tics ; -1 avant la première).
+d'être jeté), `duree_min`/`duree_max`/`duree_derniere` les durées des
+passes terminées et `intervalle_min`/`intervalle_max` les intervalles
+M0 → M0 (tics ; -1 avant le premier).
 """
 mutable struct Passes
     decodeur::Decodeur
@@ -65,13 +71,20 @@ mutable struct Passes
     duree_min::Int64
     duree_max::Int64
     duree_derniere::Int64
+    duree::Int64
+    dernier_debut::Int64
+    intervalle::Int64
+    intervalle_min::Int64
+    intervalle_max::Int64
 end
 
-function Passes(; canaux::Integer = 256)
+function Passes(; canaux::Integer = 256, duree::Integer = 0)
     4096 % canaux == 0 || error("canaux : un diviseur de 4096")
+    duree >= 0 || error("duree : en tics, positive (0 : fin au M3)")
     return Passes(Decodeur(garder_photons = true), Int64[], Int64[], Int64[], UInt16[], UInt8[],
                   4096 ÷ canaux, false, Int64(0), 0, zeros(UInt32, canaux, 16), 0, 0, 0, 0, 0, typemin(Int64),
-                  zeros(Int, 4), zeros(Int, 16), Int64(-1), Int64(-1), Int64(-1))
+                  zeros(Int, 4), zeros(Int, 16), Int64(-1), Int64(-1), Int64(-1),
+                  Int64(duree), typemin(Int64), Int64(-1), Int64(-1), Int64(-1))
 end
 
 """
@@ -87,7 +100,7 @@ function passes!(f, p::Passes, mots::AbstractVector{UInt16}, n::Integer = length
         p.marqueurs_vus[b] += length(d.marqueurs[b])
     end
     append!(p.debuts, d.marqueurs[MARQUEUR_DEBUT])
-    append!(p.fins, d.marqueurs[MARQUEUR_FIN])
+    p.duree == 0 && append!(p.fins, d.marqueurs[MARQUEUR_FIN])        # M0 seul : les M3 ne comptent pas
     append!(p.t_photons, d.t_photons)
     append!(p.adc_photons, d.adc_photons)
     append!(p.routage_photons, d.routage_photons)
@@ -117,25 +130,25 @@ function _passes_avant!(f, p::Passes, limite::Int64)
         td = i <= length(D) && (tous || D[i] < limite) ? D[i] : typemax(Int64)
         te = j <= length(E) && (tous || E[j] < limite) ? E[j] : typemax(Int64)
         tp = k <= length(P) && (tous || P[k] < limite) ? P[k] : typemax(Int64)
-        t = min(td, te, tp)
+        # M0 seul : la fin de la passe ouverte, sa durée après son M0.
+        # À la fin de la mesure, seulement si les données vont jusque-là (sinon abandonnée).
+        tf = p.en_passe && p.duree > 0 ? p.t_debut + p.duree : typemax(Int64)
+        (tous ? tf <= p.dernier : tf < limite) || (tf = typemax(Int64))
+        t = min(td, te, tp, tf)
         t == typemax(Int64) && break
-        if te == t                                   # fin de passe
-            if p.en_passe
-                pertes = p.decodeur.pertes - p.pertes_debut
-                p.pertes_debut = p.decodeur.pertes
-                p.numero += 1
-                duree = te - p.t_debut
-                p.duree_derniere = duree
-                p.duree_min = p.duree_min < 0 ? duree : min(p.duree_min, duree)
-                p.duree_max = max(p.duree_max, duree)
-                f(p, p.t_debut, te, pertes)
-                _vider_passe!(p)
-            end
-            j += 1
+        if tf == t || te == t                        # fin de passe
+            p.en_passe && _finir_passe!(f, p, t)
+            tf == t || (j += 1)
         elseif td == t                               # début de passe
             p.en_passe && (p.passes_abandonnees += 1; _vider_passe!(p))
             p.en_passe = true
             p.t_debut = td
+            if p.dernier_debut != typemin(Int64)
+                p.intervalle = td - p.dernier_debut
+                p.intervalle_min = p.intervalle_min < 0 ? p.intervalle : min(p.intervalle_min, p.intervalle)
+                p.intervalle_max = max(p.intervalle_max, p.intervalle)
+            end
+            p.dernier_debut = td
             i += 1
         else                                         # photon
             code = Int(p.routage_photons[k])
@@ -158,6 +171,19 @@ function _passes_avant!(f, p::Passes, limite::Int64)
         deleteat!(p.adc_photons, 1:k - 1)
         deleteat!(p.routage_photons, 1:k - 1)
     end
+    return nothing
+end
+
+function _finir_passe!(f, p::Passes, t_fin::Int64)
+    pertes = p.decodeur.pertes - p.pertes_debut
+    p.pertes_debut = p.decodeur.pertes
+    p.numero += 1
+    duree = t_fin - p.t_debut
+    p.duree_derniere = duree
+    p.duree_min = p.duree_min < 0 ? duree : min(p.duree_min, duree)
+    p.duree_max = max(p.duree_max, duree)
+    f(p, p.t_debut, t_fin, pertes)
+    _vider_passe!(p)
     return nothing
 end
 

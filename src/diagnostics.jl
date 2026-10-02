@@ -98,11 +98,11 @@ const PROBLEM_LIST = Problem[
     Problem("PASS-01", "No photon on a card during the Realtime measurement",
             "Laser and detectors on, CFD rate in the top bar, CFD/SYNC thresholds; the 850 nm gate (P0.0) high during scans."),
     Problem("PASS-02", "Photons but no M0 marker (start of pass)",
-            "The pass signal (PFI13 = CTR 1 OUT) doesn't reach M0 of that card: wiring, common ground (D GND, pin 15). test_spc4 must count 200 markers on M0 and M3."),
+            "The pass signal (PFI13 = CTR 1 OUT) doesn't reach M0 of that card: wiring, common ground (D GND, pin 15). scripts/test_passes.jl shows where it arrives."),
     Problem("PASS-03", "M0 markers but no M3 marker (end of pass)",
-            "M3 of that card isn't wired, or the marker isn't enabled (routing_mode 0x1900, set by the engine)."),
-    Problem("PASS-04", "M0 and M3 counts differ: markers lost or extra",
-            "A marginal TTL on the marker inputs (one output feeds four inputs: M0 and M3 of both cards): ground, cable length, connector."),
+            "Only with [clamp] fin_par_m3 = true: M3 of that card isn't wired. Without access to M3, set fin_par_m3 = false (M0 only)."),
+    Problem("PASS-04", "Pass markers lost or extra",
+            "M0 and M3 counts differ, or (M0 only) M0 → M0 intervals off the slot: a marginal TTL on the marker inputs (one output feeds every card): ground, cable length, connector."),
     Problem("PASS-05", "Pass length M3 − M0 differs from the programmed scan",
             "If it equals the pause, the edges are swapped (M0 must be the rising edge, M3 the falling one); otherwise check the pass counter's clock and the sample rate."),
     Problem("PASS-06", "Passes don't pair between the two cards",
@@ -111,6 +111,8 @@ const PROBLEM_LIST = Problem[
             "The pass signal is wired to the line or frame clock inputs: move it to M0 and M3."),
     Problem("PASS-08", "Many photons with a ROI code outside the passes",
             "The routing code and the pass signal are offset in time; normally only a few photons at the edges."),
+    Problem("PASS-09", "No pass signal generated: the DAQ loop played no slot during the measurement",
+            "The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault)."),
     # --- Routing code (P0.4–P0.7 → R0–R3) ---
     Problem("ROUTE-01", "Photons in passes carry the reserved code 0: no routing code received",
             "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0."),
@@ -480,7 +482,7 @@ const Diagnosis = NamedTuple{(:id, :key, :detail), Tuple{String, String, String}
 ms_text(x) = isfinite(x) ? @sprintf("%.3f", 1000x) : "?"
 
 """
-    diagnose_passes(state::FLIMCore.EtatClamp)::Vector{Diagnosis}
+    diagnose_passes(state::FLIMCore.EtatClamp; daq_slots=nothing)::Vector{Diagnosis}
 
 What the counters of a Realtime measurement say about the pass signal and
 the routing code, card by card (see `FLIMCore.CompteursCarte`): no photon
@@ -492,8 +494,14 @@ outside the passes (PASS-08), and, from the photons read during passes, a
 missing routing code (ROUTE-01), the inverted code (ROUTE-02), a stuck line
 (ROUTE-03) or other codes (ROUTE-04). Absences are only concluded after 3 s
 (or at the end).
+
+`daq_slots`: the slots the DAQ loop played meanwhile (`nothing`: unknown,
+e.g. Playback). No marker on any card while it played none: the pass signal
+was never generated (PASS-09, not a wiring problem); while it played some:
+the signal is generated but doesn't reach the cards — on every card, the
+common part (the PFI13 wire, the BOB, the ground).
 """
-function diagnose_passes(state::FLIMCore.EtatClamp)::Vector{Diagnosis}
+function diagnose_passes(state::FLIMCore.EtatClamp; daq_slots::Union{Nothing, Integer} = nothing)::Vector{Diagnosis}
     out = Diagnosis[]
     add!(id, c, detail) = push!(out, (id = id, key = "$id/card $(c.carte)", detail = detail))
     settled = state.fin || state.duree_s >= 3.0
@@ -510,12 +518,16 @@ function diagnose_passes(state::FLIMCore.EtatClamp)::Vector{Diagnosis}
             add!("PASS-07", c, "$name: $m1 M1 and $m2 M2 edges, no M0/M3 in $elapsed")
         elseif settled && m0 == 0
             add!("PASS-02", c, "$name: $(c.photons) photons but no M0 edge in $elapsed" * (m3 > 0 ? " ($m3 M3 edges)" : ""))
-        elseif settled && m3 == 0
+        elseif state.fin_par_m3 && settled && m3 == 0
             add!("PASS-03", c, "$name: $m0 M0 edges, no M3 in $elapsed")
-        elseif abs(m0 - m3) > 1
+        elseif state.fin_par_m3 && abs(m0 - m3) > 1
             add!("PASS-04", c, "$name: $m0 M0 vs $m3 M3 edges, $(c.abandonnees) pass(es) abandoned")
+        elseif !state.fin_par_m3 && (c.m0_manquants > 0 || c.hors_duree > 0)
+            period = state.scan_s + state.pause_s
+            add!("PASS-04", c, "$name: $(c.m0_manquants) M0 missing, $(c.hors_duree) too early; M0 → M0 from " *
+                               "$(ms_text(c.intervalle_min_s)) to $(ms_text(c.intervalle_max_s)) ms, slot $(ms_text(period)) ± $(ms_text(state.tolerance_s)) ms")
         end
-        if c.passes > 0 && isfinite(state.scan_s) && isfinite(state.tolerance_s)
+        if state.fin_par_m3 && c.passes > 0 && isfinite(state.scan_s) && isfinite(state.tolerance_s)
             off(d) = isfinite(d) && abs(d - state.scan_s) > state.tolerance_s
             if off(c.duree_min_s) || off(c.duree_max_s)
                 swapped = isfinite(state.pause_s) && isfinite(c.duree_derniere_s) &&
@@ -568,6 +580,25 @@ function diagnose_passes(state::FLIMCore.EtatClamp)::Vector{Diagnosis}
             add!("ROUTE-04", c, "$name: codes $(seen) read, $(expected) written")
         end
     end
+    # No M0 on any card: was the pass signal generated at all?
+    no_m0 = filter(d -> d.id == "PASS-02", out)
+    if !isempty(no_m0) && length(no_m0) == length(state.cartes) && daq_slots !== nothing
+        filter!(d -> d.id != "PASS-02", out)
+        if daq_slots == 0
+            push!(out, (id = "PASS-09", key = "PASS-09", detail = "no M0 edge on any card in $elapsed, and the DAQ loop played no slot"))
+        else
+            common = length(state.cartes) > 1 ? "; on every card: look at the common part (the PFI13 wire, the BOB, the ground)" : ""
+            for d in no_m0
+                push!(out, (id = d.id, key = d.key, detail = d.detail * "; the DAQ loop played $daq_slots slot(s), " *
+                                                              "so the counter runs and its signal doesn't reach the card" * common))
+            end
+        end
+    elseif !isempty(no_m0) && daq_slots !== nothing && daq_slots > 0
+        for (k, d) in enumerate(out)
+            d.id == "PASS-02" && (out[k] = (id = d.id, key = d.key, detail = d.detail * "; the DAQ loop played $daq_slots slot(s): " *
+                                                                                       "the signal reaches the other card, not this one"))
+        end
+    end
     if length(state.cartes) == 2 && state.duree_s >= 3.0
         a, b = state.cartes
         abs(a.passes - b.passes) > 2 &&
@@ -578,14 +609,16 @@ end
 
 """One line per card of an `EtatClamp`, for the Console panel and the debug report."""
 function pass_status_lines(state::FLIMCore.EtatClamp)::Vector{String}
-    lines = [@sprintf("Realtime counters at %.1f s%s: %d pass(es) published, codes written %s, scan %s ± %s ms",
-                      state.duree_s, state.fin ? " (end)" : "", state.publiees, string(state.codes), ms_text(state.scan_s), ms_text(state.tolerance_s))]
+    lines = [@sprintf("Realtime counters at %.1f s%s: %d pass(es) published, codes written %s, scan %s ms, %s",
+                      state.duree_s, state.fin ? " (end)" : "", state.publiees, string(state.codes), ms_text(state.scan_s),
+                      state.fin_par_m3 ? "end of pass on M3" : "M0 only (pass = scan after M0)")]
     for c in state.cartes
         codes = join(["$(k - 1):$(n)" for (k, n) in enumerate(c.photons_par_code) if n > 0], " ")
         push!(lines, @sprintf("  card %d ch%d %s: photons %d, M0 %d M1 %d M2 %d M3 %d, passes %d (abandoned %d, off %d, unpaired %d, queued %d)",
                               c.carte, c.canal, c.serie, c.photons, c.marqueurs..., c.passes, c.abandonnees, c.hors_duree,
                               c.sans_partenaire, c.en_attente))
-        push!(lines, "    M3−M0 $(ms_text(c.duree_min_s))…$(ms_text(c.duree_max_s)) ms (last $(ms_text(c.duree_derniere_s))), " *
+        push!(lines, "    pass $(ms_text(c.duree_min_s))…$(ms_text(c.duree_max_s)) ms, M0 → M0 $(ms_text(c.intervalle_min_s))…$(ms_text(c.intervalle_max_s)) ms, " *
+                     "M0 missing $(c.m0_manquants), " *
                      "thrown (code 0) $(c.hors_roi), outside passes $(c.hors_passe), GAP $(c.pertes)" *
                      (c.fifo_deborde ? ", FIFO OVERFLOW" : "") * "; in passes by code: " * (isempty(codes) ? "none" : codes))
     end

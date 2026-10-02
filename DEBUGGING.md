@@ -38,6 +38,13 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 - **Any error in a GUI handler** is reported as GUI-01 with the handler's
   source file and line, instead of only scrolling by in the terminal.
 
+## Bench tests (GUI closed: it holds the NI card and the SPC cards)
+
+| Problem | Test | What it tells |
+|---|---|---|
+| PASS-0x, ROUTE-0x | `julia --project -t 4 scripts/test_passes.jl [s] [--code N] [--borne /X6321/PFIx] [--laser] [--sans-ni]` | The app's own pass counter and a fixed routing code, the cards recording all four markers: per card, the edges on M0, M1, M2, M3, the passes and their length, the code read — and a conclusion per card (signal not arriving, on the wrong input, a missing M3, the code inverted, read as 0, or another code) |
+| IMG-0x, image size | `julia -t 4 scripts/spc/horloges_scanner.jl "<scanner setting>" [s]` | The scanner's line and frame clocks, lines per frame, the setting recognized in `reglages_scanner`; with a sample, where the photons fall in the whole frame |
+
 ## Problem codes
 
 ### Start-up and environment
@@ -97,6 +104,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 | PASS-06 | Passes don't pair between the two cards | One card misses markers the other gets: compare their M0/M3 counts (Console panel, debug report). |
 | PASS-07 | Pass signal seen on M1/M2 instead of M0/M3 | The pass signal is wired to the line or frame clock inputs: move it to M0 and M3. |
 | PASS-08 | Many photons with a ROI code outside the passes | The routing code and the pass signal are offset in time; normally only a few photons at the edges. |
+| PASS-09 | No pass signal generated: the DAQ loop played no slot during the measurement | The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault). |
 
 ### Routing code (P0.4–P0.7 → R0–R3)
 

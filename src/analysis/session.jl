@@ -150,6 +150,7 @@ function session_info(; mode::AbstractString, rois::Vector{RoiCoordinates}, orde
             "series" => spc.series,
             "canaux" => spc.canaux_clamp,
             "inverser_routage" => spc.inverser_routage,
+            "fin_par_m3" => spc.fin_par_m3,
             "code_hors_roi" => FLIMCore.CODE_HORS_ROI,
             "code_sans_roi" => FLIMCore.CODE_SANS_ROI,
             "spc_module" => Dict{String, Any}(spc.spc),

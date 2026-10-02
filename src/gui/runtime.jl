@@ -535,8 +535,10 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
     # Commands wait in the engine's queue until it has opened the session.
     rate, scan_s, sample_s = session_pass_timing(session)
     pause_s = isfinite(rate) && rate > 0 ? 1 / rate - scan_s : 0.05
+    # The end of each pass as it was recorded: from M3, or M0 + the scan (sessions before this setting: M3).
+    fin_par_m3 = Bool(get(get(session.info, "spc", Dict{String, Any}()), "fin_par_m3", true))
     FLIMCore.commander!(engine, FLIMCore.Clamp(rois = copy(order), ordre = copy(order), scan_s = scan_s, pause_s = pause_s,
-                                               echantillon_s = sample_s))
+                                               echantillon_s = sample_s, fin_par_m3 = fin_par_m3))
 
     app_run.run_mode = "Playback"
     app_run.run_rois = copy(session.rois)

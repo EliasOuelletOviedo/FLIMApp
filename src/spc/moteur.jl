@@ -157,10 +157,11 @@ Les compteurs d'une carte pendant une mesure Realtime, depuis son début :
 mots lus du FIFO, photons décodés, fronts de chaque marqueur M0–M3,
 photons lus pendant les passes par code de routage (codes 0–15, le code
 réservé compris), photons jetés (code réservé) et hors passe, passes
-terminées et abandonnées (marqueur de fin perdu), enregistrements GAP,
-SPC_FOVFL vu, durées M3 − M0 (s ; NaN avant la première passe), passes hors
-tolérance, sans correspondante sur l'autre carte, et en attente de
-l'appariement.
+terminées et abandonnées (marqueur de fin perdu ou M0 en trop),
+enregistrements GAP, SPC_FOVFL vu, durées des passes et intervalles M0 → M0
+(s ; NaN avant le premier), passes hors tolérance (durée M3 − M0, ou M0
+trop tôt), M0 manquants (intervalles d'un créneau de trop), passes sans
+correspondante sur l'autre carte, et en attente de l'appariement.
 """
 struct CompteursCarte
     carte::Int
@@ -180,7 +181,10 @@ struct CompteursCarte
     duree_min_s::Float64
     duree_max_s::Float64
     duree_derniere_s::Float64
+    intervalle_min_s::Float64
+    intervalle_max_s::Float64
     hors_duree::Int
+    m0_manquants::Int
     sans_partenaire::Int
     en_attente::Int
 end
@@ -194,12 +198,14 @@ seconde et à la fin (`fin`) : de quoi diagnostiquer le signal de passe et
 le routage sans rien deviner (le GUI en tire des problèmes identifiés,
 diagnostics.jl). `codes` : les codes de routage que la NI écrit pendant
 les scans ; `scan_s`, `pause_s`, `tolerance_s` : les passes programmées
-(NaN : inconnues) ; `publiees` : passes publiées pour l'analyse.
+(NaN : inconnues) ; `fin_par_m3` : la fin des passes vient de M3 (sinon :
+M0 seul, la durée du scan) ; `publiees` : passes publiées pour l'analyse.
 """
 struct EtatClamp <: Resultat
     t::Float64
     duree_s::Float64
     fin::Bool
+    fin_par_m3::Bool
     codes::Vector{Int}
     scan_s::Float64
     pause_s::Float64
@@ -289,7 +295,13 @@ logicielle : un retard ne fait que remplir le FIFO des cartes.
 durée programmée d'un scan, elle sert au contrôle de M3 − M0 (tolérance :
 un échantillon et 100 ppm) ; NaN : pas de contrôle. `ordre` et `pause_s`
 ne servent qu'à la simulation, qui fabrique les passes que la NI
-produirait.
+produirait. `tous_marqueurs` : les cartes enregistrent aussi M1 et M2
+(scripts/test_passes.jl : voir sur quelle entrée le signal arrive).
+`fin_par_m3` : la fin des passes vient de M3 (`true`) ou de la durée du
+scan après M0 (`false`, il faut alors `scan_s`) ; `nothing` : `[clamp]
+fin_par_m3` des réglages. Avec M0 seul, l'intervalle entre deux M0 doit
+valoir un créneau (`scan_s + pause_s`) : un M0 trop tôt exclut sa passe du
+PI, un intervalle trop long compte des M0 manquants.
 """
 struct Clamp <: Commande
     rois::Vector{Int}
@@ -298,10 +310,17 @@ struct Clamp <: Commande
     scan_s::Float64
     pause_s::Float64
     echantillon_s::Float64
+    tous_marqueurs::Bool
+    fin_par_m3::Union{Nothing,Bool}
 end
 Clamp(; rois::AbstractVector{<:Integer} = Int[], ordre::AbstractVector{<:Integer} = rois,
-      dossier::AbstractString = "", scan_s::Real = 0.95, pause_s::Real = 0.05, echantillon_s::Real = NaN) =
-    Clamp(Int.(rois), Int.(ordre), String(dossier), Float64(scan_s), Float64(pause_s), Float64(echantillon_s))
+      dossier::AbstractString = "", scan_s::Real = 0.95, pause_s::Real = 0.05, echantillon_s::Real = NaN,
+      tous_marqueurs::Bool = false, fin_par_m3::Union{Nothing,Bool} = nothing) =
+    Clamp(Int.(rois), Int.(ordre), String(dossier), Float64(scan_s), Float64(pause_s), Float64(echantillon_s), tous_marqueurs,
+          fin_par_m3)
+
+"""Écart toléré sur l'intervalle M0 → M0 : un échantillon de l'AO et 100 ppm du créneau."""
+tolerance_periode(c::Clamp) = c.echantillon_s + 100e-6 * (c.scan_s + c.pause_s)
 
 """Écart toléré sur M3 − M0 : un échantillon de l'AO et 100 ppm de la durée programmée."""
 tolerance_passe(c::Clamp) = c.echantillon_s + 100e-6 * c.scan_s
@@ -1201,10 +1220,11 @@ mutable struct ClampCarte
     sans_partenaire::Int
     hors_duree::Int
     mots::Int
+    m0_manquants::Int
 end
 
 ClampCarte(carte, serie, nom, tic_s, passes, ecrivain) =
-    ClampCarte(carte, serie, nom, tic_s, passes, PasseCarte[], ecrivain, false, false, typemin(Int64), false, NaN, 0, 0, 0)
+    ClampCarte(carte, serie, nom, tic_s, passes, PasseCarte[], ecrivain, false, false, typemin(Int64), false, NaN, 0, 0, 0, 0)
 
 """Les compteurs de la carte `a` (canal `canal`), pour `EtatClamp`."""
 function _compteurs(a::ClampCarte, canal::Int)
@@ -1213,11 +1233,13 @@ function _compteurs(a::ClampCarte, canal::Int)
     return CompteursCarte(a.carte, a.serie, canal, a.tic_s, a.mots, p.decodeur.photons, copy(p.marqueurs_vus),
                           copy(p.photons_par_code), p.hors_roi, p.hors_passe, p.numero, p.passes_abandonnees,
                           p.decodeur.pertes, a.deborde, s(p.duree_min), s(p.duree_max), s(p.duree_derniere),
-                          a.hors_duree, a.sans_partenaire, length(a.file))
+                          s(p.intervalle_min), s(p.intervalle_max), a.hors_duree, a.m0_manquants, a.sans_partenaire,
+                          length(a.file))
 end
 
-_etat_clamp(cartes::Vector{ClampCarte}, codes, c::Clamp, debut, publiees, fin::Bool) =
-    EtatClamp(time(), time() - debut, fin, collect(codes), c.scan_s, c.pause_s, tolerance_passe(c),
+_etat_clamp(cartes::Vector{ClampCarte}, codes, c::Clamp, debut, publiees, fin::Bool, fin_par_m3::Bool) =
+    EtatClamp(time(), time() - debut, fin, fin_par_m3, collect(codes), c.scan_s, c.pause_s,
+              fin_par_m3 ? tolerance_passe(c) : tolerance_periode(c),
               [_compteurs(a, k) for (k, a) in enumerate(cartes)], publiees)
 
 function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
@@ -1229,7 +1251,14 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
         publier!(m, Fin(:clamp, refus, true, String[], time()))
         return nothing
     end
-    parametres, _ = parametres_clamp(r)
+    fin_m3 = something(c.fin_par_m3, r.fin_par_m3)
+    if !fin_m3 && !(isfinite(c.scan_s) && c.scan_s > 0)
+        refus = "Realtime : M0 seul (fin_par_m3 = false), la durée du scan doit être connue"
+        publier!(m, Alerte(:erreur, -1, refus))
+        publier!(m, Fin(:clamp, refus, true, String[], time()))
+        return nothing
+    end
+    parametres, _ = parametres_clamp(r; tous_marqueurs = c.tous_marqueurs, fin_par_m3 = fin_m3)
     enregistrer = !isempty(c.dossier)
     dossier = enregistrer ? c.dossier : joinpath(dossier_spc(r), "moteur")
     mkpath(dossier)
@@ -1257,7 +1286,8 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
                 ecrivain = ouvrir_spc(joinpath(dossier, nom * ".spc"), info.entete)
                 push!(fichiers, joinpath(dossier, "$(nom)_parametres.ini"))
             end
-            push!(cartes, ClampCarte(k, serie, nom, info.horloge_macro_s, Passes(canaux = r.canaux_clamp), ecrivain))
+            duree_tics = fin_m3 ? 0 : round(Int64, c.scan_s / info.horloge_macro_s)   # M0 seul : la passe dure le scan
+            push!(cartes, ClampCarte(k, serie, nom, info.horloge_macro_s, Passes(canaux = r.canaux_clamp, duree = duree_tics), ecrivain))
             effacer_taux!(src, k)
         end
         _etat!(m, :clamp)
@@ -1271,7 +1301,7 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
             cmd isa Arret && break
             cmd === nothing || _refuser!(m, cmd, "Realtime en cours")
             if time() >= prochain_etat
-                publier!(m, _etat_clamp(cartes, codes, c, debut, passes, false))
+                publier!(m, _etat_clamp(cartes, codes, c, debut, passes, false, fin_m3))
                 prochain_etat += PERIODE_ETAT_CLAMP
             end
             for a in cartes
@@ -1313,12 +1343,16 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
             terminer_passes!((p, t0, t1, pertes) -> _ranger_passe!(a, p, t0, t1, pertes, c), a.passes)
         end
         passes += _publier_passes!(m, cartes, dt_ns, attendre)
-        isempty(cartes) || publier!(m, _etat_clamp(cartes, codes, c, debut, passes, true))
+        isempty(cartes) || publier!(m, _etat_clamp(cartes, codes, c, debut, passes, true, fin_m3))
         for (canal, a) in enumerate(cartes)
             a.passes.passes_abandonnees > 0 &&
                 publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.passes.passes_abandonnees) passe(s) sans marqueur de fin, ignorées"))
             a.hors_duree > 0 &&
-                publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.hors_duree) passe(s) de durée M3 − M0 hors tolérance (marqueur perdu ou en trop), hors du PI"))
+                publier!(m, Alerte(:avertissement, a.carte, fin_m3 ?
+                    "module $(a.carte) : $(a.hors_duree) passe(s) de durée M3 − M0 hors tolérance (marqueur perdu ou en trop), hors du PI" :
+                    "module $(a.carte) : $(a.hors_duree) passe(s) dont le M0 arrive trop tôt (M0 en trop), hors du PI"))
+            a.m0_manquants > 0 &&
+                publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.m0_manquants) M0 manquant(s) : autant de passes perdues"))
             a.sans_partenaire > 0 &&
                 publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.sans_partenaire) passe(s) sans passe correspondante sur l'autre carte, ignorées"))
             a.passes.hors_passe > 0 &&
@@ -1334,7 +1368,9 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
                                                                             "passes" => a.passes.numero,
                                                                             "photons_hors_roi" => a.passes.hors_roi,
                                                                             "passes_hors_duree" => a.hors_duree,
-                                                                            "passes_sans_partenaire" => a.sans_partenaire)))
+                                                                            "passes_sans_partenaire" => a.sans_partenaire,
+                                                                            "fin_par_m3" => Int(fin_m3),
+                                                                            "m0_manquants" => a.m0_manquants)))
         end
     catch e
         erreur = true
@@ -1361,10 +1397,21 @@ function _ranger_passe!(a::ClampCarte, p::Passes, t0::Int64, t1::Int64, pertes::
     motifs = String[]
     pertes > 0 && push!(motifs, "module $(a.carte) : GAP, $pertes enregistrement(s) perdus")
     t0 <= a.fovfl_jusqua && push!(motifs, "module $(a.carte) : FIFO débordé (SPC_FOVFL) pendant la passe")
-    duree = (t1 - t0) * a.tic_s
-    if isfinite(c.echantillon_s) && abs(duree - c.scan_s) > tolerance_passe(c)
-        a.hors_duree += 1
-        push!(motifs, "module $(a.carte) : M3 − M0 = $(round(duree * 1e3; digits = 4)) ms au lieu de $(round(c.scan_s * 1e3; digits = 4)) ms")
+    if p.duree == 0                              # fin par M3 : la durée de la passe
+        duree = (t1 - t0) * a.tic_s
+        if isfinite(c.echantillon_s) && abs(duree - c.scan_s) > tolerance_passe(c)
+            a.hors_duree += 1
+            push!(motifs, "module $(a.carte) : M3 − M0 = $(round(duree * 1e3; digits = 4)) ms au lieu de $(round(c.scan_s * 1e3; digits = 4)) ms")
+        end
+    elseif p.intervalle >= 0 && isfinite(c.echantillon_s) && isfinite(c.pause_s)
+        # M0 seul : l'intervalle depuis le M0 précédent doit valoir un créneau.
+        intervalle, periode = p.intervalle * a.tic_s, c.scan_s + c.pause_s
+        if intervalle < periode - tolerance_periode(c)
+            a.hors_duree += 1
+            push!(motifs, "module $(a.carte) : M0 → M0 = $(round(intervalle * 1e3; digits = 4)) ms au lieu de $(round(periode * 1e3; digits = 4)) ms (M0 en trop)")
+        elseif intervalle > periode + tolerance_periode(c)
+            a.m0_manquants += max(1, round(Int, intervalle / periode) - 1)
+        end
     end
     push!(a.file, PasseCarte(t0 * a.tic_s, t1 * a.tic_s, copy(p.histo), pertes, motifs))
     return nothing

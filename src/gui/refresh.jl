@@ -295,7 +295,8 @@ function run_diagnostics!(app_run)
     status = view.clamp_status
     if status !== nothing && status.t != app_run.diagnosed_t
         app_run.diagnosed_t = status.t
-        for d in diagnose_passes(status)
+        daq_slots = app_run.run_mode == "Realtime" ? app_run.display.loop_slots : nothing
+        for d in diagnose_passes(status; daq_slots)
             level = startswith(d.id, "PASS-01") || startswith(d.id, "PASS-02") || startswith(d.id, "ROUTE-01") ? :error : :warn
             report_problem!(d.id, d.detail; key = d.key, level)
         end

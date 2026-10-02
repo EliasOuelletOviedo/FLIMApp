@@ -29,11 +29,11 @@ readback_signals = ["galvo_x", "galvo_y", "command_1", "command_2",
 # open). Empty: no shutter. Keep it outside port 0, e.g. "X6321/port1/line0".
 shutter = ""
 # Pass signal for the SPC-150N: a counter clocked by the AO sample clock,
-# high during each scan. One TTL output feeds four inputs: M0 (rising edge:
-# start of pass) and M3 (falling edge: end of pass) of both cards, with a
-# common ground (D GND on pin 15). Check the wiring with test_spc4,
-# module_no = 0 then 1: 200 markers on M0 and 200 on M3 for each card.
-# Empty: no pass signal.
+# high during each scan, wired to M0 of both cards (rising edge: start of
+# pass), with a common ground (D GND on pin 15); the end of each pass is the
+# programmed scan later — or, with [clamp] fin_par_m3 = true in
+# config/spc.toml, the falling edge of the same signal wired to M3 too.
+# Check the wiring with scripts/test_passes.jl. Empty: no pass signal.
 passes = "X6321/ctr1"
 passes_terminal = ""                    # output PFI; "" = the counter's default, PFI13 (CTR 1 OUT), validated by test_spc4
 

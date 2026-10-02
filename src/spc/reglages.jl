@@ -134,6 +134,7 @@ Base.@kwdef mutable struct Reglages
     # [clamp]
     canaux_clamp::Int = 256
     inverser_routage::Bool = true
+    fin_par_m3::Bool = false
     # [enregistrement]
     dossier::String = ""
     flux_brut::Bool = true
@@ -172,6 +173,7 @@ const CLES_REGLAGES = [
     ("single", "arret_debordement", :arret_debordement, "arrêt dès qu'un canal atteint 65535 coups"),
     ("single", "inverser", :inverser, "déclin à l'envers (montée lente, chute brutale) : true"),
     ("clamp", "canaux", :canaux_clamp, "canaux des déclins du Realtime (les 4096 du FIFO regroupés) : 256, la résolution de l'IRF"),
+    ("clamp", "fin_par_m3", :fin_par_m3, "false : M0 seul, chaque passe dure le scan programmé ; true : sa fin vient de M3 (le même signal de passe câblé aussi sur M3, front descendant)"),
     ("clamp", "inverser_routage", :inverser_routage, "la NI écrit NON(c) sur P0.4-P0.7 et la carte, aux entrées actives à 0 V, lit c"),
     ("enregistrement", "dossier", :dossier, "\"\" : ~/FLIMApp_spc (sous-dossiers imagerie et single)"),
     ("enregistrement", "flux_brut", :flux_brut, "garder le flux FIFO de chaque carte (.spc) : environ 4 octets par photon"),
@@ -426,17 +428,23 @@ NON(code) sur 4 bits avec `inverser` (entrées de routage actives à 0 V),
 code_ecrit(code::Integer, inverser::Bool) = UInt8(inverser ? (~code & 0x0f) : (code & 0x0f))
 
 """
-    parametres_clamp(r) -> (parametres, imposes)
+    parametres_clamp(r; tous_marqueurs=false, fin_par_m3=r.fin_par_m3) -> (parametres, imposes)
 
 Mode FIFO du Realtime : chaque photon porte son temps et son code de
 routage ; les passes sont délimitées par le signal de passe (compteur de la
-6321, cadencé par l'horloge de l'AO) branché sur M0 et M3 : front montant
-sur M0 (début de passe), front descendant sur M3 (fin). Les marqueurs M1 et
-M2 (horloges du scanner) sont coupés.
+6321, cadencé par l'horloge de l'AO, sur PFI13) branché sur M0, front
+montant : le début de chaque passe. Sa fin : le scan programmé plus tard
+(M0 seul), ou, avec `fin_par_m3`, le front descendant du même signal câblé
+aussi sur M3. Les marqueurs M1 et M2 (horloges du scanner) sont coupés —
+sauf avec `tous_marqueurs`, pour le test du signal de passe (voir sur
+quelle entrée il arrive), fronts montants.
 """
-function parametres_clamp(r::Reglages)
+function parametres_clamp(r::Reglages; tous_marqueurs::Bool = false, fin_par_m3::Bool = r.fin_par_m3)
+    # Bits 8–11 : M0–M3 enregistrés ; bits 12–15 : front montant de M0–M3.
+    marqueurs = tous_marqueurs ? 0x0F00 | 0x1000 | 0x2000 | 0x4000 :
+                fin_par_m3 ? 0x0100 | 0x0800 | 0x1000 : 0x0100 | 0x1000
     imposes = Dict{String,Any}(
         "mode" => 1, "adc_resolution" => 12, "stop_on_time" => 0, "macro_time_clk" => 0,
-        "routing_mode" => Int(0x0100 | 0x0800 | 0x1000))    # M0 et M3 actifs ; M0 front montant, M3 front descendant
+        "routing_mode" => Int(marqueurs))    # M0 front montant, M3 front descendant
     return merge(r.spc, imposes), imposes
 end

@@ -391,7 +391,9 @@ end
     @test FLIMCore.code_ecrit(FLIMCore.CODE_HORS_ROI, true) == 0x0f       # la carte lit 0 : code réservé
     @test FLIMCore.CODE_SANS_ROI == 1 != FLIMCore.CODE_HORS_ROI
     p, _ = FLIMCore.parametres_clamp(FLIMCore.Reglages())
-    @test p["mode"] == 1 && p["routing_mode"] == 0x1900                  # M0 et M3, M0 front montant, M3 descendant
+    @test p["mode"] == 1 && p["routing_mode"] == 0x1100                  # M0 seul, front montant (fin_par_m3 = false)
+    @test FLIMCore.parametres_clamp(FLIMCore.Reglages(fin_par_m3 = true))[1]["routing_mode"] == 0x1900   # M0 et M3, M3 descendant
+    @test FLIMCore.parametres_clamp(FLIMCore.Reglages(); tous_marqueurs = true)[1]["routing_mode"] == 0x7F00   # test : M0–M3
 
     # Photons pile sur M0 : dans la passe ; pile sur M3 : dehors ; entre deux passes : hors passe.
     e = FLIMCore.EncodeurFifo()
@@ -452,7 +454,7 @@ end
     @test sort([(c.carte, c.canal) for c in etat.cartes]) == [(0, 2), (1, 1)]
     session = mktempdir()
     histos = FLIMCore.HistoClamp[]
-    FLIMCore.commander!(m, FLIMCore.Clamp(rois = [1, 2], ordre = [2, 1], dossier = joinpath(session, "spc")))
+    FLIMCore.commander!(m, FLIMCore.Clamp(rois = [1, 2], ordre = [2, 1], dossier = joinpath(session, "spc"), fin_par_m3 = true))
     fin = jusqu_a_fin(m, :clamp; garder = x -> nothing)
     while isready(m.histogrammes)
         push!(histos, take!(m.histogrammes))
@@ -474,7 +476,7 @@ end
     rejeu = FLIMCore.source_session(session; vitesse = 0)
     m2 = FLIMCore.demarrer_moteur(reglages_test(); source = rejeu)
     @test attendre_etat(m2, :pret)
-    FLIMCore.commander!(m2, FLIMCore.Clamp(rois = [1, 2]))
+    FLIMCore.commander!(m2, FLIMCore.Clamp(rois = [1, 2], fin_par_m3 = true))
     jusqu_a_fin(m2, :clamp)
     rejoues = FLIMCore.HistoClamp[]
     while isready(m2.histogrammes)
@@ -507,21 +509,45 @@ function passes_rejouees(flux, c; fovfl_a_lecture = 0)
 end
 
 """Le flux sans le `n`-ième marqueur M3 : remplacé par un photon du code réservé (même temps, même MTOV)."""
-function sans_m3(mots, n)
+sans_m3(mots, n) = sans_marqueur(mots, 0b1000, n)
+
+"""Le flux sans le `n`-ième marqueur `bits` (tous : `n = 0`), remplacés par des photons du code réservé (même temps, même MTOV)."""
+function sans_marqueur(mots, bits, n)
     mots = copy(mots)
     vus = 0
     for i in 1:2:length(mots) - 1
         w = UInt32(mots[i]) | (UInt32(mots[i + 1]) << 16)
-        if (w & FLIMCore.BIT_MARK) != 0 && ((w >> 12) & 0xf) == 0b1000
+        if (w & FLIMCore.BIT_MARK) != 0 && ((w >> 12) & 0xf) == bits
             vus += 1
-            if vus == n
+            if n == 0 || vus == n
                 w = (w & (FLIMCore.BIT_MTOV | 0x00000fff)) | (UInt32(2000) << 16)
                 mots[i], mots[i + 1] = UInt16(w & 0xffff), UInt16(w >> 16)
+                n == 0 || return mots
+            end
+        end
+    end
+    n == 0 && return mots
+    error("pas de $n-ième marqueur $bits")
+end
+
+"""Le flux avec un M0 en trop : le photon `decalage` enregistrements après le `n`-ième M0 devient un M0 (même temps, même MTOV)."""
+function m0_en_trop(mots, n, decalage)
+    mots = copy(mots)
+    vus = 0
+    for i in 1:2:length(mots) - 1
+        w = UInt32(mots[i]) | (UInt32(mots[i + 1]) << 16)
+        if (w & FLIMCore.BIT_MARK) != 0 && ((w >> 12) & 0xf) == 0b0001
+            vus += 1
+            if vus == n
+                j = i + 2decalage
+                v = UInt32(mots[j]) | (UInt32(mots[j + 1]) << 16)
+                v = FLIMCore.BIT_MARK | FLIMCore.BIT_INVALID | (v & (FLIMCore.BIT_MTOV | 0x00000fff)) | (UInt32(0b0001) << 12)
+                mots[j], mots[j + 1] = UInt16(v & 0xffff), UInt16(v >> 16)
                 return mots
             end
         end
     end
-    error("pas de $n-ième M3")
+    error("pas de $n-ième M0")
 end
 
 @testset "moteur : passes exclues du PI, passes appariées entre cartes" begin
@@ -533,29 +559,72 @@ end
                                 0x1, TIC_TEST, 12.5; serie = "3N0318"))
 
     # Durée programmée respectée (un échantillon de 0,1 ms et 100 ppm) : rien d'exclu.
-    histos, fin, _ = passes_rejouees(flux_test(), FLIMCore.Clamp(rois = [1, 2], scan_s = 0.02, echantillon_s = 1e-4))
+    histos, fin, _ = passes_rejouees(flux_test(), FLIMCore.Clamp(rois = [1, 2], scan_s = 0.02, echantillon_s = 1e-4, fin_par_m3 = true))
     @test length(histos) == 6 && all(h -> isempty(h.motifs), histos)
     @test FLIMCore.tolerance_passe(FLIMCore.Clamp(scan_s = 0.02, echantillon_s = 1e-4)) ≈ 1e-4 + 2e-6
 
     # M3 − M0 à 20 ms pour 20,2 ms programmées : hors tolérance, sur les deux cartes.
-    histos, _, alertes = passes_rejouees(flux_test(), FLIMCore.Clamp(rois = [1, 2], scan_s = 0.0202, echantillon_s = 1e-4))
+    histos, _, alertes = passes_rejouees(flux_test(), FLIMCore.Clamp(rois = [1, 2], scan_s = 0.0202, echantillon_s = 1e-4, fin_par_m3 = true))
     @test length(histos) == 6 && all(h -> count(t -> occursin("M3 − M0", t), h.motifs) == 2, histos)
     @test any(t -> occursin("durée M3 − M0 hors tolérance", t), alertes)
 
     # SPC_FOVFL dès la première lecture : les passes lues alors sont exclues.
-    histos, _, alertes = passes_rejouees(flux_test(), FLIMCore.Clamp(rois = [1, 2]); fovfl_a_lecture = 1)
+    histos, _, alertes = passes_rejouees(flux_test(), FLIMCore.Clamp(rois = [1, 2], fin_par_m3 = true); fovfl_a_lecture = 1)
     @test length(histos) == 6 && all(h -> any(t -> occursin("SPC_FOVFL", t), h.motifs), histos)
     @test any(t -> occursin("FIFO débordé", t), alertes)
 
     # Un M3 perdu sur la carte du canal 2 : sa passe 3 est abandonnée, et la
     # passe 3 du canal 1, sans correspondante, écartée ; les autres restent
     # appariées par leur temps.
-    histos, _, alertes = passes_rejouees(flux_test(perdre = 3), FLIMCore.Clamp(rois = [1, 2]))
+    histos, _, alertes = passes_rejouees(flux_test(perdre = 3), FLIMCore.Clamp(rois = [1, 2], fin_par_m3 = true))
     @test length(histos) == 5 && [h.passe for h in histos] == [1, 2, 4, 5, 6]
     @test all(h -> isempty(h.motifs), histos)
     codes(h) = [argmax(vec(sum(m; dims = 1))) - 1 for m in h.histogrammes]
     @test all(h -> codes(h) == fill([1, 2][mod1(h.passe, 2)], 2), histos)     # chaque passe avec la sienne
     @test any(t -> occursin("sans correspondante", t), alertes) && any(t -> occursin("sans marqueur de fin", t), alertes)
+end
+
+@testset "M0 seul : chaque passe dure le scan, intervalles M0 → M0" begin
+    # Le découpage : mêmes passes qu'avec M3, quand M0 seul et la durée du scan les délimitent.
+    codes = [3, 1, 2]
+    mots = FLIMCore.flux_passes_synthetique(codes = codes, passes = 7, scan_s = 0.004, pause_s = 0.001, photons_par_s = 2e6)
+    avec_m3, avec_m0 = [], []
+    q3 = FLIMCore.Passes()
+    FLIMCore.passes!((p, t0, t1, pertes) -> push!(avec_m3, (t0, t1, copy(p.histo))), q3, mots)
+    FLIMCore.terminer_passes!((p, t0, t1, pertes) -> push!(avec_m3, (t0, t1, copy(p.histo))), q3)
+    q0 = FLIMCore.Passes(duree = round(Int64, 0.004 / TIC_TEST))
+    FLIMCore.passes!((p, t0, t1, pertes) -> push!(avec_m0, (t0, t1, copy(p.histo))), q0, sans_marqueur(mots, 0b1000, 0))
+    FLIMCore.terminer_passes!((p, t0, t1, pertes) -> push!(avec_m0, (t0, t1, copy(p.histo))), q0)
+    @test length(avec_m0) == 7 && avec_m0 == avec_m3
+    @test q0.intervalle_min == q0.intervalle_max == round(Int64, 0.005 / TIC_TEST)
+
+    # Le moteur, cartes sans M3 (fin_par_m3 = false, le défaut).
+    flux(f1 = identity) = Dict(
+        0 => FLIMCore.FluxRejeu(sans_marqueur(FLIMCore.flux_passes_synthetique(codes = [1, 2], passes = 6, scan_s = 0.02, pause_s = 0.005, graine = 1),
+                                              0b1000, 0), 0x1, TIC_TEST, 12.5; serie = "3N0317"),
+        1 => FLIMCore.FluxRejeu(f1(sans_marqueur(FLIMCore.flux_passes_synthetique(codes = [1, 2], passes = 6, scan_s = 0.02, pause_s = 0.005, graine = 2),
+                                                 0b1000, 0)), 0x1, TIC_TEST, 12.5; serie = "3N0318"))
+    c = FLIMCore.Clamp(rois = [1, 2], scan_s = 0.02, pause_s = 0.005, echantillon_s = 1e-4)
+    histos, fin, _ = passes_rejouees(flux(), c)
+    @test !fin.erreur && length(histos) == 6 && all(h -> isempty(h.motifs) && h.t_fin_s - h.t_debut_s ≈ 0.02, histos)
+    @test [argmax(vec(sum(h.histogrammes[1]; dims = 1))) - 1 for h in histos] == [1, 2, 1, 2, 1, 2]
+    histos_m3, _, _ = passes_rejouees(Dict(k => FLIMCore.FluxRejeu(FLIMCore.flux_passes_synthetique(codes = [1, 2], passes = 6, scan_s = 0.02,
+                                                                                                   pause_s = 0.005, graine = k + 1),
+                                                                    0x1, TIC_TEST, 12.5; serie = s) for (k, s) in ((0, "3N0317"), (1, "3N0318"))),
+                                      FLIMCore.Clamp(rois = [1, 2], scan_s = 0.02, pause_s = 0.005, echantillon_s = 1e-4, fin_par_m3 = true))
+    @test [h.histogrammes for h in histos] == [h.histogrammes for h in histos_m3]
+    # Sans la durée du scan, M0 seul est refusé.
+    _, refus, _ = passes_rejouees(flux(), FLIMCore.Clamp(rois = [1, 2], scan_s = NaN))
+    @test refus.erreur && occursin("durée du scan", refus.raison)
+
+    # Un M0 perdu sur la carte du canal 2 : une passe de moins, comptée ; rien d'exclu.
+    histos, _, alertes = passes_rejouees(flux(m -> sans_marqueur(m, 0b0001, 3)), c)
+    @test length(histos) == 5 && all(h -> isempty(h.motifs), histos)
+    @test any(t -> occursin("1 M0 manquant", t), alertes)
+    # Un M0 en trop au milieu de la passe 3 : la passe 4, dont le M0 arrive trop tôt, est exclue du PI.
+    histos, _, alertes = passes_rejouees(flux(m -> m0_en_trop(m, 3, 50)), c)
+    @test count(h -> any(t -> occursin("M0 en trop", t), h.motifs), histos) == 1
+    @test any(t -> occursin("M0 arrive trop tôt", t), alertes)
 end
 
 @testset "moteur : Realtime simulé (passes fabriquées)" begin

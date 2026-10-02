@@ -58,6 +58,7 @@ inverser = false                 # déclin à l'envers (montée lente, chute bru
 
 [clamp]
 canaux = 256                     # canaux des déclins du Realtime (les 4096 du FIFO regroupés) : 256, la résolution de l'IRF
+fin_par_m3 = false               # false : M0 seul, chaque passe dure le scan programmé ; true : sa fin vient de M3 (le même signal de passe câblé aussi sur M3, front descendant)
 inverser_routage = true          # la NI écrit NON(c) sur P0.4-P0.7 et la carte, aux entrées actives à 0 V, lit c
 
 [enregistrement]

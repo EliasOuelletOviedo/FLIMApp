@@ -167,23 +167,9 @@ function hw_prepare!(hw::NIHardware, buffer_samples::Integer; pass_ticks = nothi
             DAQmx.cfg_input_buffer(hw.readback, input_buffer)
         end
 
-        with_context("creating the sample clock task ($(cfg.counter) at $(cfg.sample_rate_hz) Hz)") do
-            hw.clock = DAQmx.create_task("flimapp_clock")
-            DAQmx.add_co_pulse_freq(hw.clock, cfg.counter, cfg.sample_rate_hz; duty = 0.5)
-            DAQmx.cfg_implicit_timing(hw.clock, DAQmx.Val_ContSamps, 1000)
-        end
-
+        hw.clock = create_clock_task(cfg)
         if pass_ticks !== nothing && !isempty(cfg.pass_counter)
-            entry, scan, shift = pass_ticks
-            terminal = isempty(cfg.pass_terminal) ? "default terminal (PFI13 for ctr1)" : cfg.pass_terminal
-            with_context("creating the pass counter task ($(cfg.pass_counter) → $terminal, ticks of $(cfg.clock_source): " *
-                         "delay $(max(entry, 2)), high $scan, low $shift)") do
-                hw.passes = DAQmx.create_task("flimapp_passes")
-                DAQmx.add_co_pulse_ticks(hw.passes, cfg.pass_counter, cfg.clock_source;
-                                         initial_delay = max(entry, 2), high_ticks = scan, low_ticks = shift)
-                isempty(cfg.pass_terminal) || DAQmx.set_co_pulse_term(hw.passes, cfg.pass_terminal)
-                DAQmx.cfg_implicit_timing(hw.passes, DAQmx.Val_ContSamps, 1000)
-            end
+            hw.passes = create_pass_task(cfg, pass_ticks...)
         end
 
         if !isempty(cfg.shutter_line)
@@ -215,6 +201,57 @@ function hw_write!(hw::NIHardware, buffers::SlotBuffers)
     DAQmx.write_do_u8(hw.lines, buffers.lines)
     DAQmx.write_analog(hw.commands, buffers.commands; nsamp_per_chan = n)
     return nothing
+end
+
+"""
+    create_clock_task(cfg)::DAQmx.TaskHandle
+
+The shared sample clock (`cfg.counter` at `cfg.sample_rate_hz`), created,
+not started; every scan task counts its edges (`cfg.clock_source`).
+"""
+function create_clock_task(cfg::BenchConfig)::DAQmx.TaskHandle
+    return with_context("creating the sample clock task ($(cfg.counter) at $(cfg.sample_rate_hz) Hz)") do
+        th = DAQmx.create_task("flimapp_clock")
+        try
+            DAQmx.add_co_pulse_freq(th, cfg.counter, cfg.sample_rate_hz; duty = 0.5)
+            DAQmx.cfg_implicit_timing(th, DAQmx.Val_ContSamps, 1000)
+        catch
+            try; DAQmx.clear_task(th); catch; end
+            rethrow()
+        end
+        th
+    end
+end
+
+"""Where the pass signal comes out, for the messages."""
+pass_terminal_text(terminal::AbstractString) = isempty(terminal) ? "default terminal (PFI13 for ctr1)" : String(terminal)
+
+"""
+    create_pass_task(cfg, entry, scan, shift; terminal=cfg.pass_terminal)::DAQmx.TaskHandle
+
+The pass signal (`cfg.pass_counter`), created, not started: counted in
+edges of the sample clock, low for `entry` samples (at least 2), then high
+for each scan (`scan` samples) and low for each pause (`shift`), out on
+`terminal` ("" = the counter's default, PFI13 for ctr1) — wired to the
+cards' M0 (rising edge) and M3 (falling edge). Also used by
+scripts/test_passes.jl.
+"""
+function create_pass_task(cfg::BenchConfig, entry::Integer, scan::Integer, shift::Integer;
+                          terminal::AbstractString = cfg.pass_terminal)::DAQmx.TaskHandle
+    return with_context("creating the pass counter task ($(cfg.pass_counter) → $(pass_terminal_text(terminal)), ticks of " *
+                        "$(cfg.clock_source): delay $(max(entry, 2)), high $scan, low $shift)") do
+        th = DAQmx.create_task("flimapp_passes")
+        try
+            DAQmx.add_co_pulse_ticks(th, cfg.pass_counter, cfg.clock_source;
+                                     initial_delay = max(entry, 2), high_ticks = scan, low_ticks = shift)
+            isempty(terminal) || DAQmx.set_co_pulse_term(th, terminal)
+            DAQmx.cfg_implicit_timing(th, DAQmx.Val_ContSamps, 1000)
+        catch
+            try; DAQmx.clear_task(th); catch; end
+            rethrow()
+        end
+        th
+    end
 end
 
 function hw_go!(hw::NIHardware)

@@ -617,11 +617,14 @@ end
 end
 
 @testset "Diagnostics: what the cards received (pass signal, routing)" begin
+    # Most cases with M3 wired (fin_par_m3 = true); M0 only further down.
     counters(; carte = 0, photons = 10_000, marqueurs = [10, 0, 0, 10], codes = Dict(1 => 5000), hors_passe = 0,
-             passes = 10, durations = (0.95, 0.95, 0.95), pertes = 0, fovfl = false, unpaired = 0) =
+             passes = 10, durations = (0.95, 0.95, 0.95), intervals = (1.0, 1.0), pertes = 0, fovfl = false, unpaired = 0,
+             early = 0, missing_m0 = 0) =
         FLIMCore.CompteursCarte(carte, "3N0317", carte + 1, 25e-9, 2photons, photons, marqueurs, [get(codes, k, 0) for k in 0:15],
-                                10, hors_passe, passes, 0, pertes, fovfl, durations..., 0, unpaired, 0)
-    state(cards; written = [1], duree = 10.0) = FLIMCore.EtatClamp(time(), duree, false, written, 0.95, 0.05, 1e-4 + 95e-6, cards, 10)
+                                10, hors_passe, passes, 0, pertes, fovfl, durations..., intervals..., early, missing_m0, unpaired, 0)
+    state(cards; written = [1], duree = 10.0, m3 = true) =
+        FLIMCore.EtatClamp(time(), duree, false, m3, written, 0.95, 0.05, 1e-4 + 95e-6, cards, 10)
     ids(st) = sort([d.id for d in FLIMApp.diagnose_passes(st)])
     detail(st, id) = only(filter(d -> d.id == id, FLIMApp.diagnose_passes(st))).detail
 
@@ -632,6 +635,12 @@ end
     @test ids(state([counters(marqueurs = [0, 300, 4, 0], passes = 0)])) == ["PASS-07"]
     @test ids(state([counters(marqueurs = [10, 0, 0, 0], passes = 0)])) == ["PASS-03"]
     @test ids(state([counters(marqueurs = [10, 0, 0, 6])])) == ["PASS-04"]
+    # M0 only (no access to M3): no M3 is expected; M0 → M0 intervals tell lost or extra M0s.
+    @test isempty(ids(state([counters(marqueurs = [10, 0, 0, 0])]; m3 = false)))
+    lost = state([counters(marqueurs = [9, 0, 0, 0], missing_m0 = 1, intervals = (1.0, 2.0))]; m3 = false)
+    @test ids(lost) == ["PASS-04"] && occursin("1 M0 missing", detail(lost, "PASS-04"))
+    @test ids(state([counters(marqueurs = [10, 0, 0, 0], early = 1, intervals = (0.4, 1.0))]; m3 = false)) == ["PASS-04"]
+    @test isempty(ids(state([counters(marqueurs = [10, 0, 0, 0], durations = (0.05, 0.05, 0.05))]; m3 = false)))   # length = the scan
     swapped = state([counters(durations = (0.05, 0.05, 0.05))])
     @test ids(swapped) == ["PASS-05"] && occursin("edges swapped", detail(swapped, "PASS-05"))
     late = state([counters(durations = (0.9, 0.95, 0.9))])
@@ -640,6 +649,14 @@ end
     @test ids(state([counters(hors_passe = 2000)])) == ["PASS-08"]
     @test ids(state([counters(unpaired = 2)])) == ["PASS-06"]
     @test "PASS-06" in ids(state([counters(passes = 10), counters(carte = 1, passes = 4)]))
+
+    # No M0 anywhere: was the pass signal generated at all (the DAQ loop's slots)?
+    nothing_anywhere = state([counters(marqueurs = [0, 0, 0, 0], passes = 0), counters(carte = 1, marqueurs = [0, 0, 0, 0], passes = 0)])
+    @test sort([d.id for d in FLIMApp.diagnose_passes(nothing_anywhere; daq_slots = 0)]) == ["PASS-09"]
+    generated = FLIMApp.diagnose_passes(nothing_anywhere; daq_slots = 40)
+    @test [d.id for d in generated] == ["PASS-02", "PASS-02"] && all(d -> occursin("common part", d.detail) && occursin("40 slot", d.detail), generated)
+    one_card = FLIMApp.diagnose_passes(state([counters(), counters(carte = 1, marqueurs = [0, 0, 0, 0], passes = 0)]); daq_slots = 40)
+    @test occursin("reaches the other card", only(filter(d -> d.id == "PASS-02", one_card)).detail)
 
     # Routing: nothing received, inverted, a line stuck, other codes.
     @test ids(state([counters(codes = Dict(0 => 5000))])) == ["ROUTE-01"]
