@@ -94,7 +94,7 @@ const PROBLEM_LIST = Problem[
             "Scanner running? Its line clock on M1 and frame clock on M2 of the cards; ligne_/trame_front_montant in [imagerie]."),
     Problem("IMG-02", "Scanner setting not in the table: image lines guessed",
             "Measure this setting with scripts/spc/horloges_scanner.jl and add [lines per frame, image lines, top lines] to reglages_scanner in config/spc.toml ([imagerie])."),
-    # --- Pass signal (counter → markers M0/M3) ---
+    # --- Pass signal (counter → marker M0, and M3 with fin_par_m3) ---
     Problem("PASS-01", "No photon on a card during the Realtime measurement",
             "Laser and detectors on, CFD rate in the top bar, CFD/SYNC thresholds; the 850 nm gate (P0.0) high during scans."),
     Problem("PASS-02", "Photons but no M0 marker (start of pass)",
@@ -102,13 +102,13 @@ const PROBLEM_LIST = Problem[
     Problem("PASS-03", "M0 markers but no M3 marker (end of pass)",
             "Only with [clamp] fin_par_m3 = true: M3 of that card isn't wired. Without access to M3, set fin_par_m3 = false (M0 only)."),
     Problem("PASS-04", "Pass markers lost or extra",
-            "M0 and M3 counts differ, or (M0 only) M0 → M0 intervals off the slot: a marginal TTL on the marker inputs (one output feeds every card): ground, cable length, connector."),
+            "M0 and M3 counts differ, or (M0 only) M0 missing or off the slot cadence (glitches, ignored): a marginal TTL on the marker inputs (one output feeds every card): ground, cable length, connector."),
     Problem("PASS-05", "Pass length M3 − M0 differs from the programmed scan",
             "If it equals the pause, the edges are swapped (M0 must be the rising edge, M3 the falling one); otherwise check the pass counter's clock and the sample rate."),
     Problem("PASS-06", "Passes don't pair between the two cards",
-            "One card misses markers the other gets: compare their M0/M3 counts (Console panel, debug report)."),
+            "One card misses markers the other gets: compare their M0 counts (Console panel, debug report)."),
     Problem("PASS-07", "Pass signal seen on M1/M2 instead of M0/M3",
-            "The pass signal is wired to the line or frame clock inputs: move it to M0 and M3."),
+            "The pass signal is wired to the line or frame clock inputs: move it to M0 (and M3 with fin_par_m3 = true)."),
     Problem("PASS-08", "Many photons with a ROI code outside the passes",
             "The routing code and the pass signal are offset in time; normally only a few photons at the edges."),
     Problem("PASS-09", "No pass signal generated: the DAQ loop played no slot during the measurement",
@@ -524,7 +524,7 @@ function diagnose_passes(state::FLIMCore.EtatClamp; daq_slots::Union{Nothing, In
             add!("PASS-04", c, "$name: $m0 M0 vs $m3 M3 edges, $(c.abandonnees) pass(es) abandoned")
         elseif !state.fin_par_m3 && (c.m0_manquants > 0 || c.hors_duree > 0)
             period = state.scan_s + state.pause_s
-            add!("PASS-04", c, "$name: $(c.m0_manquants) M0 missing, $(c.hors_duree) too early; M0 → M0 from " *
+            add!("PASS-04", c, "$name: $(c.m0_manquants) M0 missing, $(c.hors_duree) off the cadence (ignored); M0 → M0 from " *
                                "$(ms_text(c.intervalle_min_s)) to $(ms_text(c.intervalle_max_s)) ms, slot $(ms_text(period)) ± $(ms_text(state.tolerance_s)) ms")
         end
         if state.fin_par_m3 && c.passes > 0 && isfinite(state.scan_s) && isfinite(state.tolerance_s)
@@ -618,7 +618,7 @@ function pass_status_lines(state::FLIMCore.EtatClamp)::Vector{String}
                               c.carte, c.canal, c.serie, c.photons, c.marqueurs..., c.passes, c.abandonnees, c.hors_duree,
                               c.sans_partenaire, c.en_attente))
         push!(lines, "    pass $(ms_text(c.duree_min_s))…$(ms_text(c.duree_max_s)) ms, M0 → M0 $(ms_text(c.intervalle_min_s))…$(ms_text(c.intervalle_max_s)) ms, " *
-                     "M0 missing $(c.m0_manquants), " *
+                     (state.fin_par_m3 ? "" : "M0 missing $(c.m0_manquants), ") *
                      "thrown (code 0) $(c.hors_roi), outside passes $(c.hors_passe), GAP $(c.pertes)" *
                      (c.fifo_deborde ? ", FIFO OVERFLOW" : "") * "; in passes by code: " * (isempty(codes) ? "none" : codes))
     end

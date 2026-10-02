@@ -66,8 +66,11 @@ println("  cartes : $(spc.source), séries $(spc.series) ; marqueurs M0–M3 tou
 ms(s) = isfinite(s) ? @sprintf("%.3f", 1000s) : "—"
 function ligne_carte(c)
     codes = join(["$(k - 1):$n" for (k, n) in enumerate(c.photons_par_code) if n > 0], " ")
-    return @sprintf("  module %d (canal %d %s) : M0 %d  M1 %d  M2 %d  M3 %d ; passes %d (abandonnées %d) ; M3−M0 %s…%s ms ; photons %d ; codes en passe %s",
-                    c.carte, c.canal, c.serie, c.marqueurs..., c.passes, c.abandonnees, ms(c.duree_min_s), ms(c.duree_max_s),
+    temps = spc.fin_par_m3 ? @sprintf("M3−M0 %s…%s ms", ms(c.duree_min_s), ms(c.duree_max_s)) :
+            @sprintf("M0→M0 %s…%s ms (M0 manquants %d, hors cadence %d)", ms(c.intervalle_min_s), ms(c.intervalle_max_s),
+                     c.m0_manquants, c.hors_duree)
+    return @sprintf("  module %d (canal %d %s) : M0 %d  M1 %d  M2 %d  M3 %d ; passes %d (abandonnées %d) ; %s ; photons %d ; codes en passe %s",
+                    c.carte, c.canal, c.serie, c.marqueurs..., c.passes, c.abandonnees, temps,
                     c.photons, isempty(codes) ? "—" : codes)
 end
 
@@ -76,7 +79,8 @@ function conclusion(c, attendues)
     lignes = String[]
     if m0 == 0 && m3 == 0
         if m1 + m2 > 0
-            push!(lignes, "le signal arrive sur M1/M2 ($m1/$m2 fronts), pas sur M0/M3 : déplace-le sur M0 et M3 de cette carte.")
+            push!(lignes, "le signal arrive sur M1/M2 ($m1/$m2 fronts), pas sur M0/M3 : déplace-le sur M0 de cette carte" *
+                          (spc.fin_par_m3 ? " et sur M3." : "."))
         elseif sans_ni
             push!(lignes, "aucun marqueur : rien n'arrive sur M0–M3 de cette carte.")
         else
@@ -94,6 +98,8 @@ function conclusion(c, attendues)
             push!(lignes, abs(m0 - attendues) <= 2 ?
                 "M0 : $m0 fronts pour ~$attendues passes attendues : le signal de passe arrive (M0 seul, chaque passe dure le scan)." :
                 "M0 : $m0 fronts pour ~$attendues passes attendues : des fronts manquent ou sont en trop.")
+            c.m0_manquants > 0 && push!(lignes, "M0 : $(c.m0_manquants) manquant(s) dans la cadence (créneau de $(ms(periode_s)) ms).")
+            c.hors_duree > 0 && push!(lignes, "M0 : $(c.hors_duree) front(s) hors cadence (parasites, ignorés) : masse, câble, connecteur.")
         end
         m3 > 0 && push!(lignes, "M3 reçoit aussi ($m3 fronts), sans être utilisé (fin_par_m3 = false).")
         (m1 > 0 || m2 > 0) && push!(lignes, "M1/M2 reçoivent aussi ($m1/$m2) : les horloges du scanner, ou le signal de passe câblé aussi là.")
@@ -133,7 +139,7 @@ final = nothing
 try
     C.afficher_etat(C.verifier(m))
     C.commander!(m, C.Clamp(rois = [code], ordre = [code], scan_s = scan / rate, pause_s = pause / rate,
-                            echantillon_s = 1 / rate, tous_marqueurs = true))
+                            echantillon_s = sans_ni ? NaN : 1 / rate, tous_marqueurs = true))     # sans NI : cadence inconnue
     timedwait(() -> C.etat_moteur(m) == :clamp, 30.0; pollint = 0.01) === :ok || error("les cartes ne passent pas en Realtime")
     if !sans_ni
         F.with_context("écriture du code de routage sur le port 0 ($(cfg.line_channels))") do

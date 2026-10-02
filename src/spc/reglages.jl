@@ -445,6 +445,6 @@ function parametres_clamp(r::Reglages; tous_marqueurs::Bool = false, fin_par_m3:
                 fin_par_m3 ? 0x0100 | 0x0800 | 0x1000 : 0x0100 | 0x1000
     imposes = Dict{String,Any}(
         "mode" => 1, "adc_resolution" => 12, "stop_on_time" => 0, "macro_time_clk" => 0,
-        "routing_mode" => Int(marqueurs))    # M0 front montant, M3 front descendant
+        "routing_mode" => Int(marqueurs))    # M0 front montant (M3 front descendant, si enregistré)
     return merge(r.spc, imposes), imposes
 end

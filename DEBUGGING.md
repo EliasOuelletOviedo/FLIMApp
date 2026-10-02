@@ -29,7 +29,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
   received since the start (`FLIMCore.EtatClamp`): photons, M0–M3 edges,
   pass lengths, photons per routing code during passes, thrown and
   out-of-pass photons, GAP records, FIFO overflow, unpaired passes. That
-  tells a missing pass signal (PASS-02/03/07), lost markers (PASS-04),
+  tells a missing pass signal (PASS-02/03/07), lost or glitching markers (PASS-04),
   swapped edges (PASS-05), routing lines unplugged (ROUTE-01), inverted
   (ROUTE-02) or stuck (ROUTE-03) — before any lifetime is wrong. Playback
   runs the same checks on a recorded session.
@@ -42,7 +42,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 
 | Problem | Test | What it tells |
 |---|---|---|
-| PASS-0x, ROUTE-0x | `julia --project -t 4 scripts/test_passes.jl [s] [--code N] [--borne /X6321/PFIx] [--laser] [--sans-ni]` | The app's own pass counter and a fixed routing code, the cards recording all four markers: per card, the edges on M0, M1, M2, M3, the passes and their length, the code read — and a conclusion per card (signal not arriving, on the wrong input, a missing M3, the code inverted, read as 0, or another code) |
+| PASS-0x, ROUTE-0x | `julia --project -t 4 scripts/test_passes.jl [s] [--code N] [--borne /X6321/PFIx] [--laser] [--sans-ni]` | The app's own pass counter and a fixed routing code, the cards recording all four markers: per card, the edges on M0, M1, M2, M3, the passes and their length, the code read — and a conclusion per card (signal not arriving, on the wrong input, a missing M3 with fin_par_m3 = true, the code inverted, read as 0, or another code) |
 | IMG-0x, image size | `julia -t 4 scripts/spc/horloges_scanner.jl "<scanner setting>" [s]` | The scanner's line and frame clocks, lines per frame, the setting recognized in `reglages_scanner`; with a sample, where the photons fall in the whole frame |
 
 ## Problem codes
@@ -92,17 +92,17 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 | IMG-01 | Imaging: no line or frame clock, no image | Scanner running? Its line clock on M1 and frame clock on M2 of the cards; ligne_/trame_front_montant in [imagerie]. |
 | IMG-02 | Scanner setting not in the table: image lines guessed | Measure this setting with scripts/spc/horloges_scanner.jl and add [lines per frame, image lines, top lines] to reglages_scanner in config/spc.toml ([imagerie]). |
 
-### Pass signal (counter → markers M0/M3)
+### Pass signal (counter → marker M0, and M3 with fin_par_m3)
 
 | Code | Problem | What to check |
 |---|---|---|
 | PASS-01 | No photon on a card during the Realtime measurement | Laser and detectors on, CFD rate in the top bar, CFD/SYNC thresholds; the 850 nm gate (P0.0) high during scans. |
-| PASS-02 | Photons but no M0 marker (start of pass) | The pass signal (PFI13 = CTR 1 OUT) doesn't reach M0 of that card: wiring, common ground (D GND, pin 15). test_spc4 must count 200 markers on M0 and M3. |
-| PASS-03 | M0 markers but no M3 marker (end of pass) | M3 of that card isn't wired, or the marker isn't enabled (routing_mode 0x1900, set by the engine). |
-| PASS-04 | M0 and M3 counts differ: markers lost or extra | A marginal TTL on the marker inputs (one output feeds four inputs: M0 and M3 of both cards): ground, cable length, connector. |
+| PASS-02 | Photons but no M0 marker (start of pass) | The pass signal (PFI13 = CTR 1 OUT) doesn't reach M0 of that card: wiring, common ground (D GND, pin 15). scripts/test_passes.jl shows where it arrives. |
+| PASS-03 | M0 markers but no M3 marker (end of pass) | Only with [clamp] fin_par_m3 = true: M3 of that card isn't wired. Without access to M3, set fin_par_m3 = false (M0 only). |
+| PASS-04 | Pass markers lost or extra | M0 and M3 counts differ, or (M0 only) M0 missing or off the slot cadence (glitches, ignored): a marginal TTL on the marker inputs (one output feeds every card): ground, cable length, connector. |
 | PASS-05 | Pass length M3 − M0 differs from the programmed scan | If it equals the pause, the edges are swapped (M0 must be the rising edge, M3 the falling one); otherwise check the pass counter's clock and the sample rate. |
-| PASS-06 | Passes don't pair between the two cards | One card misses markers the other gets: compare their M0/M3 counts (Console panel, debug report). |
-| PASS-07 | Pass signal seen on M1/M2 instead of M0/M3 | The pass signal is wired to the line or frame clock inputs: move it to M0 and M3. |
+| PASS-06 | Passes don't pair between the two cards | One card misses markers the other gets: compare their M0 counts (Console panel, debug report). |
+| PASS-07 | Pass signal seen on M1/M2 instead of M0/M3 | The pass signal is wired to the line or frame clock inputs: move it to M0 (and M3 with fin_par_m3 = true). |
 | PASS-08 | Many photons with a ROI code outside the passes | The routing code and the pass signal are offset in time; normally only a few photons at the edges. |
 | PASS-09 | No pass signal generated: the DAQ loop played no slot during the measurement | The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault). |
 

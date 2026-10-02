@@ -2,8 +2,10 @@
 #
 # Une passe est un scan d'une ROI (un créneau de la NI). Le signal de passe,
 # haut pendant le scan, vient d'un compteur de la 6321 cadencé par l'horloge
-# de l'AO ; il arrive sur deux marqueurs de chaque carte : M0, actif sur le
-# front montant (début de passe), et M3, actif sur le front descendant (fin).
+# de l'AO (PFI13 = CTR 1 OUT). Il arrive sur M0 de chaque carte, actif sur
+# le front montant : le début de la passe ; sa fin est le M0 plus la durée
+# programmée du scan (`[clamp] fin_par_m3 = false`, le défaut), ou le front
+# descendant du même signal sur M3 (`fin_par_m3 = true`, M3 câblé aussi).
 # La carte horodate ces fronts avec les photons : la passe est délimitée par
 # la carte elle-même, sans échéance logicielle. Un retard du moteur ne fait
 # que remplir le FIFO ; s'il déborde, la carte le signale (SPC_FOVFL) et les
@@ -18,18 +20,26 @@ const MARQUEUR_DEBUT = 1     # M0 : bit 0 des marqueurs
 const MARQUEUR_FIN = 4       # M3 : bit 3
 
 """
-    Passes(; canaux=256, duree=0)
+    Passes(; canaux=256, duree=0, periode=0, tolerance=0)
 
 Découpe un flux FIFO en passes, au fil des lectures (`passes!`). Une passe
 commence à un M0 ; elle finit au M3 suivant (`duree = 0`), ou `duree` tics
 après son M0 (`duree > 0` : M0 seul, la passe dure le scan programmé ; les
-M3 sont ignorés). Pendant la passe, chaque photon va dans
-`histo[canal, code + 1]` (`canaux` canaux de temps croissant, 16 codes de
-routage). À chaque fin de passe, `f(p, t_debut, t_fin, pertes)` (temps en
-tics, `pertes` : GAP décodés depuis la passe précédente), puis
-l'histogramme repart de zéro. `intervalle` : tics entre le M0 de la passe
-qui finit et le M0 précédent (-1 pour la première), de quoi voir un M0
-perdu ou en trop.
+M3 sont ignorés).
+
+M0 seul, avec `periode > 0` (le créneau scan + pause, en tics) : chaque M0
+doit tomber un nombre entier `n` de créneaux après le dernier M0 valide, à
+`n × tolerance` tics près. `n > 1` : `n − 1` M0 perdus (`m0_manquants`,
+autant de passes perdues). Hors cadence, le M0 est un parasite
+(`m0_hors_cadence`) : ignoré, la passe en cours continue. Deux M0 à un
+créneau l'un de l'autre hors de l'ancienne cadence la remplacent (le
+signal de passe a redémarré).
+
+Pendant la passe, chaque photon va dans `histo[canal, code + 1]`
+(`canaux` canaux de temps croissant, 16 codes de routage). À chaque fin de
+passe, `f(p, t_debut, t_fin, pertes)` (temps en tics, `pertes` : GAP
+décodés depuis la passe précédente), puis l'histogramme repart de zéro. `intervalle` : tics entre les deux derniers
+M0 (-1 avant le deuxième).
 
 À temps égal, une fin passe avant un début, et un début avant un photon :
 un photon pile sur M0 est dans la passe, pile sur sa fin il n'y est plus.
@@ -38,8 +48,9 @@ Les événements du dernier tic lu attendent la lecture suivante.
 Les photons du code réservé (`CODE_HORS_ROI` : déplacements, pauses) sont
 jetés et comptés dans `hors_roi` ; les autres photons hors passe (décalage
 d'un échantillon entre le code et le signal de passe) dans `hors_passe`.
-Un M0 pendant une passe (M3 perdu, ou M0 en trop) abandonne la passe en
-cours (`passes_abandonnees`). `dernier` : le dernier temps lu (tics).
+Un M0 accepté pendant une passe (M3 perdu, M0 en trop sans contrôle de
+cadence, nouvelle cadence) abandonne la passe en cours
+(`passes_abandonnees`). `dernier` : le dernier temps lu (tics).
 
 Pour le diagnostic (`EtatClamp`) : `marqueurs_vus` compte les fronts de
 chaque marqueur M0–M3 depuis le début, `photons_par_code` les photons lus
@@ -76,15 +87,23 @@ mutable struct Passes
     intervalle::Int64
     intervalle_min::Int64
     intervalle_max::Int64
+    periode::Int64
+    tolerance::Int64
+    dernier_valide::Int64
+    m0_hors_cadence::Int
+    m0_manquants::Int
 end
 
-function Passes(; canaux::Integer = 256, duree::Integer = 0)
+function Passes(; canaux::Integer = 256, duree::Integer = 0, periode::Integer = 0, tolerance::Integer = 0)
     4096 % canaux == 0 || error("canaux : un diviseur de 4096")
     duree >= 0 || error("duree : en tics, positive (0 : fin au M3)")
+    periode == 0 || (duree > 0 && periode > duree && tolerance >= 0) ||
+        error("periode : M0 seul (duree > 0), en tics, plus longue que le scan")
     return Passes(Decodeur(garder_photons = true), Int64[], Int64[], Int64[], UInt16[], UInt8[],
                   4096 ÷ canaux, false, Int64(0), 0, zeros(UInt32, canaux, 16), 0, 0, 0, 0, 0, typemin(Int64),
                   zeros(Int, 4), zeros(Int, 16), Int64(-1), Int64(-1), Int64(-1),
-                  Int64(duree), typemin(Int64), Int64(-1), Int64(-1), Int64(-1))
+                  Int64(duree), typemin(Int64), Int64(-1), Int64(-1), Int64(-1),
+                  Int64(periode), Int64(tolerance), typemin(Int64), 0, 0)
 end
 
 """
@@ -140,9 +159,11 @@ function _passes_avant!(f, p::Passes, limite::Int64)
             p.en_passe && _finir_passe!(f, p, t)
             tf == t || (j += 1)
         elseif td == t                               # début de passe
-            p.en_passe && (p.passes_abandonnees += 1; _vider_passe!(p))
-            p.en_passe = true
-            p.t_debut = td
+            if _en_cadence!(p, td)
+                p.en_passe && (p.passes_abandonnees += 1; _vider_passe!(p))
+                p.en_passe = true
+                p.t_debut = td
+            end
             if p.dernier_debut != typemin(Int64)
                 p.intervalle = td - p.dernier_debut
                 p.intervalle_min = p.intervalle_min < 0 ? p.intervalle : min(p.intervalle_min, p.intervalle)
@@ -172,6 +193,21 @@ function _passes_avant!(f, p::Passes, limite::Int64)
         deleteat!(p.routage_photons, 1:k - 1)
     end
     return nothing
+end
+
+"""Le M0 à `td` ouvre-t-il une passe ? Toujours, sauf hors cadence (voir `Passes`)."""
+function _en_cadence!(p::Passes, td::Int64)
+    p.periode > 0 && p.dernier_valide != typemin(Int64) || (p.dernier_valide = td; return true)
+    ecart = td - p.dernier_valide
+    n = round(Int64, ecart / p.periode)
+    if n >= 1 && abs(ecart - n * p.periode) <= n * p.tolerance
+        p.m0_manquants += n - 1
+    elseif !(p.dernier_debut != typemin(Int64) && abs(td - p.dernier_debut - p.periode) <= p.tolerance)
+        p.m0_hors_cadence += 1                       # parasite : ignoré
+        return false
+    end                                              # sinon : nouvelle cadence
+    p.dernier_valide = td
+    return true
 end
 
 function _finir_passe!(f, p::Passes, t_fin::Int64)

@@ -159,8 +159,8 @@ photons lus pendant les passes par code de routage (codes 0–15, le code
 réservé compris), photons jetés (code réservé) et hors passe, passes
 terminées et abandonnées (marqueur de fin perdu ou M0 en trop),
 enregistrements GAP, SPC_FOVFL vu, durées des passes et intervalles M0 → M0
-(s ; NaN avant le premier), passes hors tolérance (durée M3 − M0, ou M0
-trop tôt), M0 manquants (intervalles d'un créneau de trop), passes sans
+(s ; NaN avant le premier), passes hors tolérance (durée M3 − M0) ou M0
+hors cadence (M0 seul : parasites ignorés), M0 manquants, passes sans
 correspondante sur l'autre carte, et en attente de l'appariement.
 """
 struct CompteursCarte
@@ -299,9 +299,10 @@ produirait. `tous_marqueurs` : les cartes enregistrent aussi M1 et M2
 (scripts/test_passes.jl : voir sur quelle entrée le signal arrive).
 `fin_par_m3` : la fin des passes vient de M3 (`true`) ou de la durée du
 scan après M0 (`false`, il faut alors `scan_s`) ; `nothing` : `[clamp]
-fin_par_m3` des réglages. Avec M0 seul, l'intervalle entre deux M0 doit
-valoir un créneau (`scan_s + pause_s`) : un M0 trop tôt exclut sa passe du
-PI, un intervalle trop long compte des M0 manquants.
+fin_par_m3` des réglages. Avec M0 seul et `echantillon_s` connu, chaque M0
+doit tomber un nombre entier de créneaux (`scan_s + pause_s`) après le
+dernier M0 valide : hors cadence, c'est un parasite, ignoré (la passe en
+cours continue) ; plusieurs créneaux, des M0 manquants (`Passes`).
 """
 struct Clamp <: Commande
     rois::Vector{Int}
@@ -1220,11 +1221,10 @@ mutable struct ClampCarte
     sans_partenaire::Int
     hors_duree::Int
     mots::Int
-    m0_manquants::Int
 end
 
 ClampCarte(carte, serie, nom, tic_s, passes, ecrivain) =
-    ClampCarte(carte, serie, nom, tic_s, passes, PasseCarte[], ecrivain, false, false, typemin(Int64), false, NaN, 0, 0, 0, 0)
+    ClampCarte(carte, serie, nom, tic_s, passes, PasseCarte[], ecrivain, false, false, typemin(Int64), false, NaN, 0, 0, 0)
 
 """Les compteurs de la carte `a` (canal `canal`), pour `EtatClamp`."""
 function _compteurs(a::ClampCarte, canal::Int)
@@ -1233,7 +1233,7 @@ function _compteurs(a::ClampCarte, canal::Int)
     return CompteursCarte(a.carte, a.serie, canal, a.tic_s, a.mots, p.decodeur.photons, copy(p.marqueurs_vus),
                           copy(p.photons_par_code), p.hors_roi, p.hors_passe, p.numero, p.passes_abandonnees,
                           p.decodeur.pertes, a.deborde, s(p.duree_min), s(p.duree_max), s(p.duree_derniere),
-                          s(p.intervalle_min), s(p.intervalle_max), a.hors_duree, a.m0_manquants, a.sans_partenaire,
+                          s(p.intervalle_min), s(p.intervalle_max), a.hors_duree + p.m0_hors_cadence, p.m0_manquants, a.sans_partenaire,
                           length(a.file))
 end
 
@@ -1286,8 +1286,16 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
                 ecrivain = ouvrir_spc(joinpath(dossier, nom * ".spc"), info.entete)
                 push!(fichiers, joinpath(dossier, "$(nom)_parametres.ini"))
             end
-            duree_tics = fin_m3 ? 0 : round(Int64, c.scan_s / info.horloge_macro_s)   # M0 seul : la passe dure le scan
-            push!(cartes, ClampCarte(k, serie, nom, info.horloge_macro_s, Passes(canaux = r.canaux_clamp, duree = duree_tics), ecrivain))
+            tic = info.horloge_macro_s
+            duree, periode, tolerance = 0, 0, 0
+            if !fin_m3                               # M0 seul : la passe dure le scan, les M0 suivent le créneau
+                duree = round(Int64, c.scan_s / tic)
+                if isfinite(c.echantillon_s) && isfinite(c.pause_s) && c.pause_s > 0
+                    periode = round(Int64, (c.scan_s + c.pause_s) / tic)
+                    tolerance = ceil(Int64, tolerance_periode(c) / tic)
+                end
+            end
+            push!(cartes, ClampCarte(k, serie, nom, tic, Passes(; canaux = r.canaux_clamp, duree, periode, tolerance), ecrivain))
             effacer_taux!(src, k)
         end
         _etat!(m, :clamp)
@@ -1345,14 +1353,19 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
         passes += _publier_passes!(m, cartes, dt_ns, attendre)
         isempty(cartes) || publier!(m, _etat_clamp(cartes, codes, c, debut, passes, true, fin_m3))
         for (canal, a) in enumerate(cartes)
-            a.passes.passes_abandonnees > 0 &&
-                publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.passes.passes_abandonnees) passe(s) sans marqueur de fin, ignorées"))
-            a.hors_duree > 0 &&
+            p = a.passes
+            p.passes_abandonnees > 0 &&
                 publier!(m, Alerte(:avertissement, a.carte, fin_m3 ?
-                    "module $(a.carte) : $(a.hors_duree) passe(s) de durée M3 − M0 hors tolérance (marqueur perdu ou en trop), hors du PI" :
-                    "module $(a.carte) : $(a.hors_duree) passe(s) dont le M0 arrive trop tôt (M0 en trop), hors du PI"))
-            a.m0_manquants > 0 &&
-                publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.m0_manquants) M0 manquant(s) : autant de passes perdues"))
+                    "module $(a.carte) : $(p.passes_abandonnees) passe(s) sans marqueur de fin, ignorées" :
+                    "module $(a.carte) : $(p.passes_abandonnees) passe(s) interrompue(s) par un M0 (cadence du signal de passe changée), ignorées"))
+            a.hors_duree > 0 &&
+                publier!(m, Alerte(:avertissement, a.carte,
+                    "module $(a.carte) : $(a.hors_duree) passe(s) de durée M3 − M0 hors tolérance (marqueur perdu ou en trop), hors du PI"))
+            p.m0_hors_cadence > 0 &&
+                publier!(m, Alerte(:avertissement, a.carte,
+                    "module $(a.carte) : $(p.m0_hors_cadence) M0 hors cadence (parasite sur le signal de passe), ignoré(s)"))
+            p.m0_manquants > 0 &&
+                publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(p.m0_manquants) M0 manquant(s) : autant de passes perdues"))
             a.sans_partenaire > 0 &&
                 publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.sans_partenaire) passe(s) sans passe correspondante sur l'autre carte, ignorées"))
             a.passes.hors_passe > 0 &&
@@ -1368,9 +1381,10 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
                                                                             "passes" => a.passes.numero,
                                                                             "photons_hors_roi" => a.passes.hors_roi,
                                                                             "passes_hors_duree" => a.hors_duree,
+                                                                            "m0_hors_cadence" => a.passes.m0_hors_cadence,
                                                                             "passes_sans_partenaire" => a.sans_partenaire,
                                                                             "fin_par_m3" => Int(fin_m3),
-                                                                            "m0_manquants" => a.m0_manquants)))
+                                                                            "m0_manquants" => a.passes.m0_manquants)))
         end
     catch e
         erreur = true
@@ -1403,16 +1417,7 @@ function _ranger_passe!(a::ClampCarte, p::Passes, t0::Int64, t1::Int64, pertes::
             a.hors_duree += 1
             push!(motifs, "module $(a.carte) : M3 − M0 = $(round(duree * 1e3; digits = 4)) ms au lieu de $(round(c.scan_s * 1e3; digits = 4)) ms")
         end
-    elseif p.intervalle >= 0 && isfinite(c.echantillon_s) && isfinite(c.pause_s)
-        # M0 seul : l'intervalle depuis le M0 précédent doit valoir un créneau.
-        intervalle, periode = p.intervalle * a.tic_s, c.scan_s + c.pause_s
-        if intervalle < periode - tolerance_periode(c)
-            a.hors_duree += 1
-            push!(motifs, "module $(a.carte) : M0 → M0 = $(round(intervalle * 1e3; digits = 4)) ms au lieu de $(round(periode * 1e3; digits = 4)) ms (M0 en trop)")
-        elseif intervalle > periode + tolerance_periode(c)
-            a.m0_manquants += max(1, round(Int, intervalle / periode) - 1)
-        end
-    end
+    end                                          # M0 seul : la cadence des M0, vérifiée par `Passes`
     push!(a.file, PasseCarte(t0 * a.tic_s, t1 * a.tic_s, copy(p.histo), pertes, motifs))
     return nothing
 end

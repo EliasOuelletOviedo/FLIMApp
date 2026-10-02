@@ -93,8 +93,12 @@ Plan.pdf:
   identical results, to the bit.
 - **Realtime (`Clamp`)**: FIFO mode with routing, no software deadline. A
   6321 counter clocked by the AO sample clock (`channels.passes`, out on
-  PFI13) is high during each scan; on the cards' markers its rising edge is
-  M0 and its falling edge M3 (`routing_mode` 0x1900). The NI writes the
+  PFI13) is high during each scan; its rising edge is the cards' M0 (start
+  of pass, `routing_mode` 0x1100), and each pass lasts `Clamp.scan_s` after
+  it. M0s must follow the slot cadence (scan + pause, `echantillon_s` +
+  100 ppm): one off it is a glitch, ignored; a gap of several slots counts
+  missing M0s. With `[clamp] fin_par_m3 = true`, the falling edge of the
+  same signal on M3 ends the pass instead (0x1900). The NI writes the
   ROI's routing code during the scan and the reserved code
   (`CODE_HORS_ROI`) during moves, pauses and the entry: those photons are
   thrown away when decoding (no CNTE line). The engine reads each card's
@@ -102,8 +106,8 @@ Plan.pdf:
   passes at the markers (`Passes`, spc/passes.jl): `canaux` × 16 histograms
   per card, one column per routing code. A late read only fills the FIFO.
   A pass gets `motifs` — and the worker keeps it out of the PI — for a GAP
-  record, `SPC_FOVFL` during it (`_surveiller_fovfl!`), or M3 − M0 off
-  `Clamp.scan_s` by more than `echantillon_s` + 100 ppm. Passes are paired
+  record, `SPC_FOVFL` during it (`_surveiller_fovfl!`), or (M3 mode) M3 −
+  M0 off `Clamp.scan_s` by more than `echantillon_s` + 100 ppm. Passes are paired
   across cards by start time, offsets tracked for clock drift
   (`_publier_passes!`). One `HistoClamp` per pass (all cards) goes to
   `engine.histogrammes`, which only the analysis worker reads; it takes each

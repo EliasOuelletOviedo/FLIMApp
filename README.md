@@ -241,17 +241,22 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
     sequence and ROI pulses;
   - the **pass signal**: a 6321 counter (`channels.passes`, ctr1, out on
     PFI13 = CTR 1 OUT by default) clocked by the same sample clock, high
-    during each scan. One TTL output feeds four inputs, M0 and M3 of both
-    cards, with a common ground (D GND, pin 15): the rising edge is M0
-    (start of pass), the falling edge M3 (end of pass) — `routing_mode =
-    0x1900`, set by the engine.
+    during each scan, wired to M0 of both cards with a common ground (D
+    GND, pin 15). Its rising edge is the start of a pass, and the pass lasts
+    the programmed scan (`[clamp] fin_par_m3 = false`, the default;
+    `routing_mode = 0x1100`, set by the engine). M3 isn't needed; with
+    `fin_par_m3 = true`, the same signal also wired to M3 ends each pass on
+    its falling edge instead (0x1900).
 - the **SPC engine** measures in FIFO mode (`[clamp]` in `config/spc.toml`,
   256 channels by default) and cuts each card's photon stream into passes
   at the markers the card itself time-stamped: a late read only fills the
   card's FIFO. A pass is shown but **kept out of the PI** when a record
-  carries the loss flag (GAP), when `SPC_FOVFL` appears during it, or when
-  M3 − M0 is off the programmed scan by more than one AO sample and 100 ppm
-  (a lost or extra marker). The cards' passes are paired by their start
+  carries the loss flag (GAP), when `SPC_FOVFL` appears during it, or (M3
+  mode) when M3 − M0 is off the programmed scan by more than one AO sample
+  and 100 ppm. With M0 only, each M0 must fall a whole number of slots
+  (scan + pause, within one AO sample and 100 ppm) after the last good one:
+  an M0 off that cadence is a glitch and is ignored, a gap of several slots
+  counts missing M0s (lost passes). The cards' passes are paired by their start
   times (each card's clock starts at its own instant and drifts); a pass
   without its partner on the other card is dropped. Cards are identified by
   serial number at start-up (`[verification] series`: 3N0317 = channel 1,
@@ -561,9 +566,10 @@ or RESET after a fault), SPC engine not running (SPC window, CONNECT) or
 busy, or more than 15 ROIs.
 
 ### Checking the pass signal's wiring
-Cable everything, then run test_spc4 with `module_no = 0`, then 1: 200
-markers on M0 and 200 on M3 for each card, with the common ground (D GND,
-pin 15).
+Cable everything, then run `scripts/test_passes.jl` (DEBUGGING.md): the
+app's own pass signal, the cards recording all four markers, a verdict per
+card — the signal must arrive on M0 (M3 only with `fin_par_m3 = true`),
+with the common ground (D GND, pin 15).
 
 ### Fitting returns NaN values
 - Photon count too low (< 100 counts)

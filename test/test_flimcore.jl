@@ -621,10 +621,26 @@ end
     histos, _, alertes = passes_rejouees(flux(m -> sans_marqueur(m, 0b0001, 3)), c)
     @test length(histos) == 5 && all(h -> isempty(h.motifs), histos)
     @test any(t -> occursin("1 M0 manquant", t), alertes)
-    # Un M0 en trop au milieu de la passe 3 : la passe 4, dont le M0 arrive trop tôt, est exclue du PI.
+    # Un M0 en trop au milieu de la passe 3 : hors cadence, ignoré ; la passe 3 continue.
     histos, _, alertes = passes_rejouees(flux(m -> m0_en_trop(m, 3, 50)), c)
-    @test count(h -> any(t -> occursin("M0 en trop", t), h.motifs), histos) == 1
-    @test any(t -> occursin("M0 arrive trop tôt", t), alertes)
+    @test length(histos) == 6 && all(h -> isempty(h.motifs), histos)
+    photons(hs) = sum(h -> sum(sum, h.histogrammes), hs)
+    @test photons(histos) == photons(passes_rejouees(flux(), c)[1]) - 1       # le photon devenu parasite
+    @test any(t -> occursin("1 M0 hors cadence", t), alertes) && !any(t -> occursin("interrompue", t), alertes)
+
+    # Le décodeur : le M0 de la passe 1 perdu et un parasite dans son scan, qui
+    # donne une fausse cadence ; le M0 de la passe 2 est alors ignoré, celui de
+    # la passe 3, à un créneau du précédent, rétablit la cadence. Puis le M0 de
+    # la passe 5 perdu.
+    periode = round(Int64, 0.005 / TIC_TEST)
+    q = FLIMCore.Passes(duree = round(Int64, 0.004 / TIC_TEST), periode = periode, tolerance = 10)
+    m = sans_marqueur(m0_en_trop(sans_marqueur(mots, 0b1000, 0), 1, 50), 0b0001, 1)
+    vus = Int64[]
+    FLIMCore.passes!((p, t0, t1, pertes) -> push!(vus, t0), q, sans_marqueur(m, 0b0001, 5))
+    FLIMCore.terminer_passes!((p, t0, t1, pertes) -> push!(vus, t0), q)
+    debuts = first.(avec_m3)
+    @test debuts[1] < vus[1] < debuts[1] + periode ÷ 10 && vus[2:end] == debuts[[3, 4, 6, 7]]
+    @test q.m0_hors_cadence == 1 && q.m0_manquants == 1 && q.passes_abandonnees == 0
 end
 
 @testset "moteur : Realtime simulé (passes fabriquées)" begin

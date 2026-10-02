@@ -130,7 +130,8 @@ end
 Create one scan's tasks. `pass_ticks = (entry, scan, shift)` (samples) also
 creates the pass signal on `cfg.pass_counter`: counted on the shared sample
 clock, low during the entry, then high for each scan and low for each
-pause — wired to the SPC-150N's markers M0 and M3.
+pause — wired to the SPC-150N's marker M0 (and M3 with `[clamp]
+fin_par_m3 = true`).
 """
 function hw_prepare!(hw::NIHardware, buffer_samples::Integer; pass_ticks = nothing)
     cfg = hw.cfg
@@ -233,7 +234,8 @@ The pass signal (`cfg.pass_counter`), created, not started: counted in
 edges of the sample clock, low for `entry` samples (at least 2), then high
 for each scan (`scan` samples) and low for each pause (`shift`), out on
 `terminal` ("" = the counter's default, PFI13 for ctr1) — wired to the
-cards' M0 (rising edge) and M3 (falling edge). Also used by
+cards' M0 (rising edge: start of pass; M3, falling edge, only with
+`[clamp] fin_par_m3 = true`). Also used by
 scripts/test_passes.jl.
 """
 function create_pass_task(cfg::BenchConfig, entry::Integer, scan::Integer, shift::Integer;
