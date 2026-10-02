@@ -43,10 +43,9 @@ include("io/DAQmx.jl")            # 6. NI-DAQmx bindings (ccall on nicaiu)
 include("daq.jl")                 # 6b. DAQ outputs: galvo scan, sync lines, PI commands
 include("protocol.jl")            # 7. Protocol schedule math
 include("plotting.jl")            # 8. Axis autoscaling + plot-series lookup
-include("io/SdtFile.jl")          # 9. .sdt block parser (used by read_sdt_frame below)
-include("lifetime_analysis.jl")  # 10. Analysis algorithms, IRF/.sdt loading
-include("acquisition.jl")         # 11. Playback/Realtime/Save worker tasks
-include("session_save.jl")        # 12. Realtime-capture session saving
+include("lifetime_analysis.jl")  # 10. Analysis algorithms, IRF import (.sdt of a Single)
+include("acquisition.jl")         # 11. Realtime/Playback analysis worker (one pass per scan)
+include("session.jl")             # 11b. Sessions: run.toml, Playback, simulated sessions
 include("runtime.jl")             # 13. Background task lifecycle
 include("protocol_popup.jl")      # 14. Protocol popup UI
 include("roi_popup.jl")           # 15. ROI popup UI
@@ -92,6 +91,33 @@ Plan.pdf:
 - `ranger_photons` is imagerie_photons.jl's block processing, unchanged;
   the `Rangeur` does the same frame by frame, and the tests check both give
   identical results, to the bit.
+- **Realtime (`Clamp`)**: FIFO mode with routing, no software deadline. A
+  6321 counter clocked by the AO sample clock (`channels.passes`, out on
+  PFI13) is high during each scan; on the cards' markers its rising edge is
+  M0 and its falling edge M3 (`routing_mode` 0x1900). The NI writes the
+  ROI's routing code during the scan and the reserved code
+  (`CODE_HORS_ROI`) during moves, pauses and the entry: those photons are
+  thrown away when decoding (no CNTE line). The engine reads each card's
+  FIFO, records it (`<serial>.spc` in the session's spc/), and cuts it into
+  passes at the markers (`Passes`, spc/passes.jl): `canaux` × 16 histograms
+  per card, one column per routing code. A late read only fills the FIFO.
+  A pass gets `motifs` — and the worker keeps it out of the PI — for a GAP
+  record, `SPC_FOVFL` during it (`_surveiller_fovfl!`), or M3 − M0 off
+  `Clamp.scan_s` by more than `echantillon_s` + 100 ppm. Passes are paired
+  across cards by start time, offsets tracked for clock drift
+  (`_publier_passes!`). One `HistoClamp` per pass (all cards) goes to
+  `engine.histogrammes`, which only the analysis worker reads; it takes each
+  pass's ROI from the routing code its photons carry (`pass_roi`). The NI
+  writes NOT(code) (`inverser_routage`): the card reads the ROI's drawn
+  index; code 0 (undriven lines) is reserved, hence 15 ROIs at most.
+- **Playback**: the same engine on `source_session(dir; vitesse)` (the
+  recorded streams), the same worker (`drive_outputs = false`: simulated PI),
+  `source_done` ending it once the replay is over; the session's settings
+  (`session_analysis_settings`) unless "Playback: current".
+  `simulate_session` writes a session through the engine itself.
+- **IRF**: imported from a Single .sdt with the settings it was taken with
+  (`read_sdt_irf`, irf.toml); `irf_mismatches` refuses it at import and at
+  START against the cards' read-back settings and the declared `[dcc]`.
 - Code updates: Revise during development, otherwise restart Julia; the
   launchers call `FLIMCore.garde_version()` (bump `VERSION_CORE` when
   FLIMCore changes).

@@ -18,26 +18,26 @@ premiers pixels de chaque ligne et les premières lignes de chaque trame.
 """
 Base.@kwdef struct Geometrie
     temps_pixel_ns::Float64 = 50.0
-    pixels_par_ligne::Int = 0
-    decalage_pixels::Int = 0
-    lignes_par_image::Int = 0
-    decalage_lignes::Int = 0
+    pixels_par_ligne::Int = 1024
+    decalage_pixels::Int = 21
+    lignes_par_image::Int = 512
+    decalage_lignes::Int = 32
     ligne_front_montant::Bool = true
     trame_front_montant::Bool = true
 end
 
 """Réglages du détecteur et du TAC par défaut (reglages_spc.jl, plus rate_count_time)."""
 const SPC_DEFAUT = Dict{String,Any}(
-    "sync_threshold" => -50.0,
-    "sync_zc_level" => 0.0,
-    "sync_freq_div" => 4,
-    "cfd_limit_low" => -50.0,
-    "cfd_zc_level" => 0.0,
-    "tac_range" => 50.0,
+    "sync_threshold" => -70.9,
+    "sync_zc_level" => -6.80,
+    "sync_freq_div" => 1,
+    "cfd_limit_low" => -139.22,
+    "cfd_zc_level" => 12.85,
+    "tac_range" => 50.034,
     "tac_gain" => 4,
-    "tac_offset" => 0.0,
-    "tac_limit_low" => 5.0,
-    "tac_limit_high" => 95.0,
+    "tac_offset" => 3.33,
+    "tac_limit_low" => 5.1,
+    "tac_limit_high" => 94.9,
     "rate_count_time" => 0.25,
 )
 
@@ -89,10 +89,10 @@ Base.@kwdef mutable struct Reglages
     modules_imagerie::Vector{Int} = [0, 1]
     duree_s::Float64 = 0.0
     temps_pixel_ns::Float64 = 50.0
-    pixels_par_ligne::Int = 0
-    decalage_pixels::Int = 0
-    lignes_par_image::Int = 0
-    decalage_lignes::Int = 0
+    pixels_par_ligne::Int = 1024
+    decalage_pixels::Int = 21
+    lignes_par_image::Int = 512
+    decalage_lignes::Int = 32
     ligne_front_montant::Bool = true
     trame_front_montant::Bool = true
     # [affichage]
@@ -103,9 +103,12 @@ Base.@kwdef mutable struct Reglages
     modules_single::Vector{Int} = [0, 1]
     temps_collecte_s::Float64 = 1.0
     n_histogrammes::Int = 5
-    resolution_adc::Int = 12
+    resolution_adc::Int = 8
     arret_debordement::Bool = true
     inverser::Bool = false
+    # [clamp]
+    canaux_clamp::Int = 256
+    inverser_routage::Bool = true
     # [enregistrement]
     dossier::String = ""
     flux_brut::Bool = true
@@ -122,15 +125,15 @@ const CLES_REGLAGES = [
     ("source", "rejeu", :rejeu, "fichiers .spc à rejouer, un par carte (écrits par l'imagerie, avec leur _acquisition.ini)"),
     ("source", "vitesse", :vitesse, "rejeu et simulation : 1 = temps réel ; 0 = le plus vite possible"),
     ("source", "connexion_au_demarrage", :connexion_au_demarrage, "le GUI lance le moteur et vérifie les cartes à l'ouverture"),
-    ("verification", "series", :series, "n° de série attendus, module 0 puis module 1"),
+    ("verification", "series", :series, "n° de série du canal 1 puis du canal 2 : identifient les cartes, quel que soit leur n° de module"),
     ("verification", "seuil_cfd", :seuil_cfd, "/s : en dessous, détecteurs éteints (Enable outputs dans le logiciel DCC ?)"),
     ("imagerie", "modules", :modules_imagerie, "cartes enregistrées"),
     ("imagerie", "duree_s", :duree_s, "0 : en continu jusqu'à « Arrêter »"),
-    ("imagerie", "temps_pixel_ns", :temps_pixel_ns, "horloge de pixel interne, comme dans SPCM"),
-    ("imagerie", "pixels_par_ligne", :pixels_par_ligne, "0 : toute la période de ligne"),
-    ("imagerie", "decalage_pixels", :decalage_pixels, "pixels ignorés après chaque début de ligne"),
-    ("imagerie", "lignes_par_image", :lignes_par_image, "0 : nombre de lignes mesuré entre deux trames"),
-    ("imagerie", "decalage_lignes", :decalage_lignes, "lignes ignorées après chaque début de trame"),
+    ("imagerie", "temps_pixel_ns", :temps_pixel_ns, "pixel_time de SPCM : horloge de pixel interne"),
+    ("imagerie", "pixels_par_ligne", :pixels_par_ligne, "scan_size_x de SPCM : 1024"),
+    ("imagerie", "decalage_pixels", :decalage_pixels, "scan_borders (gauche) de SPCM : pixels ignorés après chaque début de ligne (retour du balayage)"),
+    ("imagerie", "lignes_par_image", :lignes_par_image, "scan_size_y de SPCM : 1024, 512, 256 ou 128"),
+    ("imagerie", "decalage_lignes", :decalage_lignes, "scan_borders (haut) de SPCM : lignes ignorées après chaque début de trame"),
     ("imagerie", "ligne_front_montant", :ligne_front_montant, "front actif de l'horloge de ligne (M1)"),
     ("imagerie", "trame_front_montant", :trame_front_montant, "front actif de l'horloge de trame (M2)"),
     ("affichage", "binning_temps", :binning_temps, "pixels regroupés (n × n) pour le temps moyen"),
@@ -139,9 +142,11 @@ const CLES_REGLAGES = [
     ("single", "modules", :modules_single, "cartes mesurées en même temps"),
     ("single", "temps_collecte_s", :temps_collecte_s, "durée de chaque histogramme"),
     ("single", "n_histogrammes", :n_histogrammes, "histogrammes successifs, chacun repart de zéro"),
-    ("single", "resolution_adc", :resolution_adc, "12 bits = 4096 canaux ; ou 10, 8, 6"),
+    ("single", "resolution_adc", :resolution_adc, "8 bits = 256 canaux, la résolution des déclins du Realtime et de l'IRF"),
     ("single", "arret_debordement", :arret_debordement, "arrêt dès qu'un canal atteint 65535 coups"),
     ("single", "inverser", :inverser, "déclin à l'envers (montée lente, chute brutale) : true"),
+    ("clamp", "canaux", :canaux_clamp, "canaux des déclins du Realtime (les 4096 du FIFO regroupés) : 256, la résolution de l'IRF"),
+    ("clamp", "inverser_routage", :inverser_routage, "la NI écrit NON(c) sur P0.4-P0.7 et la carte, aux entrées actives à 0 V, lit c"),
     ("enregistrement", "dossier", :dossier, "\"\" : ~/FLIMApp_spc (sous-dossiers imagerie et single)"),
     ("enregistrement", "flux_brut", :flux_brut, "garder le flux FIFO de chaque carte (.spc) : environ 4 octets par photon"),
 ]
@@ -226,6 +231,9 @@ function lire_reglages(chemin::AbstractString)
     return reglages_depuis_dict(TOML.parsefile(chemin); fichier = abspath(chemin))
 end
 
+"""Hauteurs d'image possibles (scan_size_y) ; la largeur est toujours 1024 pixels."""
+const TAILLES_Y = (1024, 512, 256, 128)
+
 """Lève une erreur lisible pour une valeur hors plage."""
 function valider_reglages(r::Reglages)
     r.source in ("cartes", "rejeu", "simulation") ||
@@ -235,14 +243,17 @@ function valider_reglages(r::Reglages)
         error("réglages SPC : numéros de modules de 0 à 7")
     r.duree_s >= 0 || error("réglages SPC : [imagerie] duree_s doit être positive ou nulle")
     r.temps_pixel_ns > 0 || error("réglages SPC : [imagerie] temps_pixel_ns doit être positif")
-    min(r.pixels_par_ligne, r.decalage_pixels, r.lignes_par_image, r.decalage_lignes) >= 0 ||
-        error("réglages SPC : [imagerie] tailles et décalages positifs ou nuls")
+    min(r.decalage_pixels, r.decalage_lignes) >= 0 || error("réglages SPC : [imagerie] décalages positifs ou nuls")
+    r.pixels_par_ligne == 1024 || error("réglages SPC : [imagerie] pixels_par_ligne (scan_size_x) : 1024")
+    r.lignes_par_image in TAILLES_Y || error("réglages SPC : [imagerie] lignes_par_image (scan_size_y) : 1024, 512, 256 ou 128")
     r.binning_temps >= 1 || error("réglages SPC : [affichage] binning_temps d'au moins 1")
     r.photons_min >= 0 || error("réglages SPC : [affichage] photons_min positif ou nul")
     r.trames_par_image >= 0 || error("réglages SPC : [affichage] trames_par_image positif ou nul")
     r.temps_collecte_s > 0 || error("réglages SPC : [single] temps_collecte_s doit être positif")
     r.n_histogrammes >= 1 || error("réglages SPC : [single] n_histogrammes d'au moins 1")
-    r.resolution_adc in (6, 8, 10, 12) || error("réglages SPC : [single] resolution_adc : 6, 8, 10 ou 12 bits")
+    r.resolution_adc == 8 ||
+        error("réglages SPC : [single] resolution_adc : 8 bits, des histogrammes de 256 canaux comme ceux du Realtime et de l'IRF")
+    r.canaux_clamp in (64, 128, 256, 512, 1024, 4096) || error("réglages SPC : [clamp] canaux : 64 à 4096, un diviseur de 4096")
     return r
 end
 
@@ -341,5 +352,58 @@ function parametres_single(r::Reglages, temps_s::Real = r.temps_collecte_s)
         "mode" => 0, "adc_resolution" => r.resolution_adc, "collect_time" => Float64(temps_s),
         "stop_on_time" => 1, "stop_on_ovfl" => r.arret_debordement ? 1 : 0,
         "dead_time_comp" => get(r.spc, "dead_time_comp", 1))
+    return merge(r.spc, imposes), imposes
+end
+
+"""
+ROI que le routage distingue : 4 lignes (P0.4 à P0.7), 16 codes, dont le 0
+réservé (voir `CODE_HORS_ROI`).
+"""
+const ROI_MAX = 15
+
+"""
+Code que la carte lit quand rien ne pilote les lignes de routage (entrées
+actives à 0 V, au repos à l'état haut) : réservé, aucune ROI ne l'utilise.
+La NI l'écrit pendant les déplacements des galvos et les pauses, et les
+photons qui le portent sont jetés au décodage (`Passes`) : en FIFO, c'est
+l'effet de CNTE sans ligne de plus. Un câble débranché n'envoie donc pas
+de photons dans une vraie ROI.
+"""
+const CODE_HORS_ROI = 0
+
+"""
+Code des scans sans ROI (tout le champ) : un code ordinaire, puisque les
+photons du code réservé sont jetés.
+"""
+const CODE_SANS_ROI = 1
+
+"""Code de routage que la carte lit pour la ROI dessinée n° `roi` (1 à 15) : `roi` lui-même."""
+function code_routage(roi::Integer)
+    1 <= roi <= ROI_MAX || error("ROI n° $roi : le routage en distingue $ROI_MAX (codes 1 à 15, le 0 est réservé)")
+    return Int(roi)
+end
+
+"""
+    code_ecrit(code, inverser) -> UInt8
+
+Valeur que la NI écrit sur P0.4 à P0.7 pour que la carte lise `code` :
+NON(code) sur 4 bits avec `inverser` (entrées de routage actives à 0 V),
+`code` sinon.
+"""
+code_ecrit(code::Integer, inverser::Bool) = UInt8(inverser ? (~code & 0x0f) : (code & 0x0f))
+
+"""
+    parametres_clamp(r) -> (parametres, imposes)
+
+Mode FIFO du Realtime : chaque photon porte son temps et son code de
+routage ; les passes sont délimitées par le signal de passe (compteur de la
+6321, cadencé par l'horloge de l'AO) branché sur M0 et M3 : front montant
+sur M0 (début de passe), front descendant sur M3 (fin). Les marqueurs M1 et
+M2 (horloges du scanner) sont coupés.
+"""
+function parametres_clamp(r::Reglages)
+    imposes = Dict{String,Any}(
+        "mode" => 1, "adc_resolution" => 12, "stop_on_time" => 0, "macro_time_clk" => 0,
+        "routing_mode" => Int(0x0100 | 0x0800 | 0x1000))    # M0 et M3 actifs ; M0 front montant, M3 front descendant
     return merge(r.spc, imposes), imposes
 end

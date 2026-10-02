@@ -32,7 +32,9 @@ const BENCH_CONFIG_DEFAULTS = Dict{String, Dict{String, Any}}(
         "readback_signals" => ["galvo_x", "galvo_y", "command_1", "command_2",
                                "line_0", "line_1", "line_2", "line_3",
                                "line_4", "line_5", "line_6", "line_7"],
-        "shutter" => ""
+        "shutter" => "",
+        "passes" => "X6321/ctr1",
+        "passes_terminal" => ""
     ),
     "timing" => Dict{String, Any}("sample_rate_hz" => 10_000.0, "block_ms" => 20, "lead_slots" => 0),
     "limits" => Dict{String, Any}("galvo_v" => 5.0, "command_full_scale_v" => 5.0, "command_max_v" => 5.0),
@@ -62,6 +64,8 @@ Base.@kwdef struct BenchConfig
     readback_terminal::String
     readback_signals::Vector{String}
     shutter_line::String
+    pass_counter::String
+    pass_terminal::String
     sample_rate_hz::Float64
     block_samples::Int
     lead_slots::Int
@@ -152,6 +156,8 @@ function bench_config_from_dict(raw::AbstractDict; source::AbstractString = "dic
         readback_terminal = terminal,
         readback_signals = signals,
         shutter_line = String(get_value("channels", "shutter")),
+        pass_counter = String(get_value("channels", "passes")),
+        pass_terminal = String(get_value("channels", "passes_terminal")),
         sample_rate_hz = rate,
         block_samples = block,
         lead_slots = lead,
@@ -180,7 +186,7 @@ Every NI device the channel map refers to.
 """
 function bench_devices(cfg::BenchConfig)::Vector{String}
     specs = filter(!isempty, [cfg.galvo_channels, cfg.line_channels, cfg.counter, cfg.command_channels,
-                              cfg.readback_channels, cfg.shutter_line])
+                              cfg.readback_channels, cfg.shutter_line, cfg.pass_counter])
     return unique([String(first(split(lstrip(spec, '/'), '/'))) for spec in specs])
 end
 

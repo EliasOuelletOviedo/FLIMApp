@@ -10,119 +10,226 @@ FLIM); Enderlein 1997 (IRF shift/delay compensation).
 """
 
 using FFTW
+using Dates
+using TOML
 using Statistics
 using NativeFileDialog
 using Optim
 using LineSearches
-using ZipFile
 using LinearAlgebra: mul!
 
 const X_DATA_CACHE = Dict{Tuple{Int, Float64}, Vector{Float64}}()
 const GATING_CACHE = Dict{Tuple{Int, Int, Int}, Vector{UInt8}}()
-const IRF_CHANNEL_CACHE = Dict{Int, Matrix{Float64}}()
+const IRF_CHANNEL_CACHE = Dict{Tuple{UInt, Int}, Matrix{Float64}}()   # (objectid(irf), channels)
 
 # -----------------------------------------------------------------------------
 # Helpers IRF
 # -----------------------------------------------------------------------------
 
-function sum_reshaped_channels(file::Vector{UInt16}, num_rows::Int)::Vector{Float64}
-    return sum(reshape(file, (num_rows, :)), dims=2)[:, 1]
-end
+"""
+The card settings an IRF depends on, as [spc_module] names them, and how
+each is read from a .sdt's measurement description: the TAC (the time axis)
+and the CFD and SYNC thresholds (the timing of each photon and of the
+laser pulse).
+"""
+const IRF_CARD_SETTINGS = (
+    ("tac_range", mi -> Float64(mi.tac_r) * 1e9),        # s in the .sdt, ns for the DLL
+    ("tac_gain", mi -> Float64(mi.tac_g)),
+    ("tac_offset", mi -> Float64(mi.tac_of)),
+    ("tac_limit_low", mi -> Float64(mi.tac_ll)),
+    ("tac_limit_high", mi -> Float64(mi.tac_lh)),
+    ("cfd_limit_low", mi -> Float64(mi.cfd_ll)),
+    ("cfd_limit_high", mi -> Float64(mi.cfd_lh)),
+    ("cfd_zc_level", mi -> Float64(mi.cfd_zc)),
+    ("sync_threshold", mi -> Float64(mi.syn_th)),
+    ("sync_zc_level", mi -> Float64(mi.syn_zc)),
+    ("sync_freq_div", mi -> Float64(mi.syn_fd)),
+)
 
-# Shared by both channels in read_sdt_frame: reshape/sum a raw data block
-# down to one histogram_resolution-length counts vector.
-function extract_channel_counts(flat_data::AbstractArray, histogram_resolution::Int)::Vector{UInt16}
-    flat_counts = vec(flat_data)
-    return if length(flat_counts) == histogram_resolution
-        convert.(UInt16, flat_counts)
-    else
-        convert.(UInt16, sum_reshaped_channels(convert.(UInt16, flat_counts), histogram_resolution))
-    end
-end
+"""Integer settings, compared exactly; the others within 2 % or 0.5 (the DLL rounds them to its steps)."""
+const IRF_EXACT_SETTINGS = ("tac_gain", "sync_freq_div")
+
+same_card_setting(key, a::Real, b::Real) =
+    key in IRF_EXACT_SETTINGS ? round(Int, a) == round(Int, b) : abs(a - b) <= max(0.5, 0.02 * abs(b))
 
 """
-    read_sdt_frame(filepath::String)::Tuple{Vector{UInt16}, Union{Nothing,Vector{UInt16}}, Int, Float32}
+    read_sdt_irf(filepath; series=String[]) -> (irfs, channels)
 
-Low-level reader for Becker & Hickl .sdt files, used by both the acquisition
-loop (acquisition.jl) and IRF loading (`load_irf_from_sdt` below).
+IRF from a Single measurement saved by SPCM as .sdt: one histogram per
+channel (one data block, or two for two channels; a block holding several
+curves is summed). Blocks are ordered by their card's serial number as
+`series` ([verification] series: channel 1, then 2) lists them, in file
+order otherwise. For each, the median is subtracted as background and
+negative counts clipped; a curve with a multiple of
+`DEFAULT_HISTOGRAM_RESOLUTION` channels (a 12-bit Single has 4096) is
+summed down to that resolution, the Realtime histograms'. The channel width
+comes from the block's measurement description (TAC range / gain / ADC
+resolution), 12.5 ns / channels if that isn't usable.
 
-Parses the file via the `SdtFile` module (src/io/SdtFile.jl), which handles
-header/block parsing and both uncompressed and ZIP-compressed formats. When
-a block holds multiple repeated histograms (e.g. multiple pixels/frames
-packed into one compressed block), they are summed into a single histogram
-via `sum_reshaped_channels`, matching the previous hand-rolled reader.
-
-SDT files may hold one or two TCSPC channels (`sdt.data[1]` / `sdt.data[2]`).
-`counts2` is `nothing` when the file has only one data block — callers decide
-once (from the first file of a run) whether to treat the whole acquisition as
-one- or two-channel; this function itself just reports what a given file
-actually contains.
-
-The one field kept as a direct byte read is `frame_time`: a `Float32` at
-`meas_desc_block_offset + 215` that `SdtFile.MeasureInfo` doesn't expose
-individually (it only names the fields needed for reshape/time-axis
-computation). Reading it directly here preserves exact behavior from the
-previous implementation.
+`irfs`: `[t_ns counts]` per channel, `t_ns` the start of each channel from
+0. `channels`: per channel, the card's serial number and the settings it
+measured with (`IRF_CARD_SETTINGS`), for `irf_mismatches`.
 """
-function read_sdt_frame(filepath::String)::Tuple{Vector{UInt16}, Union{Nothing,Vector{UInt16}}, Int, Float32}
-    raw_bytes = read(filepath)
-    sdt = SdtFile.read_sdt(raw_bytes, basename(filepath))
-
-    isempty(sdt.data) && error("SDT file contains no data blocks: $filepath")
-    isempty(sdt.measure_info) && error("SDT file contains no measurement info: $filepath")
-
-    histogram_resolution = Int(sdt.measure_info[1].adc_re)
-    counts1 = extract_channel_counts(sdt.data[1], histogram_resolution)
-    counts2 = length(sdt.data) >= 2 ? extract_channel_counts(sdt.data[2], histogram_resolution) : nothing
-
-    meas_desc_offset = Int(sdt.header.meas_desc_block_offset)
-    frame_time = reinterpret(Float32, raw_bytes[meas_desc_offset+216 : meas_desc_offset+219])[1]
-
-    return counts1, counts2, histogram_resolution, frame_time
-end
-
-function load_irf_from_sdt(filepath::AbstractString; channel::Int=1)::Matrix{Float64}
-    counts_raw, _, histogram_resolution, time = read_sdt_frame(String(filepath))
-
-    counts = Float64.(counts_raw)
-    if isempty(counts)
-        error("IRF file contains no histogram data")
+function read_sdt_irf(filepath::AbstractString; series::AbstractVector{<:AbstractString} = String[])
+    sdt = SdtFile.read_sdt(read(filepath), basename(filepath))
+    isempty(sdt.data) && error("SDT file has no data block: $filepath")
+    isempty(sdt.measure_info) && error("SDT file has no measurement description: $filepath")
+    info_of(b) = sdt.measure_info[clamp(sdt.blocks[b].meas_desc_block_no + 1, 1, length(sdt.measure_info))]
+    blocks = collect(eachindex(sdt.data))
+    serials = [strip(info_of(b).mod_ser_no) for b in blocks]
+    if !isempty(series) && all(in(series), serials)
+        blocks = blocks[sortperm([findfirst(==(x), series) for x in serials])]
     end
 
-    median_irf = round(median(counts))
-    counts .-= round(Int, median_irf)
-    counts[counts .<= 0] .= 0
-
-    n = min(length(counts), histogram_resolution)
-    bin_size_ns = Float64(time) * 1e9
-    window_ns = bin_size_ns * n
-
-    if !isfinite(bin_size_ns) || bin_size_ns <= 0.0 || !isfinite(window_ns) || window_ns > 1_000.0
-        bin_size_ns = 12.5 / n
-    end
-
-    times = collect(0:n-1) .* bin_size_ns
-
-    data = zeros(Float64, n, 2)
-    data[:, 1] = times
-    data[:, 2] = counts[1:n]
-    return data
-end
-
-function get_irf(; channel=1)
-    cache_path = irf_filepath_cache()
-
-    filepath = isfile(cache_path) ? open(f -> read(f, String), cache_path) : ""
-
-    if !ispath(filepath)
-        if !isempty(filepath)
-            @warn "Cached IRF filepath does not exist; please select a valid .sdt file" path=filepath
+    irfs = Matrix{Float64}[]
+    channels = Dict{String, Any}[]
+    for b in blocks[1:min(2, length(blocks))]
+        block, mi = sdt.data[b], info_of(b)
+        n_adc = Int(mi.adc_re)
+        n_adc > 0 || error("SDT file: ADC resolution is $n_adc ($filepath)")
+        bin_ns = Float64(mi.tac_r) / max(Int(mi.tac_g), 1) / n_adc * 1e9
+        (isfinite(bin_ns) && 0 < bin_ns * n_adc <= 1000) || (bin_ns = LASER_PULSE_PERIOD / n_adc)
+        # SdtFile shapes a block (curves…, channels): time is the last axis.
+        size(block, ndims(block)) == n_adc ||
+            error("SDT file: a block of size $(size(block)) is not $n_adc-channel curves ($filepath)")
+        counts = vec(sum(reshape(Float64.(block), :, n_adc); dims = 1))
+        counts .-= round(median(counts))
+        counts[counts .<= 0] .= 0
+        n, width = length(counts), bin_ns
+        resolution = DEFAULT_HISTOGRAM_RESOLUTION
+        if n > resolution && n % resolution == 0
+            group = n ÷ resolution
+            counts = [sum(@view counts[(k - 1) * group + 1:k * group]) for k in 1:resolution]
+            width *= group
+            n = resolution
         end
-        filepath = pick_file()
-        set_path_cache!(cache_path, filepath)
+        sum(counts) > 0 || error("SDT file: an empty IRF curve ($filepath)")
+        push!(irfs, hcat(collect(0:n-1) .* width, counts))
+        push!(channels, Dict{String, Any}("serial" => String(strip(mi.mod_ser_no)),
+                                          "settings" => Dict{String, Any}(k => f(mi) for (k, f) in IRF_CARD_SETTINGS)))
     end
+    return irfs, channels
+end
 
-    return load_irf_from_sdt(filepath; channel=channel)
+"""
+    irf_mismatches(info, spc; applied=Dict{Int, Dict{String, Float64}}())::Vector{String}
+
+What differs between the settings an IRF was taken with (`info`, recorded by
+`import_irf_sdt`) and the ones the cards measure with: per channel, the
+card (serial number against [verification] series) and its TAC, CFD and
+SYNC settings (`IRF_CARD_SETTINGS`) — as read back from that channel's
+card when `applied[channel]` has them (the last check of the cards), as
+`spc` requests them ([spc_module]) otherwise —, and the detector gains
+declared in [dcc]: the transit time changes with the high voltage, which
+the GUI can't read, so the declared values are compared. Empty: the IRF is
+valid. An IRF without its record is refused.
+"""
+function irf_mismatches(info::AbstractDict, spc::FLIMCore.Reglages;
+                        applied::AbstractDict = Dict{Int, Dict{String, Float64}}())::Vector{String}
+    isempty(info) && return ["the IRF has no record of the settings it was taken with: import its .sdt again"]
+    fmt(x) = x isa Real ? string(round(Float64(x); sigdigits = 5)) : string(x)
+    out = String[]
+    requested = Dict{String, Float64}(k => Float64(v) for (k, v) in spc.spc if v isa Real)
+    for (c, channel) in enumerate(get(info, "channels", Any[]))
+        serial = String(get(channel, "serial", ""))
+        expected = c <= length(spc.series) ? spc.series[c] : ""
+        !isempty(serial) && !isempty(expected) && serial != expected &&
+            push!(out, "channel $c: IRF from card $serial, but channel $c is card $expected")
+        reference = get(applied, c, requested)
+        for (key, value) in get(channel, "settings", Dict{String, Any}())
+            now = get(reference, key, get(requested, key, nothing))
+            now === nothing && continue
+            same_card_setting(key, value, now) ||
+                push!(out, "channel $c: $key = $(fmt(value)) for the IRF, $(fmt(now)) now")
+        end
+    end
+    declared = get(info, "dcc", Dict{String, Any}())
+    for (key, value) in spc.dcc
+        occursin("gain", key) || continue
+        old = get(declared, key, nothing)
+        if old === nothing
+            push!(out, "detector: $key wasn't declared ([dcc]) when the IRF was imported")
+        elseif !(isequal(old, value) || (old isa Real && value isa Real && isapprox(old, value; atol = 1e-6)))
+            push!(out, "detector: $key = $(fmt(old)) for the IRF, $(fmt(value)) now ([dcc] in config/spc.toml)")
+        end
+    end
+    return out
+end
+
+"""
+    write_irf_csv(path, irfs)
+
+The IRF as kept between sessions and in each session's journal: `time_ns`,
+then one counts column per channel (`ch1`, `ch2`).
+"""
+function write_irf_csv(path::AbstractString, irfs::AbstractVector{<:AbstractMatrix})
+    mkpath(dirname(path))
+    open(path, "w") do io
+        println(io, join(["time_ns"; ["ch$c" for c in eachindex(irfs)]], ","))
+        for k in axes(irfs[1], 1)
+            println(io, join([irfs[1][k, 1]; [irf[k, 2] for irf in irfs]], ","))
+        end
+    end
+    return path
+end
+
+"""Read `write_irf_csv`'s file back: one `[t_ns counts]` matrix per channel."""
+function read_irf_csv(path::AbstractString)::Vector{Matrix{Float64}}
+    lines = filter(!isempty, strip.(readlines(path)))
+    length(lines) >= 3 || error("IRF file has fewer than two rows: $path")
+    rows = [parse.(Float64, split(l, ",")) for l in lines[2:end]]
+    times = [r[1] for r in rows]
+    return [hcat(times, [r[c] for r in rows]) for c in 2:length(rows[1])]
+end
+
+"""The record of an IRF's settings, next to its CSV (`irf.csv` → `irf.toml`)."""
+irf_info_path(csv_path::AbstractString) = string(splitext(csv_path)[1], ".toml")
+
+write_irf_info(path::AbstractString, info::AbstractDict) =
+    (mkpath(dirname(path)); open(io -> TOML.print(io, info; sorted = true), path, "w"); path)
+
+read_irf_info(path::AbstractString)::Dict{String, Any} = isfile(path) ? TOML.parsefile(path) : Dict{String, Any}()
+
+"""
+    load_irfs(spc; ask=true) -> (irfs, info)
+
+The IRF of each channel and the record of its settings: `irf_csv_path()`
+(and its .toml) when it exists, otherwise imported from the Single .sdt
+whose path is cached (`irf_filepath_cache()`) — or, with `ask`, picked in
+a dialog — through `import_irf_sdt`.
+"""
+function load_irfs(spc::FLIMCore.Reglages; ask::Bool = true)
+    csv = irf_csv_path()
+    isfile(csv) && return read_irf_csv(csv), read_irf_info(irf_info_path(csv))
+    cache_path = irf_filepath_cache()
+    filepath = isfile(cache_path) ? strip(read(cache_path, String)) : ""
+    if !isfile(filepath)
+        ask || error("no IRF yet: pick the .sdt of a Single measurement of the IRF")
+        filepath = pick_file(filterlist = "sdt")
+        isempty(filepath) && error("no IRF file picked")
+    end
+    return import_irf_sdt(filepath, spc)
+end
+
+"""
+    import_irf_sdt(filepath, spc; applied=Dict()) -> (irfs, info)
+
+Import an IRF .sdt (a Single measurement): refused — with every difference
+in the error — unless it was taken with the settings the cards measure with
+(`irf_mismatches`, the detector gains being those declared in [dcc] now).
+Kept as `irf_csv_path()`, with the record of its settings next to it.
+"""
+function import_irf_sdt(filepath::AbstractString, spc::FLIMCore.Reglages;
+                        applied::AbstractDict = Dict{Int, Dict{String, Float64}}())
+    irfs, channels = read_sdt_irf(filepath; series = spc.series)
+    info = Dict{String, Any}("source" => String(filepath), "imported" => Dates.format(Dates.now(), dateformat"yyyy-mm-ddTHH:MM:SS"),
+                             "channels" => channels, "dcc" => Dict{String, Any}(spc.dcc))
+    mismatches = irf_mismatches(info, spc; applied)
+    isempty(mismatches) || error("IRF taken with other settings: " * join(mismatches, "; "))
+    write_irf_csv(irf_csv_path(), irfs)
+    write_irf_info(irf_info_path(irf_csv_path()), info)
+    set_path_cache!(irf_filepath_cache(), filepath)
+    return irfs, info
 end
 
 function compute_irf_bin_size(irf_data::Matrix{Float64})::Float64
@@ -136,10 +243,6 @@ function compute_irf_bin_size(irf_data::Matrix{Float64})::Float64
     return h
 end
 
-function get_irf_bin_size()
-    data_irf = get_irf()
-    return compute_irf_bin_size(data_irf)
-end
 
 # -----------------------------------------------------------------------------
 # Etat global
@@ -164,7 +267,7 @@ const IFFTPlanType = typeof(plan_ifft(zeros(Float64, 1)))
 IRF and FFT-plan state shared by the lifetime-fitting and acquisition code.
 Held behind the `const` `RUNTIME` `Ref` below so every field access is
 concretely typed (unlike a bare untyped `global`), which matters here since
-this is read from the acquisition hot loop (up to 1kHz in Playback mode).
+this is read from the acquisition hot loop (every analyzed histogram).
 
 Not thread-safe, by design rather than oversight: `run_acquisition_loop!`
 runs on its own OS thread (`Threads.@spawn`, see gui/runtime.jl) so the GUI
@@ -225,18 +328,71 @@ case: it reruns in every fresh process, precompiled or not.
 """
 const RUNTIME = Ref{RuntimeContext}()
 
+"""
+Channel 2's context, its own IRF (`nothing` when the IRF .sdt had a single
+channel: channel 2 then uses channel 1's, see `channel_fit_context`).
+`RUNTIME` is channel 1's.
+"""
+const RUNTIME_CH2 = Ref{RuntimeContext}()
+
+new_runtime_context() = RuntimeContext(
+    nothing, nothing, nothing,
+    plan_fft(zeros(Float64, 256)), plan_ifft(zeros(Float64, 256)), 256,
+    UInt(0),
+    Vector{ComplexF64}(undef, 256), Vector{ComplexF64}(undef, 256), Vector{ComplexF64}(undef, 256)
+)
+
 function __init__()
-    RUNTIME[] = RuntimeContext(
-        nothing, nothing, nothing,
-        plan_fft(zeros(Float64, 256)), plan_ifft(zeros(Float64, 256)), 256,
-        UInt(0),
-        Vector{ComplexF64}(undef, 256), Vector{ComplexF64}(undef, 256), Vector{ComplexF64}(undef, 256)
-    )
+    RUNTIME[] = new_runtime_context()
+    RUNTIME_CH2[] = new_runtime_context()
     return nothing
 end
 
+"""The fit context of channel `channel`: its own IRF, or channel 1's when it has none."""
+channel_fit_context(channel::Integer) =
+    channel == 2 && RUNTIME_CH2[].irf !== nothing ? RUNTIME_CH2[] : RUNTIME[]
+
+"""
+    with_fit_context(f, ctx)
+
+Run `f()` with every fit function of this file using `ctx` (an IRF, its FFT
+plans and scratch buffers) instead of channel 1's `RUNTIME[]` — how the
+Realtime worker fits each channel against its own IRF. Task-local: other
+tasks keep theirs.
+"""
+with_fit_context(f, ctx::RuntimeContext) = task_local_storage(f, :flimapp_fit_context, ctx)
+
+"""The context the fit functions use in this task (`with_fit_context`), channel 1's otherwise."""
+fit_context()::RuntimeContext = get(task_local_storage(), :flimapp_fit_context, RUNTIME[])::RuntimeContext
+
+"""The record of the loaded IRF's settings (`import_irf_sdt`), empty if none."""
+const IRF_INFO = Ref(Dict{String, Any}())
+
+"""
+    set_irfs!(irfs; info=Dict())
+
+Load the IRF of each channel (`load_irfs`) into the fit contexts, with the
+record of its settings (`irf_mismatches`). Only while no worker runs (see
+`RuntimeContext`).
+"""
+function set_irfs!(irfs::AbstractVector{<:AbstractMatrix}; info::AbstractDict = Dict{String, Any}())
+    IRF_INFO[] = Dict{String, Any}(info)
+    for (ctx, irf) in zip((RUNTIME[], RUNTIME_CH2[]), (irfs[1], get(irfs, 2, nothing)))
+        ctx.irf = irf === nothing ? nothing : Matrix{Float64}(irf)
+        ctx.irf_bin_size = irf === nothing ? nothing : compute_irf_bin_size(ctx.irf)
+        ctx.tcspc_window_size = irf === nothing ? nothing : round(irf[end, 1] + irf[2, 1], sigdigits=4)
+    end
+    return nothing
+end
+
+"""The loaded IRF of each channel (one or two), for the journal."""
+loaded_irfs() = Matrix{Float64}[ctx.irf for ctx in (RUNTIME[], RUNTIME_CH2[]) if ctx.irf !== nothing]
+
+"""The record of the loaded IRF's settings, for the journal and the checks at START."""
+loaded_irf_info() = IRF_INFO[]
+
 function ensure_fft_plans(size::Int)
-    ctx = RUNTIME[]
+    ctx = fit_context()
     if ctx.fft_plan_size != size
         ctx.fft_plan = plan_fft(zeros(Float64, size))
         ctx.ifft_plan = plan_ifft(zeros(Float64, size))
@@ -287,12 +443,13 @@ function get_gating_function(total_channels::Int, low_cut_idx::Int, high_cut_idx
 end
 
 function get_irf_for_channels(total_channels::Int)::Matrix{Float64}
-    ctx = RUNTIME[]
+    ctx = fit_context()
     if size(ctx.irf, 1) == total_channels
         return ctx.irf
     end
 
-    cached = get(IRF_CHANNEL_CACHE, total_channels, nothing)
+    key = (objectid(ctx.irf), total_channels)
+    cached = get(IRF_CHANNEL_CACHE, key, nothing)
     if cached !== nothing
         return cached
     end
@@ -302,7 +459,7 @@ function get_irf_for_channels(total_channels::Int)::Matrix{Float64}
     ncopy = min(total_channels, size(ctx.irf, 1))
     new_irf[1:ncopy, 2] = ctx.irf[1:ncopy, 2]
 
-    IRF_CHANNEL_CACHE[total_channels] = new_irf
+    IRF_CHANNEL_CACHE[key] = new_irf
     return new_irf
 end
 
@@ -339,7 +496,7 @@ function clamp_initial_point!(params_copy::Vector{Float64}, lower_bounds::Vector
 end
 
 function ensure_runtime_state!()
-    ctx = RUNTIME[]
+    ctx = fit_context()
     if ctx.irf === nothing
         error("IRF not loaded. Call init_irf_runtime!() (or set RUNTIME[].irf) before calling vec_to_lifetime.")
     end
@@ -368,7 +525,7 @@ end
     convolve(irf_vec, decay; ...)
 
 Runs on every `Optim` objective evaluation (50-200+ times per fit, x2
-channels), so the FFTs are done in-place via `mul!` into `RUNTIME[]`'s
+channels), so the FFTs are done in-place via `mul!` into the fit context's
 `conv_scratch_*` buffers (resized alongside the plans in `ensure_fft_plans`)
 instead of the allocating `plan * x` form -- cuts this function from 5-6
 heap allocations down to 1 (the freshly-owned `y` this function returns;
@@ -386,7 +543,7 @@ function convolve(irf_vec::Vector{Float64}, decay::Vector{Float64}; histogram_re
     end
 
     ensure_fft_plans(length(irf_vec))
-    ctx = RUNTIME[]
+    ctx = fit_context()
 
     ctx.conv_scratch_in .= irf_vec
     mul!(ctx.conv_scratch_a, ctx.fft_plan, ctx.conv_scratch_in)
@@ -587,51 +744,46 @@ function find_mean_arrival_time(counts::AbstractVector{<:Real}; tcspc_high_cut_i
 end
 
 function lifetime_estimate(counts::AbstractVector{<:Real}; bin_size=0.039, tcspc_high_cut_index::Int64=0)
-    mean_irf_arrival_time = find_mean_arrival_time(RUNTIME[].irf[:, 2], tcspc_high_cut_index=tcspc_high_cut_index)
+    mean_irf_arrival_time = find_mean_arrival_time(fit_context().irf[:, 2], tcspc_high_cut_index=tcspc_high_cut_index)
     mean_data_arrival_time = find_mean_arrival_time(counts, tcspc_high_cut_index=tcspc_high_cut_index)
     return ((mean_data_arrival_time - mean_irf_arrival_time) * bin_size)::Float64
 end
 
 """
-    pixel_lifetime_map(volume::Array{Float64,3}; min_photons::Real=50.0, tcspc_high_cut_index::Int64=0)::Matrix{Float64}
+    pixel_lifetime_map(intensity, sum_t; min_photons=50.0)::Matrix{Float64}
 
-Per-pixel approximate lifetime (ns), via the same first-moment analysis as
-`lifetime_estimate` (mean photon arrival time minus the IRF's own mean
-arrival time, scaled by the IRF's bin size) but applied to every pixel's own
-256-bin histogram (`volume[x, y, :]`, see `extract_sdt_volume` in
-roi_popup.jl) instead of one combined ROI histogram. No MLE fit — this is
-the cheap, no-optimizer estimate, meant for a quick per-pixel preview where
-fitting every pixel individually would be far too slow.
+Per-pixel approximate lifetime (ns), by the same first-moment analysis as
+`lifetime_estimate`: each pixel's mean arrival time (`sum_t ./ intensity`,
+as the SPC image gives them, see FLIMCore's `ImageSomme`) minus the IRF's
+own mean arrival time. No MLE fit — the cheap, no-optimizer estimate, for a
+quick per-pixel preview where fitting every pixel would be far too slow.
 
-A pixel with fewer than `min_photons` total counts gets `NaN` — first-moment
+A pixel with fewer than `min_photons` photons gets `NaN` — first-moment
 analysis is biased and noisy at low counts, so the caller (roi_popup.jl)
-renders `NaN` as transparent rather than a misleading color. The IRF's own
-mean arrival time is computed once up front, not per pixel (unlike calling
-`lifetime_estimate` directly for every pixel would), so this stays cheap
-even across a full ~10^6-pixel image.
+renders `NaN` as transparent rather than a misleading color.
 
-Errors if the IRF hasn't been loaded (`RUNTIME[].irf`/`irf_bin_size`) —
-there is no "reliable" lifetime without it.
+Errors if the IRF hasn't been loaded (`ctx.irf`/`irf_bin_size`) —
+there is no "reliable" lifetime without it. `ctx`: the IRF of the image's
+channel (`channel_fit_context`).
 """
-function pixel_lifetime_map(volume::Array{Float64,3}; min_photons::Real=50.0, tcspc_high_cut_index::Int64=0)::Matrix{Float64}
-    irf = RUNTIME[].irf
-    bin_size = RUNTIME[].irf_bin_size
+function pixel_lifetime_map(intensity::AbstractMatrix{<:Real}, sum_t::AbstractMatrix{<:Real}; min_photons::Real=50.0, ctx::RuntimeContext=fit_context())::Matrix{Float64}
+    irf = ctx.irf
+    bin_size = ctx.irf_bin_size
     if irf === nothing || bin_size === nothing
         error("IRF not loaded. Call init_irf_runtime!() before computing a pixel lifetime map.")
     end
+    size(intensity) == size(sum_t) || error("intensity and sum_t sizes differ: $(size(intensity)) vs $(size(sum_t))")
 
-    mean_irf_arrival_time = find_mean_arrival_time(irf[:, 2]; tcspc_high_cut_index=tcspc_high_cut_index)
+    # Channel centers, like the SPC image's arrival times ((channel + 0.5) * dt).
+    mean_irf_time_ns = (find_mean_arrival_time(irf[:, 2]) - 0.5) * bin_size
 
-    n_cols, n_rows, n_bins = size(volume)
-    result = fill(NaN, n_cols, n_rows)
-
-    for y in 1:n_rows, x in 1:n_cols
-        counts = @view volume[x, y, :]
-        sum(counts) < min_photons && continue
-        mean_arrival_time = find_mean_arrival_time(counts; tcspc_high_cut_index=tcspc_high_cut_index)
-        result[x, y] = (mean_arrival_time - mean_irf_arrival_time) * bin_size
+    result = fill(NaN, size(intensity))
+    for i in eachindex(intensity)
+        n = intensity[i]
+        n < min_photons && continue
+        n > 0 || continue
+        result[i] = sum_t[i] / n - mean_irf_time_ns
     end
-
     return result
 end
 
@@ -662,7 +814,7 @@ function mle_reconvolution_fit(data_irf::Matrix{Float64}, data_xy::Vector{Vector
         return fixed_parameters
     end
 
-    irf_bin_size = RUNTIME[].irf_bin_size
+    irf_bin_size = fit_context().irf_bin_size
     if number_of_lifetimes == 1
         if use_lifetime_estimation_as_guess
             params_copy[1] = lifetime_estimate(y_data, bin_size=irf_bin_size, tcspc_high_cut_index=tcspc_high_cut_index)
@@ -756,7 +908,7 @@ end
 # mle_reconvolution_fit above for why a fixed-length default is a bug.
 function vec_to_lifetime(x; bin_size=0.04886091184430619, hist_size_threshold=500, method="MLE", guess=[3.0, 1.0, 1e-6], laser_pulse_period=12.5, histogram_resolution=256, number_of_previous_pulses=5, tac_low_cut=5.0980392, tac_high_cut=94.901962, IRF_delay=NaN, IRF_width=NaN, IRF_cutoff=NaN, lifetime_estimation=NaN, standard_deviation_estimation=NaN, fixed_parameters=fill(NaN, length(guess)), use_lifetime_estimation_as_guess::Bool=true, first_fit::Bool=false)
     ensure_runtime_state!()
-    tcspc_window_size = RUNTIME[].tcspc_window_size
+    tcspc_window_size = fit_context().tcspc_window_size
 
     requested_channels = round(Int, laser_pulse_period * histogram_resolution / tcspc_window_size)
     total_channels = requested_channels
@@ -869,10 +1021,11 @@ IRF is loaded and before the GUI is shown, so the delay reads as "app is
 starting up" rather than "the app froze when I clicked Start".
 """
 function warmup_lifetime_fitting!()
-    ctx = RUNTIME[]
+    ctx = fit_context()
     if ctx.irf === nothing
         return nothing
     end
+    FIT_WARMED[] = true
 
     synthetic_counts = [max(0.0, 1000.0 * exp(-i * 0.02) + 5.0) for i in 0:(DEFAULT_HISTOGRAM_RESOLUTION - 1)]
 
@@ -886,3 +1039,15 @@ function warmup_lifetime_fitting!()
 
     return nothing
 end
+
+const FIT_WARMED = Ref(false)
+
+"""
+    ensure_fit_warm!()
+
+`warmup_lifetime_fitting!` once per process, if `run_app` couldn't (no IRF
+at startup, e.g. a Playback with the session's IRF): the analysis worker
+calls it before its first pass, which would otherwise spend its fit's time
+budget compiling and come back at the initial guess.
+"""
+ensure_fit_warm!() = (FIT_WARMED[] || warmup_lifetime_fitting!(); nothing)

@@ -7,7 +7,8 @@ Wires up:
 - Panel switching (delegates to handlers_layout.jl / handlers_controller.jl /
   handlers_protocol.jl / handlers_console.jl for each panel's own controls)
 - START/PAUSE/RESUME/STOP button actions
-- IRF/data-folder path selection and DAQ connect/disconnect/acknowledge
+- IRF (.sdt of a Single) and Playback session selection, DAQ
+  connect/reconnect/disconnect/acknowledge
 - the SPC button, which opens the SPC window (gui/spc_window.jl)
 
 Handlers never do the work themselves (plan §2): the DAQ buttons only drop
@@ -25,6 +26,24 @@ it with the live frequency/file readout once an acquisition is running.
 """
 function show_status!(blocks, message::AbstractString)
     blocks.info_label.text[] = String(message)
+    return nothing
+end
+
+"""
+    show_recording_space!(app_run, blocks)
+
+The free space where the sessions go (`recording_space`): in the status
+line, and in the top bar's banner while it holds less than
+`RECORDING_WARN_S` of recording (`RECORDING_MIN_S`: START refuses).
+"""
+function show_recording_space!(app_run, blocks)
+    free, seconds, text = recording_space(app_run.spc.settings)
+    low = free >= 0 && seconds < RECORDING_WARN_S
+    show_status!(blocks, "Recording folder: " * text)
+    warning = low ? "recording folder: only " * text : ""
+    banner = filter(!isempty, [app_run.offline, warning])
+    app_run.spc.banner = join(banner, "   ·   ")
+    low && @warn "Little space left in the recording folder" folder=FLIMCore.dossier_spc(app_run.spc.settings) space=text
     return nothing
 end
 
@@ -118,57 +137,86 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
         update_stop_button_label!(app_run, blocks)
     end
 
-    # Live, mid-run update: app_run.target_frequency is a Threads.Atomic{Float64}
-    # (not an Observable) that start_playback's worker thread re-reads every
-    # cycle, so writing to it here immediately re-paces a running Playback
-    # acquisition — see acquisition.jl's start_playback docstring.
-    on(blocks.target_freq_textbox.stored_string) do new_string
-        parsed = tryparse(Float64, strip(new_string))
-        if parsed === nothing || !isfinite(parsed) || parsed <= 0
-            @warn "Invalid target frequency; ignoring" value=new_string
-            return
-        end
-
-        app_run.target_frequency[] = parsed
-    end
-
     on(blocks.irf_button.clicks) do _
         filepath = open_irf_dialog()
         if filepath === nothing
             return
         end
 
+        # Imported now (kept as ~/.flimapp/irf.csv): a file that isn't a
+        # Single's .sdt, or an IRF taken with other card or detector
+        # settings, is refused here, not at the next START.
         try
-            set_path_cache!(irf_filepath_cache(), filepath)
+            irfs, _ = import_irf_sdt(filepath, app_run.spc.settings; applied = spc_applied_settings(app_run.spc))
             update_path_textbox!(blocks.irf_path_textbox, filepath)
-            @info "IRF filepath updated" path=filepath
+            @info "IRF imported" path=filepath channels=length(irfs)
         catch e
-            @warn "Failed to update IRF filepath" error=string(e)
-        end
-    end
-
-    on(blocks.folder_button.clicks) do _
-        folderpath = open_folder_dialog()
-        if folderpath === nothing
+            @warn "IRF file refused" path=filepath error=string(e)
+            show_status!(blocks, "IRF refused: " * first(split(sprint(showerror, e), '\n')))
             return
         end
 
-        try
-            set_path_cache!(folderpath_cache(), folderpath)
-            update_path_textbox!(blocks.folder_path_textbox, folderpath)
-            @info "Data folder path updated" path=folderpath
-        catch e
-            @warn "Failed to update data folder path" error=string(e)
+        # Reload it now — or, during a run, at the next START: the fit's
+        # runtime state isn't safe to change under a running worker
+        # (RuntimeContext, lifetime_analysis.jl).
+        if app_run.run_open
+            app_run.irf_reload_pending = true
+            show_status!(blocks, "IRF saved: loaded at the next START")
+        else
+            init_irf_runtime!(app_run.spc.settings)
+            show_status!(blocks, RUNTIME[].irf === nothing ? "IRF unreadable: see the log" : "IRF loaded")
         end
     end
 
-    # CONNECT / RESET / DISCONNECT, depending on the DAQ loop's state
-    # (connect_button_label, refresh.jl). Disconnecting mid-scan raises the
-    # stop flag first, so the outputs go to zero within one readback block.
+    # The recording folder ([enregistrement] dossier, config/spc.toml): the
+    # sessions go to its sessions/, the SPC window's acquisitions next to
+    # it. Rewrites spc.toml; the free space is checked right away.
+    on(blocks.record_button.clicks) do _
+        folderpath = open_folder_dialog()
+        folderpath === nothing && return
+        if app_run.run_open
+            show_status!(blocks, "Recording folder: change it between runs")
+            return
+        end
+        if spc_edit_setting!(app_run.spc, :dossier, folderpath)
+            update_path_textbox!(blocks.record_path_textbox, folderpath)
+            @info "Recording folder updated" path=folderpath
+            show_recording_space!(app_run, blocks)
+        else
+            show_status!(blocks, "Recording folder refused: " * app_run.spc.last_error)
+        end
+    end
+
+    # The session Playback replays: a session folder (or one made by
+    # simulate_session), with its cards' streams in spc/.
+    on(blocks.folder_button.clicks) do _
+        folderpath = open_folder_dialog()
+        folderpath === nothing && return
+        if !is_session_dir(folderpath)
+            show_status!(blocks, "Not a session (no spc/*.spc): $(basename(folderpath))")
+            return
+        end
+        app_run.playback.dir = folderpath
+        update_path_textbox!(blocks.folder_path_textbox, folderpath)
+        try
+            set_path_cache!(session_folder_cache(), folderpath)
+        catch e
+            @warn "Failed to remember the session folder" error=string(e)
+        end
+        @info "Playback session selected" path=folderpath
+        show_status!(blocks, "Playback session: $(basename(folderpath))")
+    end
+
+    # CONNECT (RECONNECT after a failed connection) / RESET / DISCONNECT,
+    # depending on the DAQ loop's state (connect_button_label, refresh.jl).
+    # Disconnecting mid-scan raises the stop flag first, so the outputs go
+    # to zero within one readback block. Offline, there is nothing to connect.
     on(blocks.connect_button.clicks) do _
         ex = app_run.exchange
         state = loop_status(ex).state
-        if state == LOOP_DISCONNECTED
+        if state == LOOP_DISCONNECTED && app_run.config.backend == :ni && isempty(Libdl.find_library(DAQmx.LIB))
+            show_status!(blocks, "No NI-DAQmx driver on this computer: Playback only")
+        elseif state == LOOP_DISCONNECTED
             send_command!(ex, ConnectCommand())
         elseif state == LOOP_FAULT
             send_command!(ex, AcknowledgeCommand())

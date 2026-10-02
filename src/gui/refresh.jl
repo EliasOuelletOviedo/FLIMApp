@@ -12,7 +12,8 @@ the other threads into Observables. Each tick:
    time-series axis limits with them (Histogram and Readback at most once
    per `autoscale_interval_s`);
 4. drains the SPC engine's results into the SPC window and the top bar
-   (`spc_tick!`, gui/spc_view.jl);
+   (`spc_tick!`, gui/spc_view.jl), and the Playback replay engine's
+   (`playback_tick!`);
 5. updates the status labels and, once a second, the diagnostics (plan §9);
 6. closes the run once the worker and the scan have both stopped.
 
@@ -106,23 +107,16 @@ function refresh_tick!(app, app_run, blocks)
 
     # SPC engine results -> SPC window and top bar (images at most 10 Hz)
     spc_tick!(app_run.spc, started_ns)
+    playback_tick!(app_run)
 
-    progress = ex.save_progress[]
-    if app_run.run_open && app_run.run_mode == "Save" && !isequal(progress, app_run.save_progress[])
-        app_run.save_progress[] = progress
-    end
-
-    # Plots: Save mode draws only once the run ends (it runs as fast as it
-    # can; redrawing along the way would only slow the GUI down).
-    live = !(app_run.running[] && app_run.run_mode == "Save")
-    if state.dirty && live
+    if state.dirty
         for (slot, plot) in state.plots
             refresh_plot_slot!(app, app_run, plot)
             update_data_limits!(app, app_run, plot_axis(blocks, slot), plot)
         end
         state.dirty = false
     end
-    if live && started_ns - state.last_autoscale_ns >= app_run.config.autoscale_interval_s * 1e9
+    if started_ns - state.last_autoscale_ns >= app_run.config.autoscale_interval_s * 1e9
         autoscale_both!(app, app_run, blocks)
         state.last_autoscale_ns = started_ns
     end
@@ -180,6 +174,8 @@ the layout, controller or protocol settings changed since the last one
 reads `AppState`, which only the GUI thread mutates.
 """
 function publish_analysis_settings!(app, app_run; force::Bool = false)
+    # Playback with the session's settings: the GUI's edits don't reach the worker.
+    app_run.run_open && app_run.run_mode == "Playback" && app_run.playback.session_settings && return nothing
     state = app_run.display
     last = state.last_settings
     changed = force || last === nothing ||
@@ -208,15 +204,21 @@ const LOOP_STATE_NAMES = Dict(
 
 Short text for the DAQ label next to the CONNECT button.
 """
-loop_status_text(status::LoopStatus)::String = "DAQ: " * LOOP_STATE_NAMES[status.state]
+loop_status_text(status::LoopStatus)::String =
+    "DAQ: " * (status.state == LOOP_DISCONNECTED && startswith(status.message, "connection failed") ?
+               "connection failed" : LOOP_STATE_NAMES[status.state])
 
 """
-    connect_button_label(state)::String
+    connect_button_label(status)::String
 
-CONNECT when disconnected, RESET (acknowledge) in fault, DISCONNECT otherwise.
+CONNECT when disconnected — RECONNECT when the last connection failed (the
+DAQ loop's "connection failed: …" status, e.g. a card missing on the bench
+PC) —, RESET (acknowledge) in fault, DISCONNECT otherwise.
 """
-connect_button_label(state::LoopState)::String =
-    state == LOOP_DISCONNECTED ? "CONNECT" : state == LOOP_FAULT ? "RESET" : "DISCONNECT"
+function connect_button_label(status::LoopStatus)::String
+    status.state == LOOP_DISCONNECTED && return startswith(status.message, "connection failed") ? "RECONNECT" : "CONNECT"
+    return status.state == LOOP_FAULT ? "RESET" : "DISCONNECT"
+end
 
 """
     loop_alarm(state)::Bool
@@ -240,10 +242,12 @@ function update_loop_status!(app_run, blocks)
     blocks.daq_label.text[] == text || (blocks.daq_label.text[] = text)
 
     if status != state.last_status
-        label = connect_button_label(status.state)
+        label = connect_button_label(status)
         blocks.connect_button.label[] == label || (blocks.connect_button.label[] = label)
         if status.state == LOOP_FAULT
             show_status!(blocks, "DAQ fault: " * status.message)
+        elseif status.state == LOOP_DISCONNECTED && startswith(status.message, "connection failed")
+            show_status!(blocks, "DAQ " * status.message * " — RECONNECT to retry")
         elseif !isempty(status.message) && startswith(status.message, "scan refused")
             show_status!(blocks, status.message)
         end
@@ -255,7 +259,7 @@ end
 """
     update_info_label!(app_run, blocks, now_ns)
 
-While running, the frame rate (EMA over ~1 s windows) and the latest file
+While running, the frame rate (EMA over ~1 s windows) and the latest frame
 number in the info label — the job the former 1 Hz infos task did. Left
 alone otherwise, so status messages (`show_status!`) stay visible.
 """
@@ -267,7 +271,7 @@ function update_info_label!(app_run, blocks, now_ns::UInt64)
     if app_run.running[] && !app_run.paused[] && app_run.i != state.last_frame_count
         instant = (app_run.i - state.last_frame_count) / elapsed_s
         state.frame_rate_hz = isfinite(state.frame_rate_hz) ? 0.6 * state.frame_rate_hz + 0.4 * instant : instant
-        blocks.info_label.text[] = "Frequency: $(round(state.frame_rate_hz, digits=1)) Hz\nFile: $(app_run.i)"
+        blocks.info_label.text[] = "Frame rate: $(round(state.frame_rate_hz, digits=2)) Hz\nFrame: $(app_run.i)"
     end
     state.last_frame_count = app_run.i
     state.last_frame_count_time_ns = now_ns
@@ -310,29 +314,93 @@ end
 # -----------------------------------------------------------------------------
 
 """
+    playback_tick!(app_run)
+
+Drain the Playback replay engine's results (never waiting): its alerts go
+to the SPC alerts and the journal like the cards' engine's; the end of its
+pass cutting (`Fin`, or the engine stopping) raises `source_done`, which
+lets the analysis worker end once it has taken every pass.
+"""
+function playback_tick!(app_run)
+    playback = app_run.playback
+    engine = playback.engine
+    engine === nothing && return nothing
+    n = 0
+    while n < 1000 && isready(engine.resultats)
+        r = take!(engine.resultats)
+        if r isa FLIMCore.Alerte
+            spc_handle_result!(app_run.spc, r)
+        elseif r isa FLIMCore.Fin && r.mesure in (:clamp, :moteur)
+            playback.fin === nothing && (playback.fin = r)
+            playback.source_done[] = true
+            spc_journal!(app_run.spc, r.erreur ? :error : :info, "Playback replay ended: $(r.raison)")
+        end
+        FLIMCore.rendre!(engine, r)
+        n += 1
+    end
+    FLIMCore.etat_moteur(engine) == :arrete && (playback.source_done[] = true)
+    return nothing
+end
+
+"""
     check_run_finished!(app, app_run, blocks)
 
-While a run is open: once the analysis has stopped (STOP, end of files, or
-a worker error), make sure the scan stops too; once both have stopped,
-close the run (`finalize_run!`).
+While a run is open. Realtime needs its three parts — the analysis worker,
+the DAQ loop's slots and the SPC engine's measurement — so once one of them
+stops (STOP, a worker error, a DAQ fault, an SPC error), stop the other
+two; once all three have stopped, close the run (`finalize_run!`).
+Playback has two — the replay engine and the worker, which ends by itself
+once the replay is over and every pass analyzed.
 """
 function check_run_finished!(app, app_run, blocks)
     app_run.run_open || return nothing
+    app_run.run_mode == "Playback" && return check_playback_finished!(app, app_run, blocks)
     ex = app_run.exchange
+    daq = loop_status(ex).state
+    spc = spc_state(app_run.spc)
 
     worker = app_run.worker_task
     worker_done = worker === nothing || istaskdone(worker)
-    worker_done && app_run.running[] && (app_run.running[] = false)
-    app_run.running[] && return nothing
-
-    state = loop_status(ex).state
-    if state == LOOP_RUNNING && !ex.stop[]
-        request_stop!(ex)
+    if app_run.running[]
+        hardware_stopped = !(daq in (LOOP_RUNNING, LOOP_STOPPING)) || spc != :clamp
+        # A just-started run: give the two commands a moment to take effect.
+        started_s = (time_ns() - app_run.run_started_ns) / 1e9
+        if worker_done || (hardware_stopped && started_s > 3.0)
+            hardware_stopped && !worker_done &&
+                show_status!(blocks, daq == LOOP_FAULT ? "Run stopped: DAQ fault" : spc != :clamp ? "Run stopped: SPC measurement ended" : "Run stopped")
+            app_run.running[] = false
+        else
+            return nothing
+        end
     end
 
-    if worker_done && state != LOOP_RUNNING && state != LOOP_STOPPING
+    daq == LOOP_RUNNING && !ex.stop[] && request_stop!(ex)
+    spc_stop_clamp!(app_run.spc)
+
+    if worker_done && daq != LOOP_RUNNING && daq != LOOP_STOPPING && spc != :clamp
         finalize_run!(app, app_run, blocks)
     end
+    return nothing
+end
+
+function check_playback_finished!(app, app_run, blocks)
+    playback = app_run.playback
+    worker = app_run.worker_task
+    worker_done = worker === nothing || istaskdone(worker)
+    worker_done || return nothing
+
+    # The worker ended (replay over, STOP, or an error): stop the replay
+    # engine off the GUI thread, then close the run.
+    app_run.running[] = false
+    engine = playback.engine
+    if engine !== nothing
+        playback_stop!(playback)
+        playback.engine = nothing
+        errormonitor(Threads.@spawn FLIMCore.arreter_moteur(engine))
+    end
+    fin = playback.fin
+    show_status!(blocks, fin === nothing ? "Playback stopped" : "Playback: $(fin.raison)")
+    finalize_run!(app, app_run, blocks)
     return nothing
 end
 
@@ -340,8 +408,9 @@ end
     finalize_run!(app, app_run, blocks)
 
 Close a run: last redraw over the whole run, buttons back to START/CLEAR,
-the journal's run closed, and — for a Real-time run with results — the
-save dialog (`start_realtime_save!`, gui/session_save.jl).
+and the journal's run closed. Nothing to save: everything went to the
+session folder during the run (journal, cards' streams), so neither a crash
+nor a forgotten click loses anything.
 """
 function finalize_run!(app, app_run, blocks)
     app_run.run_open = false
@@ -365,13 +434,8 @@ function finalize_run!(app, app_run, blocks)
     state.dirty = false
     autoscale_both!(app, app_run, blocks)
 
-    app_run.save_progress[] = NaN
     send_journal!(app_run.exchange.journal, JournalRunEnd(time()))
     update_start_button_label!(app_run, blocks)
     update_stop_button_label!(app_run, blocks)
-
-    if app_run.run_mode == "Realtime" && output isa AnalysisOutput && nrow(output.realtime_rows) > 0
-        start_realtime_save!(app, app_run, output.realtime_rows)
-    end
     return nothing
 end

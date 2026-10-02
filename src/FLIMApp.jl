@@ -20,6 +20,7 @@ module FLIMApp
 using Serialization
 using Observables
 using ZipFile
+using Libdl
 
 # =============================================================================
 # MODULE INITIALIZATION - LOAD IN DEPENDENCY ORDER
@@ -44,6 +45,12 @@ include("bench_config.jl")
 # Settings structs, AppState, per-file results
 include("data_types.jl")
 
+# FLIMCore: the SPC-150N engine (its own thread, the only task that calls the
+# SPC DLL), its photon sources (cards, .spc replay, simulation) and the pure
+# functions of the bench scripts. Its own module, standard library only
+# (Plan.pdf); the routing limits it defines are shared with the DAQ loop.
+include("spc/FLIMCore.jl")
+
 # The exchanges between threads (depends on data_types.jl, bench_config.jl)
 include("exchange.jl")
 
@@ -52,9 +59,11 @@ include("smoothing.jl")
 include("protocol.jl")
 include("roi_geometry.jl")
 
-# Becker & Hickl .sdt and ImageJ .roi/.zip parsers
-include("io/SdtFile.jl")
+# ImageJ .roi/.zip parser
 include("io/ImageJROI.jl")
+
+# Becker & Hickl .sdt reader (the IRF, a Single measurement)
+include("io/SdtFile.jl")
 
 # --- Journal thread ----------------------------------------------------------
 
@@ -73,13 +82,7 @@ include("loop/daq_loop.jl")
 
 include("analysis/lifetime_analysis.jl")
 include("analysis/acquisition.jl")
-
-# --- SPC engine thread ---------------------------------------------------------
-
-# FLIMCore: the SPC-150N engine (the only task that calls the SPC DLL), its
-# photon sources (cards, .spc replay, simulation) and the pure functions of
-# the bench scripts. Its own module, standard library only (Plan.pdf).
-include("spc/FLIMCore.jl")
+include("analysis/session.jl")
 
 # --- Main thread (GUI) ---------------------------------------------------------
 
@@ -89,7 +92,6 @@ include("gui/path_utils.jl")
 include("gui/spc_view.jl")
 include("gui/app_run.jl")
 include("gui/plotting.jl")
-include("gui/session_save.jl")
 include("gui/runtime.jl")
 include("gui/refresh.jl")
 include("gui/protocol_popup.jl")
@@ -265,31 +267,33 @@ function load_or_create_state()::AppState
 end
 
 """
-    init_irf_runtime!()
+    init_irf_runtime!(spc; ask=true)
 
-Load the IRF into `RUNTIME[]`, used by lifetime fitting and FFT-based
-operations. Falls back to `nothing` fields when loading fails.
+Load the IRF of each channel (`load_irfs`: `~/.flimapp/irf.csv` and the
+record of its settings, imported from a Single .sdt) into the fit contexts
+— `RUNTIME[]` for channel 1, `RUNTIME_CH2[]` for channel 2 when the IRF has
+two channels. `spc`: the SPC settings an import is checked against
+(`import_irf_sdt`). Falls back to `nothing` fields when loading fails.
 
-Doesn't touch `RUNTIME[].fft_plan`/`ifft_plan` — those already have a valid
-256-point default from `RUNTIME`'s initialization, and `ensure_fft_plans`
-(called from `ensure_runtime_state!` on every fit) replans on demand for
-whatever size is actually needed, so redoing the same 256-point plan here
-on every call would just be wasted work.
+Doesn't touch the contexts' FFT plans — those already have a valid
+256-point default, and `ensure_fft_plans` (called from
+`ensure_runtime_state!` on every fit) replans on demand for whatever size
+is actually needed.
 """
-function init_irf_runtime!()
-    ctx = RUNTIME[]
+function init_irf_runtime!(spc::FLIMCore.Reglages; ask::Bool = true)
     try
-        new_irf = get_irf()
-        ctx.irf = new_irf
-        ctx.irf_bin_size = get_irf_bin_size()
-        ctx.tcspc_window_size = round(new_irf[end, 1] + new_irf[2, 1], sigdigits=4)
-
-        @info "IRF loaded successfully" size=size(ctx.irf) bin_size=ctx.irf_bin_size window_size=ctx.tcspc_window_size
+        irfs, info = load_irfs(spc; ask)
+        set_irfs!(irfs; info)
+        ctx = RUNTIME[]
+        @info "IRF loaded successfully" channels=length(loaded_irfs()) size=size(ctx.irf) bin_size=ctx.irf_bin_size window_size=ctx.tcspc_window_size
     catch e
         @error "Failed to load IRF; lifetime fitting will not work" error=string(e)
-        ctx.irf = nothing
-        ctx.irf_bin_size = nothing
-        ctx.tcspc_window_size = nothing
+        IRF_INFO[] = Dict{String, Any}()
+        for ctx in (RUNTIME[], RUNTIME_CH2[])
+            ctx.irf = nothing
+            ctx.irf_bin_size = nothing
+            ctx.tcspc_window_size = nothing
+        end
     end
 
     return nothing

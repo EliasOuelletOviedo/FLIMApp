@@ -30,7 +30,7 @@ fit can freeze the window. It also passes
 one, unlike JULIA_NUM_THREADS, so it has to be a CLI arg to the launched
 binary) -- maxing out GC mark-phase parallelism plus concurrent sweeping
 measurably reduced the tail of GC-pause-driven frame-time spikes in
-Playback-mode profiling (acquisition.jl's hot loop), though this was
+acquisition profiling (acquisition.jl's hot loop), though this was
 validated by running the package from source, not against the compiled
 binary specifically -- confirm it still helps (or at least doesn't regress)
 after building if you change this.

@@ -17,6 +17,10 @@ using Observables
 
 const PLOT_OPTIONS = ["Histogram", "Photon counts", "Lifetime", "Ion concentration", "Command", "Readback"]
 
+"""A plot's title: in Playback, the PI outputs are simulated (the recorded stimulation doesn't change)."""
+plot_title(selection::AbstractString, app_run) =
+    selection == "Command" && app_run.run_mode == "Playback" ? "Command — simulated (Playback)" : selection
+
 # -----------------------------------------------------------------------------
 # Histogram plot normalization
 # -----------------------------------------------------------------------------
@@ -300,12 +304,12 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol;
         axis = blocks.plot_1_axis
         selection = something(selection, app.layout.plot1)
         show_ch1, show_ch2 = something(show_channels, (app.layout.plot1_ch1, app.layout.plot1_ch2))
-        axis.title[] = "Plot 1\n($(selection))"
+        axis.title[] = "Plot 1\n($(plot_title(selection, app_run)))"
     else
         axis = blocks.plot_2_axis
         selection = something(selection, app.layout.plot2)
         show_ch1, show_ch2 = something(show_channels, (app.layout.plot2_ch1, app.layout.plot2_ch2))
-        axis.title[] = "Plot 2\n($(selection))"
+        axis.title[] = "Plot 2\n($(plot_title(selection, app_run)))"
     end
 
     previous = get(app_run.display.plots, plot_slot, nothing)

@@ -50,30 +50,27 @@ function geometrie_resolue(lignes::AbstractVector{Int64}, trames::AbstractVector
             pixels_ligne = pixels_ligne, tic_01 = tic_01, pix_01 = pix_01)
 end
 
-"""
-    ranger_photons(brut, tic_s, dt_ns, g::Geometrie) -> NamedTuple
-
-Traitement en bloc d'imagerie_photons.jl. La première passe ne garde que
-les marqueurs, pour mesurer la période de ligne et le nombre de lignes par
-trame. La seconde décode par blocs et range chaque photon dans son pixel,
-sans garder les photons en mémoire.
-"""
-function ranger_photons(brut::Vector{UInt16}, tic_s, dt_ns, g::Geometrie)
-    # Passe 1 : marqueurs seulement
+"""Première passe : les temps (tics) des marqueurs de ligne (M1) et de trame (M2)."""
+function marqueurs_flux(brut::Vector{UInt16})
     d1 = decoder!(Decodeur(), brut, length(brut))
-    lignes, trames = d1.marqueurs[2], d1.marqueurs[3]
-    nl, nt = length(lignes), length(trames)
-    geo = geometrie_resolue(lignes, trames, tic_s, g)
-    nx, ny, tic_01, pix_01 = geo.nx, geo.ny, geo.tic_01, geo.pix_01
+    return d1.marqueurs[2], d1.marqueurs[3]
+end
 
-    # Passe 2 : photons, par blocs de 1 M mots
-    intensite = zeros(UInt32, ny, nx)
-    somme_t = zeros(Float64, ny, nx)
+"""
+    parcourir_photons(f, brut, lignes, trames, geo, g) -> Decodeur
+
+Seconde passe d'imagerie_photons.jl : décode par blocs de 1 M mots et appelle
+`f(y, x, adc)` (indices à partir de 1) pour chaque photon qui tombe dans
+l'image, sans garder les photons en mémoire. Rend le décodeur (photons,
+pertes, ADC de tous les photons).
+"""
+function parcourir_photons(f, brut::Vector{UInt16}, lignes::Vector{Int64}, trames::Vector{Int64}, geo, g::Geometrie)
+    nl, nt = length(lignes), length(trames)
+    nx, ny, tic_01, pix_01 = geo.nx, geo.ny, geo.tic_01, geo.pix_01
     d2 = Decodeur(garder_photons = true)
     k, j = 0, 1                   # dernière ligne passée, prochaine trame
     compteur = -1                 # -1 : avant la première trame, lignes ignorées
     y_cour, t_ligne = -1, Int64(0)
-    dans_image = 0
     bloc = 1 << 20
     for debut in 1:bloc:length(brut)
         fin = min(debut + bloc - 1, length(brut))
@@ -94,16 +91,60 @@ function ranger_photons(brut::Vector{UInt16}, tic_s, dt_ns, g::Geometrie)
             (0 <= y < ny) || continue
             x = fld((tp - t_ligne) * tic_01, pix_01) - g.decalage_pixels
             (0 <= x < nx) || continue
-            intensite[y + 1, x + 1] += 1
-            somme_t[y + 1, x + 1] += (4095 - Int(adc) + 0.5) * dt_ns   # microtemps croissant
-            dans_image += 1
+            f(y + 1, x + 1, adc)
         end
         empty!(d2.t_photons); empty!(d2.adc_photons); empty!(d2.routage_photons)
     end
+    return d2
+end
+
+"""
+    ranger_photons(brut, tic_s, dt_ns, g::Geometrie) -> NamedTuple
+
+Traitement en bloc d'imagerie_photons.jl. La première passe ne garde que
+les marqueurs, pour mesurer la période de ligne et le nombre de lignes par
+trame. La seconde décode par blocs et range chaque photon dans son pixel,
+sans garder les photons en mémoire.
+"""
+function ranger_photons(brut::Vector{UInt16}, tic_s, dt_ns, g::Geometrie)
+    lignes, trames = marqueurs_flux(brut)
+    geo = geometrie_resolue(lignes, trames, tic_s, g)
+    intensite = zeros(UInt32, geo.ny, geo.nx)
+    somme_t = zeros(Float64, geo.ny, geo.nx)
+    dans_image = Ref(0)
+    d2 = parcourir_photons(brut, lignes, trames, geo, g) do y, x, adc
+        intensite[y, x] += 1
+        somme_t[y, x] += (4095 - Int(adc) + 0.5) * dt_ns   # microtemps croissant
+        dans_image[] += 1
+    end
     return (intensite = intensite, somme_t = somme_t, declin = reverse(d2.adc),
-            photons = d2.photons, dans_image = dans_image, pertes = d2.pertes,
-            trames = max(nt - 1, 0), lignes_trame = geo.lignes_trame, pixels_ligne = geo.pixels_ligne,
-            periode_ligne_s = geo.periode * tic_s, nx = nx, ny = ny)
+            photons = d2.photons, dans_image = dans_image[], pertes = d2.pertes,
+            trames = max(length(trames) - 1, 0), lignes_trame = geo.lignes_trame, pixels_ligne = geo.pixels_ligne,
+            periode_ligne_s = geo.periode * tic_s, nx = geo.nx, ny = geo.ny)
+end
+
+"""
+    histogrammes_pixels(brut, tic_s, g, etiquettes, n; canaux=256) -> Matrix{Float64}
+
+Un déclin de `canaux` canaux (temps croissant) par groupe de pixels :
+`etiquettes[y, x]` (lignes × pixels, la taille de l'image que donne `g`)
+vaut 1 à `n` pour les pixels d'un groupe (une ROI), 0 ailleurs. Mêmes
+règles de rangement que `ranger_photons`.
+"""
+function histogrammes_pixels(brut::Vector{UInt16}, tic_s, g::Geometrie, etiquettes::AbstractMatrix{<:Integer}, n::Integer;
+                             canaux::Integer = 256)
+    4096 % canaux == 0 || error("canaux : un diviseur de 4096")
+    lignes, trames = marqueurs_flux(brut)
+    geo = geometrie_resolue(lignes, trames, tic_s, g)
+    size(etiquettes) == (geo.ny, geo.nx) ||
+        error("étiquettes de $(size(etiquettes)) pour une image de $((geo.ny, geo.nx))")
+    H = zeros(Float64, canaux, n)
+    groupe = 4096 ÷ canaux
+    parcourir_photons(brut, lignes, trames, geo, g) do y, x, adc
+        e = etiquettes[y, x]
+        e > 0 && (H[(4095 - Int(adc)) ÷ groupe + 1, e] += 1)
+    end
+    return H
 end
 
 # ---------------------------------------------------------------------

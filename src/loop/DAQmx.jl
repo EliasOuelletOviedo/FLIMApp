@@ -380,7 +380,7 @@ end
 
 # ==== Ajouts : compteur comme horloge partagée, diagnostic ==========
 
-export Val_Hz, Val_Low, add_co_pulse_freq, cfg_implicit_timing, samples_generated
+export Val_Hz, Val_Low, add_co_pulse_freq, add_co_pulse_ticks, set_co_pulse_term, cfg_implicit_timing, samples_generated
 
 const Val_Hz  = Int32(10373)
 const Val_Low = Int32(10214)
@@ -399,6 +399,24 @@ function add_co_pulse_freq(th, compteur::AbstractString, freq::Real;
               th, compteur, "", Val_Hz, Int32(idle),
               Float64(delay), Float64(freq), Float64(duty)))
 end
+
+"""
+    add_co_pulse_ticks(th, compteur, source; low_ticks, high_ticks, initial_delay=2, idle=Val_Low)
+
+Train d'impulsions compté en fronts de `source` (une horloge, par exemple
+celle de l'AO) : `initial_delay` fronts à l'état de repos, puis `high_ticks`
+haut et `low_ticks` bas, en boucle. Chaque durée vaut au moins 2 fronts.
+"""
+function add_co_pulse_ticks(th, compteur::AbstractString, source::AbstractString;
+                            low_ticks::Integer, high_ticks::Integer, initial_delay::Integer = 2, idle = Val_Low)
+    chk(ccall((:DAQmxCreateCOPulseChanTicks, LIB), Int32,
+              (TaskHandle, Cstring, Cstring, Cstring, Int32, Int32, Int32, Int32),
+              th, compteur, "", source, Int32(idle), Int32(initial_delay), Int32(low_ticks), Int32(high_ticks)))
+end
+
+"""Borne de sortie (PFI) des impulsions d'un compteur : `/X6321/PFI13`, par exemple."""
+set_co_pulse_term(th, terminal::AbstractString) =
+    chk(ccall((:DAQmxSetCOPulseTerm, LIB), Int32, (TaskHandle, Cstring, Cstring), th, "", terminal))
 
 """Nombre d'impulsions à produire (mode fini) pour une tâche compteur."""
 cfg_implicit_timing(th, mode, nsamp::Integer) =

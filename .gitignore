@@ -20,7 +20,6 @@ dist/
 # Manifest.toml
 
 # Binary data
-*.sdt
 *.raw
 
 # Legacy runtime state (now stored in ~/.flimapp, never in the repo)

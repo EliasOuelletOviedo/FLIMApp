@@ -41,8 +41,8 @@ FLIMApp/
 │   ├── protocol.jl             # Protocol schedule math
 │   ├── plotting.jl             # Plot-axis autoscaling and plot-series lookup
 │   ├── lifetime_analysis.jl   # Lifetime fitting algorithms (MLE), IRF loading
-│   ├── acquisition.jl          # Playback/Realtime/Save acquisition worker tasks
-│   ├── session_save.jl         # Realtime-capture session saving (.jls + CSV)
+│   ├── acquisition.jl          # Realtime/Playback analysis worker (one pass per scan)
+│   ├── session.jl              # Sessions: run.toml, read back for Playback, simulated sessions
 │   ├── runtime.jl              # Background task lifecycle (start/pause/stop)
 │   ├── protocol_popup.jl       # Protocol popup UI
 │   ├── roi_popup.jl            # ROI popup UI (shell; ROI reading not wired in yet)
@@ -53,7 +53,6 @@ FLIMApp/
 │   ├── handlers.jl             # Event handler orchestrator
 │   ├── GUI.jl                  # Makie GUI construction
 │   ├── io/
-│   │   ├── SdtFile.jl          # SDT block parser; used by lifetime_analysis.jl's read_sdt_frame
 │   │   ├── DAQmx.jl            # Minimal NI-DAQmx bindings (ccall on nicaiu); used by daq.jl
 │   │   └── ImageJROI.jl        # WIP: ImageJ ROI reader (not yet wired in)
 │   ├── spc/                    # FLIMCore: SPC-150N engine (see "SPC-150N cards" below)
@@ -62,10 +61,10 @@ FLIMApp/
 │   ├── bench.toml              # NI wiring, timing, limits, journal
 │   └── spc.toml                # SPC-150N settings (replaces reglages_spc.jl)
 ├── scripts/spc/                # imagerie.jl, single.jl: FLIMCore launchers (replace the bench scripts)
+├── scripts/simulate_session.jl # a simulated session for Playback
 ├── test/
 │   ├── runtests.jl             # Test suite (run with `Pkg.test()`)
 │   └── test_flimcore.jl        # FLIMCore tests (also runnable alone: julia -t 4 test/test_flimcore.jl)
-├── scripts/analysis/           # Ad-hoc profiling/benchmark/spike scripts (not run by CI)
 ├── build/
 │   ├── create_app.jl           # Standalone executable build (PackageCompiler)
 │   └── precompile_app.jl       # Precompile workload for the app build
@@ -74,7 +73,7 @@ FLIMApp/
 └── README.md                   # This file
 ```
 
-Runtime state (saved settings, IRF/data-folder path caches) lives outside
+Runtime state (saved settings, the imported IRF, IRF/session path caches) lives outside
 the repository in `~/.flimapp/`, so running the app never dirties the git
 working tree.
 
@@ -130,11 +129,34 @@ The build takes tens of minutes and bundles Julia + all libraries
 
 ### Initial Setup
 
-1. **Load IRF**: On first run, you'll be prompted to select a .sdt file containing the Instrument Response Function. This is cached for future sessions.
+1. **Load IRF**: On first run, you'll be prompted to select the IRF: the
+   `.sdt` of a Single measurement saved by SPCM (one decay, or two for two
+   channels, ordered by the cards' serial numbers). It is imported once —
+   median background removed, summed down to 256 channels — and kept as
+   `~/.flimapp/irf.csv` (`time_ns,ch1[,ch2]`), with `irf.toml`, the
+   settings it was taken with. Each channel is fitted against its own IRF
+   (a single-channel IRF serves both). **An IRF taken with other settings is
+   refused**, at import and at every Realtime START: the card (serial
+   number), the TAC (range, gain, offset, limits), the CFD and SYNC
+   thresholds — read back from the cards at their last check, as
+   `[spc_module]` requests them otherwise — and the detector gains declared
+   in `[dcc]` (the transit time changes with the high voltage, which the
+   app can't read: keep `[dcc]` up to date). The IRF button imports another
+   one and loads it right away (at the next START during a run).
 
-2. **Select Data**: Use the "Folder path" button to specify where measurement .sdt files are located.
+2. **Recording folder**: the second path field is where everything is
+   recorded (`[enregistrement] dossier` in `config/spc.toml`, rewritten by
+   its button): the sessions in its `sessions/`, the SPC window's
+   acquisitions next to them. The raw stream takes 4 bytes per photon and
+   per card: at 1 Mcps on two cards, about 8 MB/s, 29 GB/h. The free space
+   is checked at start-up and shown in the status line (in the top bar's
+   banner below an hour of recording); START refuses the Realtime mode
+   below 10 minutes.
 
-3. **Configure Layout**: Use the Layout panel to adjust:
+3. **Session to replay**: the third path field picks the session Playback
+   replays (see "Playback" below).
+
+4. **Configure Layout**: Use the Layout panel to adjust:
    - **Time range**: Duration of display window (seconds)
    - **Binning**: Number of frames to sum together
    - **Plot selection**: Choose what quantities to display
@@ -195,18 +217,122 @@ imagerie_photons.jl and histogrammes_single.jl (same outputs);
 acquisition without the cards. `SPC_REGLAGES=<file>` points them to another
 settings file.
 
-## File Format
+## Realtime acquisition (START, mode Realtime)
 
-### .sdt Files (Becker & Hickl)
+The photons come straight from the SPC-150N cards' FIFO; no file is read and
+nothing depends on a software deadline. START requires the DAQ loop READY
+(the app tries CONNECT at launch) and the SPC engine ready, then runs three
+parts together until STOP or until one of them stops (DAQ fault, SPC error):
 
-Binary format for time-correlated single photon counting (TCSPC) data. The application reads:
-- Raw photon count histograms
-- Time resolution information
-- Multi-channel recording data
+- the **DAQ loop** plays slots of `Scan time` then `Shift time` (Protocol
+  panel), all on the AO sample clock:
+  - the **routing code** on P0.4–P0.7: during each scan, the ROI's code;
+    while the galvos move, during the pause and the entry, the reserved
+    code ("hors ROI"), whose photons are thrown away when the stream is
+    decoded. In FIFO mode, that does what CNTE did, without a line: the
+    cards' CNTE (pin 14) is no longer used, and P0.2/P0.3 keep their
+    sequence and ROI pulses;
+  - the **pass signal**: a 6321 counter (`channels.passes`, ctr1, out on
+    PFI13 = CTR 1 OUT by default) clocked by the same sample clock, high
+    during each scan. One TTL output feeds four inputs, M0 and M3 of both
+    cards, with a common ground (D GND, pin 15): the rising edge is M0
+    (start of pass), the falling edge M3 (end of pass) — `routing_mode =
+    0x1900`, set by the engine.
+- the **SPC engine** measures in FIFO mode (`[clamp]` in `config/spc.toml`,
+  256 channels by default) and cuts each card's photon stream into passes
+  at the markers the card itself time-stamped: a late read only fills the
+  card's FIFO. A pass is shown but **kept out of the PI** when a record
+  carries the loss flag (GAP), when `SPC_FOVFL` appears during it, or when
+  M3 − M0 is off the programmed scan by more than one AO sample and 100 ppm
+  (a lost or extra marker). The cards' passes are paired by their start
+  times (each card's clock starts at its own instant and drifts); a pass
+  without its partner on the other card is dropped. Cards are identified by
+  serial number at start-up (`[verification] series`: 3N0317 = channel 1,
+  3N0318 = channel 2), whatever their module numbers.
+- the **analysis worker** fits each pass, per ROI and per channel (binning
+  window and Kalman observer per ROI and channel), and runs **one PI per
+  ROI**: the DAQ loop writes each ROI's own commands during that ROI's
+  scans.
 
-The reader (`read_sdt_frame` in `lifetime_analysis.jl`) delegates header/block
-parsing to the `SdtFile` module (`src/io/SdtFile.jl`), which handles both
-compressed (ZIP) and uncompressed formats.
+**ROI off** (or no ROI drawn): the galvos stay still and the slots keep the
+same scan/pause rhythm; the routing lines carry code 1 during the scans
+(the whole field) and the reserved code during the pauses; each pass gives
+one histogram of every photon.
+
+**ROI on**: the galvos scan the ROIs, one per slot, and P0.4–P0.7 carry the
+ROI's routing code: its drawn index `c` (1–15). The cards' routing inputs
+are active low, so the NI writes NOT(c) and the card reads `c`
+(`inverser_routage = true` in `config/spc.toml`). Code 0 — what the card
+reads when nothing drives the lines — is reserved: at most **15 ROIs**, and
+a loose cable doesn't send photons into a real ROI. Each pass's ROI is the
+code its photons carry.
+
+**ROI popup**: the **Image ×100** button acquires 100 frames with the
+scanner's line and frame clocks (as imagerie_photons.jl did), at the fixed
+geometry of `[imagerie]` (1024 pixels per line × 1024, 512, 256 or 128
+lines; `temps_pixel_ns`, `decalage_pixels`/`decalage_lignes` =
+scan_borders). A menu picks **Channel 1** (default, the FLIM channel),
+**Channel 2** or **Sum**. The lifetime overlay is a **preview** (each
+pixel's mean arrival time minus the IRF's center, pixels under *Min
+photons* masked), meant to place ROIs; each ROI drawn, imported or
+segmented gets its lifetime fitted on its own decay, rebuilt from the raw
+photon stream. Both cards see the same pixels, so a ROI holds for both
+channels; the session records the channel its fit used.
+
+## Playback (START, mode "Playback: session" or "Playback: current")
+
+Every Realtime run is a session, under `<recording folder>/sessions/`:
+besides `run.toml`, `frames.csv` and the DAQ files, `spc/` holds each
+card's FIFO stream (`<serial>.spc`), its `_acquisition.ini` and the
+parameters read back from it (`_parametres.ini`), and `irf.csv`/`irf.toml`
+the IRF. Playback replays a session through the same SPC engine (its own
+instance, never the cards) and the same analysis, with the session's ROIs,
+visiting order, IRF and calibration:
+
+- **Playback: session** (default) also reapplies the session's layout
+  (binning, Kalman), gains and protocol, to reproduce what happened; editing
+  the panels doesn't change the replay.
+- **Playback: current** uses the current settings instead, edits applying
+  live, to try another binning or Kalman.
+- The **PI outputs are simulated**: computed and plotted ("Command —
+  simulated (Playback)"), never sent to the DAQ — the recorded stimulation
+  doesn't change, so other gains can't show their effect on the cells.
+- **Speed**: the frequency box (next to the frame rate) is the target pass
+  rate in Hz; 0 replays at the experiment's own pace (1×).
+
+Pick the session with the third folder button, choose the mode, START. It
+works on a laptop. Each replay is journaled as `<date>_playback` in the
+sessions folder.
+
+**Simulated session**: `julia --project -t 4,1 scripts/simulate_session.jl
+[folder] [duration_s]` writes one in the format of a real acquisition
+(written by the SPC engine itself: three ROIs, two cards), by default in
+`<recording folder>/sessions/simulation_<date>`.
+
+**Without the hardware**: on a computer without the NI-DAQmx driver or the
+SPC DLL, the app starts offline — no connection attempt, no fault —, a
+banner in the top bar says so, START refuses the Realtime mode and Playback
+stays available. On the bench PC, a failed DAQ connection shows "DAQ:
+connection failed" and the button becomes **RECONNECT**.
+
+## Files written
+
+Everything is written during the run, into the session folder: a crash or
+a forgotten click loses nothing, and there is no save dialog.
+
+- **SPC acquisitions** (the recording folder, `~/FLIMApp_spc/` by default):
+  see "SPC-150N cards" above.
+- **Sessions** (`<recording folder>/sessions/<date>/`): `run.toml` (mode,
+  code versions — FLIMApp version and git commit, FLIMCore, SPCLite, Julia —,
+  ROIs with their routing codes and fitted channel, the pixel → galvo
+  calibration, `[spc_module]` and the declared `[dcc]`, the DAQ's sample
+  rate and programmed scan, layout, protocol and controller settings),
+  `irf.csv` and `irf.toml`, `log.txt`, `frames.csv` (one line per analyzed
+  pass: pass number and card times, ROI, setpoint, lifetimes, Kalman
+  estimates, PI outputs, why it was kept out of the PI), `visits.csv` and
+  `readback.bin` (the DAQ loop's slots), and `spc/` (the cards' streams,
+  Realtime only).
+- **Journal** (`~/FLIMApp_journal/app.log`): events outside any run.
 
 ## Architecture
 
@@ -222,7 +348,7 @@ module FLIMApp
         ↓
     lifetime_analysis.jl
         ↓
-    acquisition.jl   session_save.jl
+    acquisition.jl   session.jl
         ↓
     runtime.jl
         ↓
@@ -253,7 +379,7 @@ Core data structures:
 - **AppRun**: Runtime state with observables for reactive GUI updates
 
 #### `lifetime_analysis.jl`
-Maximum Likelihood Estimation fitting for fluorescence decay, plus IRF/.sdt loading:
+Maximum Likelihood Estimation fitting for fluorescence decay, plus IRF import (`.sdt` of a Single, one or two channels, kept as CSV) and one fit context per channel:
 - Single to 4-exponential decay models
 - IRF shift/delay compensation
 - Convolution with photon transport
@@ -274,14 +400,10 @@ Experimental protocol schedule math: converting the protocol UI's times/setpoint
 Plot-axis autoscaling and plot-series lookup, shared by `runtime.jl` and `GUI.jl`.
 
 #### `acquisition.jl`
-Playback/Realtime/Save acquisition worker tasks:
-- Sliding-window histogram binning
-- Lifetime fitting dispatch (full vs. partial fit)
-- PID command computation
-- Each mode is a thin wrapper around the shared `run_acquisition_loop!` core
-
-#### `session_save.jl`
-Saves a completed Realtime capture session (serialized `.jls` + companion CSV exports).
+The Realtime and Playback analysis worker (`start_realtime`):
+- Takes the SPC engine's passes (`FLIMCore.HistoClamp`, one per scan, cut at the cards' M0/M3 markers)
+- Finds each pass's ROI from the routing code its photons carry (`pass_roi`)
+- Per ROI and channel: sliding-window binning, MLE lifetime fit, Kalman observer; one PI per ROI
 
 #### `runtime.jl`
 Background task lifecycle:
@@ -305,7 +427,7 @@ Startup
   ↓
 Load/create AppState
   ↓
-Load IRF (user selects .sdt file)
+Load IRF (~/.flimapp/irf.csv, imported from the .sdt of a Single)
   ↓
 Create GUI ← AppState determines panel/theme
   ↓
@@ -315,9 +437,9 @@ Block on display (event loop)
   ↓
 On button press → start_pressed()
   ↓
-Launch worker (acquisition.jl) + consumer + command-output + infos tasks
+SPC engine (Clamp) + DAQ loop slots + analysis worker (acquisition.jl)
   ↓
-Worker reads .sdt iteratively, fits lifetimes, sends to channel
+Worker takes one pass per scan, fits lifetimes per ROI and channel, one PI per ROI
   ↓
 Consumer updates Observables → Plots update reactively
   ↓
@@ -328,10 +450,9 @@ Save AppState on exit
 
 ## Configuration
 
-The data folder is normally picked in the GUI ("Folder path" button) and
-remembered across sessions. Before a folder has been picked, the fallback
-is the `FLIM_DATA_PATH` environment variable when set, otherwise
-`~/FLIMApp_data`.
+The SPC-150N settings, the Realtime histogram resolution, the routing
+inversion and the SPC data folder live in `config/spc.toml`; the NI wiring
+(pass counter) and timing in `config/bench.toml`.
 
 Physics constants and themes live in `src/config.jl`:
 
@@ -385,7 +506,7 @@ AppRun
 
 ```julia
 get_irf()::Matrix{Float64}
-    Load Instrument Response Function from cached .sdt file.
+    Load the Instrument Response Function from the cached CSV (load_irf).
 
 vec_to_lifetime(x::Vector; kwargs)::Tuple{Vector, Vector{Vector}}
     Fit lifetime parameters to photon histogram.
@@ -402,12 +523,22 @@ connect_daq()::Union{DaqSession, Nothing}
 
 ## Troubleshooting
 
-### "IRF filepath does not exist"
-The cached IRF path is invalid. Select a new .sdt file when prompted.
+### "IRF filepath does not exist" / "IRF unreadable" / "IRF refused"
+Pick the `.sdt` of a Single measurement of the IRF with the IRF button. It
+must be taken with the settings the cards measure with (TAC, CFD and SYNC
+thresholds, the same cards) and the detector gains declared in `[dcc]`;
+the log lists every difference.
 
-### "No .sdt files found"
-Pick the folder containing your .sdt files with the "Folder path" button
-(or set the `FLIM_DATA_PATH` environment variable before launching).
+### START does nothing
+The info label says why: offline, IRF missing or taken with other
+settings, recording folder nearly full, DAQ not ready (CONNECT, RECONNECT,
+or RESET after a fault), SPC engine not running (SPC window, CONNECT) or
+busy, or more than 15 ROIs.
+
+### Checking the pass signal's wiring
+Cable everything, then run test_spc4 with `module_no = 0`, then 1: 200
+markers on M0 and 200 on M3 for each card, with the common ground (D GND,
+pin 15).
 
 ### Fitting returns NaN values
 - Photon count too low (< 100 counts)
@@ -424,7 +555,7 @@ Pick the folder containing your .sdt files with the "Folder path" button
 1. **Bajzer et al. 1991** - Maximum likelihood method for the analysis of free-induction-decay signals
 2. **Maus et al. 2001** - Quantitative analysis of biexponential-decay fluorescence at high photon count rates
 3. **Enderlein 1997** - Fast tracking of fluorescence intensity variations in cells and in vitro
-4. **Becker & Hickl** - SDT data format specification
+4. **Becker & Hickl** - SPCM DLL manual (histogram mode, routing, FIFO format)
 
 ## License
 

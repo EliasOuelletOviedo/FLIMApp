@@ -1,364 +1,74 @@
 """
 roi_popup.jl
 
-ROI popup: import a FLIM image from an .sdt file, import ROIs from ImageJ
-.roi/.zip files (via ImageJROI.jl), display both on `image_axis`, and clear
-the imported ROI overlays on demand.
+ROI popup: acquire an image with the SPC-150N (the "Image" button: 100
+frames with the scanner clocks, FLIMCore's `Imagerie`, the same rangement as
+imagerie_photons.jl), draw ROIs on it by hand, import them from ImageJ
+.roi/.zip files (via ImageJROI.jl) or segment them with Cellpose, and fit
+each ROI's lifetime on its own decay, rebuilt from the image's raw photon
+stream.
 """
 
-"""
-Fraction of the image's total intensity a row parity (all odd- or all
-even-indexed rows) may carry and still be considered "padding" in
-`collapse_padded_rows`. Real SDT files don't zero out the padded parity
-exactly — dark counts/crosstalk leak a little signal in — so an exact
-`== 0` check never fires; on a real 1024x512-scanned file the padded
-parity carried ~0.55% of the total intensity (54803 vs 9854174 counts),
-well under this threshold, while a genuine full-height scan has real
-signal split across both parities (nowhere near this small).
-"""
-const PADDED_ROW_ENERGY_FRACTION = 0.05
+"""The Image button's label (it acquires `ROI_IMAGE_FRAMES` frames, gui/spc_view.jl)."""
+const IMAGE_BUTTON_LABEL = "Image ×$(ROI_IMAGE_FRAMES)"
 
 """
-    padded_row_keep_range(image::Matrix{Float64})::AbstractVector{Int}
-
-Row indices (into dim 2 of `image`) that `collapse_padded_rows` would keep
-— exposed separately so the same row selection can also be applied to the
-raw per-pixel time-bin volume (see `extract_sdt_volume`), keeping the
-displayed image and the data used for ROI lifetime fitting in sync.
+Colorbar label of the popup's lifetime map: a preview to place ROIs — each
+pixel's mean arrival time minus the IRF's (`pixel_lifetime_map`), not a fit.
 """
-function padded_row_keep_range(image::Matrix{Float64})::AbstractVector{Int}
-    n_rows = size(image, 2)
-    n_rows < 2 && return 1:n_rows
+const LIFETIME_PREVIEW_LABEL = "preview: mean time − IRF center [ns]"
 
-    odd_total  = sum(@view image[:, 1:2:n_rows])
-    even_total = sum(@view image[:, 2:2:n_rows])
-    total = odd_total + even_total
-    total == 0 && return 1:n_rows
+"""Channel menu of the ROI popup: which card(s) the image shows (canal 1 is the FLIM channel)."""
+const ROI_IMAGE_CHANNELS = ["Channel 1", "Channel 2", "Sum"]
 
-    if even_total / total < PADDED_ROW_ENERGY_FRACTION
-        return 1:2:n_rows
-    elseif odd_total / total < PADDED_ROW_ENERGY_FRACTION
-        return 2:2:n_rows
-    else
-        return 1:n_rows
-    end
+"""
+    RoiImage
+
+The image the ROIs are drawn on: one channel's `ImageSomme` — or both
+channels summed (`channel == 0`) —, with `intensity` and `sum_t` (summed
+arrival times, ns) in FLIMApp's `(x, y)` = (pixel, line) convention, and
+each card's raw photon stream (`streams`), which rebuilds any group of
+pixels' decay (`roi_histograms`).
+"""
+struct RoiImage
+    intensity::Matrix{Float64}
+    sum_t::Matrix{Float64}
+    streams::Vector{FLIMCore.ImageSomme}
+    channel::Int
+    cards::Vector{Int}
+    frames::Int
+end
+
+RoiImage(img::FLIMCore.ImageSomme) = RoiImage([img], img.canal)
+
+function RoiImage(parts::Vector{FLIMCore.ImageSomme}, channel::Integer)
+    isempty(parts) && error("RoiImage: no card image")
+    all(p -> size(p.intensite) == size(parts[1].intensite), parts) || error("RoiImage: card images of different sizes")
+    intensity = permutedims(Float64.(reduce(+, (p.intensite for p in parts))))
+    sum_t = permutedims(reduce(+, (p.somme_t for p in parts)))
+    return RoiImage(intensity, sum_t, parts, Int(channel), [p.carte for p in parts], minimum(p.trames for p in parts))
 end
 
 """
-    active_bounding_box(intensity::Matrix{Float64})::Tuple{UnitRange{Int}, UnitRange{Int}}
+    roi_image_parts(parts, choice)::Vector{FLIMCore.ImageSomme}
 
-`(x_range, y_range)`, each `1:n`, covering the smallest top-left-anchored
-rectangle holding essentially all of `intensity`'s total — a *different*
-padding pattern than `padded_row_keep_range`'s interleaved rows: some real
-acquisitions from this lab store a smaller true scan inside a larger fixed
-buffer as one contiguous block (e.g. a real 2048x2048-stored file whose
-actual content occupied only columns 1:1062, rows 1:1048 — confirmed on a
-real file: *exactly* zero beyond that box, 100% of the total intensity
-inside it), rather than interleaving real/padding rows throughout. Both
-patterns are independent and real; `extract_sdt_image_streamed!` applies
-this crop first, then still checks the cropped region for interleaving.
-
-A column/row is "active" if its sum exceeds `PADDED_ROW_ENERGY_FRACTION` of
-the mean sum among all nonzero columns/rows (same threshold constant as
-`padded_row_keep_range`, applied per-row/column here instead of per-parity
-— the two observed real cases are both cleanly separated by orders of
-magnitude, so this doesn't need to be more precise than that). Assumes the
-active region starts at index 1 in both axes (true of every real case seen
-so far); returns the full range unchanged if nothing looks padded.
+The card images behind the popup's channel menu (`ROI_IMAGE_CHANNELS`):
+"Channel i" is the card whose serial number is i-th in `[verification]
+series` (`ImageSomme.canal`) — the i-th card by module number when no card
+is identified —, "Sum" every card. Empty when that channel has no image.
 """
-function active_bounding_box(intensity::Matrix{Float64})::Tuple{UnitRange{Int}, UnitRange{Int}}
-    n_cols, n_rows = size(intensity)
-    col_sums = vec(sum(intensity; dims=2))
-    row_sums = vec(sum(intensity; dims=1))
-
-    function active_extent(sums::Vector{Float64})
-        n = length(sums)
-        nonzero = filter(>(0), sums)
-        isempty(nonzero) && return n
-        threshold = PADDED_ROW_ENERGY_FRACTION * (sum(nonzero) / length(nonzero))
-        hi = findlast(>(threshold), sums)
-        return hi === nothing ? n : hi
-    end
-
-    return (1:active_extent(col_sums), 1:active_extent(row_sums))
+function roi_image_parts(parts::AbstractDict{Int, FLIMCore.ImageSomme}, choice::AbstractString)::Vector{FLIMCore.ImageSomme}
+    sorted = [parts[k] for k in sort!(collect(keys(parts)))]
+    choice == "Sum" && return sorted
+    channel = choice == "Channel 2" ? 2 : 1
+    by_serial = filter(p -> p.canal == channel, sorted)
+    !isempty(by_serial) && return by_serial
+    any(p -> p.canal > 0, sorted) && return FLIMCore.ImageSomme[]
+    return channel <= length(sorted) ? [sorted[channel]] : FLIMCore.ImageSomme[]
 end
 
-"""
-    collapse_padded_rows(image::Matrix{Float64})::Matrix{Float64}
-
-Some SDT acquisitions record at half the vertical resolution (e.g. a real
-1024x512 scan) but still fill the full square stored buffer (see
-`extract_sdt_volume`'s `isqrt(n_pixels)`-inferred width — this lab's setup
-always stores width == height), padding every other row (`image[:, y]`)
-with near-zero filler. A genuine full-height acquisition (e.g. a real
-1024x1024 scan) has no such gap: real signal lands in both odd- and
-even-indexed rows.
-
-Distinguish the two by comparing each row parity's share of the image's
-total intensity: if one parity holds less than `PADDED_ROW_ENERGY_FRACTION`
-of the total, it's padding and only the other parity is kept (halving the
-height back to the true resolution); otherwise both parities carry real
-signal and the image is returned unchanged. See `padded_row_keep_range` for
-the underlying row selection.
-"""
-function collapse_padded_rows(image::Matrix{Float64})::Matrix{Float64}
-    return image[:, padded_row_keep_range(image)]
-end
-
-"""
-    extract_sdt_volume(sdt::SdtFile.SdtData)::Union{Nothing, Array{Float64,3}}
-
-Build the raw per-pixel time-bin volume `(width, height, bins)` — i.e.
-`volume[x, y, :]` is pixel `(x, y)`'s own 256-bin TCSPC histogram — from an
-SDT file's first data block, or `nothing` if that block isn't image data (a
-plain histogram block is 1D). Same `(x, y)` axis convention and pixel
-reshape as `extract_sdt_image`, but without summing over bins or trimming
-padded rows (see `extract_sdt_image_and_volume`, which does both and keeps
-this volume in sync with the displayed image).
-
-For the `(n_pixels, adc_re)` per-pixel-vector layout (2D branch — what this
-lab's own acquisitions actually produce, since their `MeasureInfo.scan_x`/
-`scan_y` read back as 0 and `image_x`/`image_y` are unreliable, e.g. a real
-2048x2048 scan's own `image_x`/`image_y` metadata read `1062`/`1062`,
-matching neither the true width nor the pixel count), the width is inferred
-as `isqrt(n_pixels)`, not assumed fixed: this lab's setup always stores a
-*square* raw buffer regardless of the true scanned height (see
-`collapse_padded_rows` for the shorter-real-scan case, which pads out to
-that same square shape rather than storing a non-square buffer directly),
-so `n_pixels` is the square of the real stored width for every file from
-this setup — 1024x1024, 2048x2048, or any other size, not just 1024. Falls
-back to `nothing` (rather than guessing) when `n_pixels` isn't a perfect
-square.
-"""
-function extract_sdt_volume(sdt::SdtFile.SdtData)::Union{Nothing, Array{Float64,3}}
-    isempty(sdt.data) && return nothing
-    block = sdt.data[1]
-
-    if ndims(block) == 3
-        return permutedims(Float64.(block), (2, 1, 3))
-    elseif ndims(block) == 2
-        n_pixels, n_bins = size(block)
-        width = isqrt(n_pixels)
-        width * width == n_pixels || return nothing
-        return Float64.(reshape(block, width, width, n_bins))
-    else
-        return nothing
-    end
-end
-
-"""
-    extract_sdt_image_and_volume(sdt::SdtFile.SdtData)::Tuple{Union{Nothing,Matrix{Float64}}, Union{Nothing,Array{Float64,3}}}
-
-`(image, volume)` pair built from the same reshape, with `collapse_padded_rows`'s
-row selection applied to both — `image` is `sum(volume; dims=3)` after
-trimming, so `volume[x, y, :]` always corresponds to the exact pixel
-`image[x, y]` was summed from. `(nothing, nothing)` if the block isn't
-image data.
-"""
-function extract_sdt_image_and_volume(sdt::SdtFile.SdtData)::Tuple{Union{Nothing, Matrix{Float64}}, Union{Nothing, Array{Float64,3}}}
-    volume = extract_sdt_volume(sdt)
-    volume === nothing && return nothing, nothing
-
-    image = dropdims(sum(volume; dims=3); dims=3)
-    keep = padded_row_keep_range(image)
-    return image[:, keep], volume[:, keep, :]
-end
-
-"""
-    extract_sdt_image(sdt::SdtFile.SdtData)::Union{Nothing, Matrix{Float64}}
-
-Build a 2D intensity image (summed over the time-bin axis) from an SDT
-file's first data block, or `nothing` if that block isn't image data (a
-plain histogram block is 1D). Returned as `(width, height)`, i.e.
-`image[x, y]` — Makie's native `heatmap!` convention (dim 1 -> x-axis) —
-with padded rows collapsed out (see `collapse_padded_rows`).
-
-Handles both shapes `SdtFile.compute_shape` can produce for an image:
-- 2D `(n_pixels, adc_re)` — one contiguous time-bin vector per pixel, no
-  (trustworthy) spatial metadata — which is what this lab's own `.sdt`
-  files actually contain (`scan_x`/`scan_y` read back as 0, `image_x`/
-  `image_y` don't reliably match the real pixel count). Reshaped to
-  `(isqrt(n_pixels), isqrt(n_pixels), adc_re)` (see `extract_sdt_volume`
-  for why this lab's setup always stores a square buffer) and summed over
-  the time-bin axis, matching the reshape used to reconstruct the image
-  from raw pixel vectors: `reshape(pixels, width, height, bins)` then
-  `sum(dims=3)`.
-- 3D `(scan_y, scan_x, adc_re)`, when the file's `scan_x`/`scan_y` metadata
-  is populated; summed over the time-bin axis and transposed to the
-  `(x, y)` convention above.
-"""
-function extract_sdt_image(sdt::SdtFile.SdtData)::Union{Nothing, Matrix{Float64}}
-    return first(extract_sdt_image_and_volume(sdt))
-end
-
-"""
-    ROW_STREAM_CHUNK_BYTES::Int
-
-Output chunk size for `raw_inflate_stream` calls in `extract_sdt_image_streamed`
-below — large enough (a few MiB) that a ~2GB decompression completes in
-under a second (measured), small enough that peak memory for the
-decompression itself stays negligible next to the final extracted volume.
-"""
-const ROW_STREAM_CHUNK_BYTES = 8 * 1024 * 1024
-
-"""
-    stream_stored_rows(f::Function, compressed_bytes, stored_width::Int, adc_re::Int)::Bool
-
-Decompress `compressed_bytes` (one SDT IMG block's raw DEFLATE payload, see
-`SdtFile.locate_first_data_block`) and call `f(y, row_u16)` once per stored
-row, in order, where `row_u16` is a `reshape`d `(adc_re, stored_width)`
-view — `row_u16[:, x]` is pixel `(x, y)`'s own `adc_re`-bin histogram — for
-row `y` of the `stored_width`-wide raw buffer. `f`'s `row_u16` view is only
-valid for the duration of that call (backed by a reused buffer). Returns
-`raw_inflate_stream`'s own success flag.
-
-Shared by `extract_sdt_image_streamed`'s two passes (summed-intensity, then
-full-volume extraction) so the row-framing/buffering logic — the part with
-real off-by-one risk — exists once, not twice.
-"""
-function stream_stored_rows(f::Function, compressed_bytes, stored_width::Int, adc_re::Int)::Bool
-    row_bytes = stored_width * adc_re * sizeof(UInt16)
-    buf = UInt8[]
-    pos = Ref(1)     # 1-based index of the first unread byte in buf
-    y = Ref(1)
-
-    return SdtFile.raw_inflate_stream(compressed_bytes, ROW_STREAM_CHUNK_BYTES) do chunk
-        append!(buf, chunk)
-        while length(buf) - pos[] + 1 >= row_bytes && y[] <= stored_width
-            row_u16 = reshape(reinterpret(UInt16, view(buf, pos[]:pos[]+row_bytes-1)), adc_re, stored_width)
-            f(y[], row_u16)
-            pos[] += row_bytes
-            y[] += 1
-        end
-        # Compact only once the unread tail grows large, not on every row —
-        # an O(n) shift on every one of `stored_width` rows would dominate
-        # runtime for no benefit (the unread tail between rows is always
-        # under one row's worth of bytes already).
-        if pos[] > 8 * ROW_STREAM_CHUNK_BYTES
-            deleteat!(buf, 1:pos[]-1)
-            pos[] = 1
-        end
-    end
-end
-
-"""
-    extract_sdt_image_streamed(filepath::AbstractString)::Tuple{Union{Nothing,Matrix{Float64}}, Union{Nothing,Array{Float64,3}}}
-
-Memory-bounded equivalent of `extract_sdt_image_and_volume(SdtFile.read_sdt(...))`
-for a large compressed IMG block: `read_sdt` decompresses the *entire*
-block into one buffer up front (hundreds of MB to several GB — for a real
-2048x2048x256 file, ~2GB just for that buffer, then *another* ~8GB to
-convert it to `Float64`, on top of whatever the padding this lab's setup
-can store around the true content — enough together to exhaust an 8GB
-machine's RAM well before the padding is even trimmed off). This instead:
-
-1. Locates the block's raw DEFLATE payload without decompressing it
-   (`SdtFile.locate_first_data_block`).
-2. **Pass 1**: streams it once (`stream_stored_rows`), row by row, summing
-   each pixel's bins into a `(stored_width, stored_width)` intensity image
-   — the *only* thing held for the full stored buffer, a few tens of MB
-   regardless of `adc_re`. From it, determines the true content region:
-   `active_bounding_box` for the contiguous-block padding pattern (a
-   smaller real scan stored inside a larger fixed buffer), then
-   `padded_row_keep_range` on the cropped image for the interleaved-row
-   pattern (`collapse_padded_rows`'s own case) within it — the two are
-   independent and both are checked.
-3. **Pass 2**: streams the *same* payload again (decompression is fast —
-   under a second for ~2GB measured — so re-decompressing rather than
-   buffering pass 1's rows until the crop is known is the simpler, still
-   cheap choice), this time keeping only the identified rows/columns,
-   building the final `(kept_width, kept_height, adc_re)` `Float64` volume
-   directly at its true size — for the file this was written against,
-   ~2.3GB, in line with what an ordinary already-supported 1024x1024 file
-   needs, not the ~10GB the naive full-buffer path would have required.
-
-Falls back to `(nothing, nothing)` wherever `extract_sdt_volume` would:
-the block isn't compressed 2D image data, or its pixel count isn't a
-perfect square (see that function's docstring). Also returns `(nothing,
-nothing)` — logging why via `@warn` — if the file can't be read/located,
-since unlike `extract_sdt_volume` this does its own file I/O.
-"""
-function extract_sdt_image_streamed(filepath::AbstractString)::Tuple{Union{Nothing, Matrix{Float64}}, Union{Nothing, Array{Float64,3}}}
-    b = try
-        read(filepath)
-    catch e
-        @warn "Failed to read SDT file" path=filepath error=string(e)
-        return nothing, nothing
-    end
-
-    loc = SdtFile.locate_first_data_block(b)
-    if loc === nothing
-        @warn "SDT file has no readable data block" path=filepath
-        return nothing, nothing
-    end
-
-    if !loc.compressed || loc.dtype != UInt16 || loc.adc_re == 0 || (loc.scan_x > 0 && loc.scan_y > 0)
-        # Uncompressed (or non-image) blocks aren't the memory problem this
-        # function exists for — already at their final size in the file,
-        # nothing to stream-decompress. A populated scan_x/scan_y means
-        # SdtFile.compute_shape would pick its 3D (scan_y, scan_x, adc_re)
-        # shape, not the flat 2D pixel-list one this function only handles
-        # (real files from this lab's own setup never hit this — scan_x/
-        # scan_y read back 0 — so it's untested territory; falling back
-        # avoids silently mis-shaping it instead). Either way, fall back to
-        # the simple, existing path.
-        sdt = try
-            SdtFile.read_sdt(b, basename(filepath))
-        catch e
-            @warn "Failed to read SDT file" path=filepath error=string(e)
-            return nothing, nothing
-        end
-        return extract_sdt_image_and_volume(sdt)
-    end
-
-    n_pixels = loc.dsize ÷ loc.adc_re
-    stored_width = isqrt(n_pixels)
-    if stored_width * stored_width != n_pixels
-        @warn "SDT image pixel count is not a perfect square; cannot infer stored width" path=filepath n_pixels=n_pixels
-        return nothing, nothing
-    end
-    adc_re = loc.adc_re
-
-    # Pass 1: cheap (stored_width, stored_width) summed-intensity image.
-    intensity = zeros(Float64, stored_width, stored_width)
-    ok1 = stream_stored_rows(loc.bytes, stored_width, adc_re) do y, row_u16
-        @views intensity[:, y] .= vec(sum(Float64, row_u16; dims=1))
-    end
-    if !ok1
-        @warn "Failed to decompress SDT image data (pass 1/2)" path=filepath
-        return nothing, nothing
-    end
-
-    x_range, y_range = active_bounding_box(intensity)
-    cropped = intensity[x_range, y_range]
-    row_keep_local = padded_row_keep_range(cropped)
-    keep_x = collect(x_range)
-    keep_y = collect(y_range)[row_keep_local]
-    keep_y_set = Set(keep_y)
-    y_out_of = Dict(y => i for (i, y) in enumerate(keep_y))  # original row -> output row index
-
-    kept_width = length(keep_x)
-    kept_height = length(keep_y)
-
-    # Pass 2: re-decompress (fast — see docstring), this time keeping only
-    # the identified rows/columns, building the final right-sized volume
-    # directly (never materializing the full stored_width x stored_width
-    # buffer at Float64 precision).
-    volume = Array{Float64,3}(undef, kept_width, kept_height, adc_re)
-    ok2 = stream_stored_rows(loc.bytes, stored_width, adc_re) do y, row_u16
-        if y in keep_y_set
-            y_out = y_out_of[y]
-            @views volume[:, y_out, :] .= Float64.(transpose(row_u16[:, keep_x]))
-        end
-    end
-    if !ok2
-        @warn "Failed to decompress SDT image data (pass 2/2)" path=filepath
-        return nothing, nothing
-    end
-
-    image = dropdims(sum(volume; dims=3); dims=3)
-    return image, volume
-end
+"""The fit context of a ROI image's channel (`channel_fit_context`; channel 1's for a sum)."""
+roi_image_fit_context(image::RoiImage) = channel_fit_context(image.channel == 2 ? 2 : 1)
 
 """
     point_in_polygon(px::Float64, py::Float64, xs::Vector{Float64}, ys::Vector{Float64})::Bool
@@ -386,11 +96,11 @@ end
 """
     roi_pixel_mask(xs::Vector{Float64}, ys::Vector{Float64}, n_cols::Int, n_rows::Int)::Vector{Tuple{Int,Int}}
 
-1-based `(x, y)` indices into a `(n_cols, n_rows, ...)` volume whose pixel
+1-based `(x, y)` indices into an `(n_cols, n_rows)` image whose pixel
 center (the same 0-based `(x-1, y-1)` coordinate `roi_boundary_points`
 returns, i.e. no offset applied) falls inside the closed polygon `(xs, ys)`
 (`point_in_polygon`). Only scans the polygon's bounding box (clamped to the
-volume's extent), not the whole image.
+image's extent), not the whole image.
 """
 function roi_pixel_mask(xs::Vector{Float64}, ys::Vector{Float64}, n_cols::Int, n_rows::Int)::Vector{Tuple{Int,Int}}
     isempty(xs) && return Tuple{Int,Int}[]
@@ -504,17 +214,26 @@ function pixel_label_boundary(mask_xy::AbstractMatrix{<:Integer}, label::Integer
 end
 
 """
-    roi_summed_histogram(volume::Array{Float64,3}, pixels::Vector{Tuple{Int,Int}})::Vector{Float64}
+    roi_histograms(image, pixel_sets)::Vector{Vector{Float64}}
 
-Sum every pixel's own 256-bin TCSPC histogram (`volume[x, y, :]`) across
-`pixels` into a single combined histogram, for lifetime fitting.
+Each pixel set's decay (`DEFAULT_HISTOGRAM_RESOLUTION` channels, the
+analysis resolution), rebuilt from `image`'s raw photon stream in a single
+pass (`FLIMCore.histogrammes_pixels`). `pixel_sets` are 1-based `(x, y)`
+pixels, as `roi_pixel_mask` returns them; a pixel claimed by two sets goes
+to the later one. A summed image's decays are summed over its cards.
 """
-function roi_summed_histogram(volume::Array{Float64,3}, pixels::Vector{Tuple{Int,Int}})::Vector{Float64}
-    total = zeros(Float64, size(volume, 3))
-    for (x, y) in pixels
-        total .+= @view volume[x, y, :]
+function roi_histograms(image::RoiImage, pixel_sets::Vector{Vector{Tuple{Int,Int}}})::Vector{Vector{Float64}}
+    n_cols, n_rows = size(image.intensity)
+    labels = zeros(Int, n_rows, n_cols)                 # lines × pixels, like the SPC image
+    for (k, pixels) in enumerate(pixel_sets), (x, y) in pixels
+        labels[y, x] = k
     end
-    return total
+    H = zeros(Float64, DEFAULT_HISTOGRAM_RESOLUTION, length(pixel_sets))
+    for part in image.streams                           # summed over the image's cards
+        H .+= FLIMCore.histogrammes_pixels(part.mots, part.tic_s, part.geometrie, labels, length(pixel_sets);
+                                           canaux = DEFAULT_HISTOGRAM_RESOLUTION)
+    end
+    return [H[:, k] for k in eachindex(pixel_sets)]
 end
 
 """
@@ -534,20 +253,21 @@ struct DrawnROI
 end
 
 """
-    add_roi_from_boundary!(image_axis, volume::Array{Float64,3}, x_offset::Real, y_offset::Real, xs::Vector{Float64}, ys::Vector{Float64}, roi_label::AbstractString)::DrawnROI
+    add_roi_from_boundary!(image_axis, histogram, x_offset, y_offset, xs, ys, roi_label)::DrawnROI
 
-Shared by imported ROIs (`roi_import_button`) and manually-drawn ROIs (hold
-`A` and click on `image_axis`): given a closed polygon boundary in
-un-shifted, volume-local pixel coordinates (the same convention
-`roi_boundary_points` returns), draw its translucent fill and outline on
-`image_axis`, select its pixels, sum their histograms, and fit a lifetime —
-adding a label at the ROI's center if the fit converges, or just warning
-under `roi_label` if the ROI is empty or the fit doesn't converge. Always
-returns a `DrawnROI` bundling every plot object created (fill + outline,
-optionally + label) for the caller to track.
+Shared by imported, Cellpose and manually-drawn ROIs: given a closed polygon
+boundary in un-shifted image pixel coordinates (the same convention
+`roi_boundary_points` returns) and the ROI's decay (`roi_histograms`;
+`nothing` or empty when the ROI covers no pixel), draw its translucent fill
+and outline on `image_axis` and fit its lifetime against `fit_ctx` (the
+image channel's IRF, `roi_image_fit_context`) — adding a label at the
+ROI's center if the fit converges, or just warning under `roi_label`
+otherwise. Always returns a `DrawnROI` bundling every plot object created
+(fill + outline, optionally + label) for the caller to track.
 """
-function add_roi_from_boundary!(image_axis, volume::Array{Float64,3}, x_offset::Real, y_offset::Real, xs::Vector{Float64}, ys::Vector{Float64}, roi_label::AbstractString)::DrawnROI
-    n_cols, n_rows, n_bins = size(volume)
+function add_roi_from_boundary!(image_axis, histogram::Union{Nothing, Vector{Float64}}, x_offset::Real, y_offset::Real,
+                                xs::Vector{Float64}, ys::Vector{Float64}, roi_label::AbstractString;
+                                fit_ctx::RuntimeContext = fit_context())::DrawnROI
     shifted_xs = xs .+ x_offset
     shifted_ys = ys .+ y_offset
     plots = Any[]
@@ -557,16 +277,15 @@ function add_roi_from_boundary!(image_axis, volume::Array{Float64,3}, x_offset::
     end
     push!(plots, lines!(image_axis, shifted_xs, shifted_ys, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH))
 
-    pixels = roi_pixel_mask(xs, ys, n_cols, n_rows)
-    if isempty(pixels)
-        @warn "ROI contains no pixels; skipping lifetime fit" roi=roi_label
+    if histogram === nothing || sum(histogram) == 0
+        @warn "ROI contains no photon; skipping lifetime fit" roi=roi_label
         return DrawnROI(shifted_xs, shifted_ys, plots)
     end
 
-    summed_hist = roi_summed_histogram(volume, pixels)
-
     params_raw, _ = try
-        vec_to_lifetime(summed_hist; guess=initial_guess_for_lifetimes("1 lifetime"), histogram_resolution=n_bins)
+        with_fit_context(fit_ctx) do
+            vec_to_lifetime(histogram; guess=initial_guess_for_lifetimes("1 lifetime"), histogram_resolution=length(histogram))
+        end
     catch e
         @warn "Lifetime fit failed for ROI" roi=roi_label error=string(e)
         return DrawnROI(shifted_xs, shifted_ys, plots)
@@ -707,7 +426,7 @@ end
     write_cellpose_input(path, image_xy::Matrix{Float64})
 
 Write `image_xy` (an `(n_cols, n_rows)` image, FLIMApp's own `(x, y)`
-convention — see `extract_sdt_image`) to `path` as the flat binary format
+convention — see `RoiImage`) to `path` as the flat binary format
 `cellpose_segment.py` reads: an `(n_cols, n_rows)` `Int64` header, then the
 pixel data in Julia's native column-major order (which `write` on a plain
 `Array` already writes as raw memory — no manual reshaping needed here).
@@ -849,18 +568,17 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     axis_layout = GridLayout(popup_figure[1, 1])
     buttons_layout = GridLayout(popup_figure[2, 1])
 
-    # yreversed=true: image row 0 (ImageJ/SdtFile's top-left pixel origin)
-    # is plotted at the TOP of the axis — confirmed against real acquisitions
-    # (a tissue/background boundary visible in the raw data, checked against
-    # its known real-world position). Display-only (Makie handles the
+    # yreversed=true: image row 0 (ImageJ's top-left pixel origin, and the
+    # scanner's first line after its frame clock) is plotted at the TOP of
+    # the axis. Display-only (Makie handles the
     # screen<->data mapping transparently either way, so heatmap!/poly!/
     # lines! coordinates, mouseposition(), and every ROI pixel-mask/boundary
     # computation below all stay in the same 0-based (x=column, y=row) data
     # space regardless of this setting).
     # aspect=DataAspect(): keeps pixels square regardless of the axis
-    # widget's own on-screen dimensions, so a non-square image (e.g. after
-    # collapse_padded_rows halves the height) doesn't get stretched to fill
-    # the axis.
+    # widget's own on-screen dimensions, so a non-square image (the SPC
+    # image is pixels-per-line × lines) doesn't get stretched to fill the
+    # axis.
     # x/yrectzoom=false: Makie's default rectangle-zoom is also a left-click
     # drag, which would fight with manual ROI point-placement (hold A, left-
     # click) below.
@@ -869,12 +587,12 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # First-moment (mean-arrival-time) per-pixel lifetime preview — see
     # pixel_lifetime_map (lifetime_analysis.jl) and refresh_image_display!
     # below. min_photons_textbox's default matches pixel_lifetime_map's own.
-    lifetime_map_label  = Label(buttons_layout[1, 1][1, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Lifetime map"))...)
+    lifetime_map_label  = Label(buttons_layout[1, 1][1, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Lifetime preview"))...)
     min_photons_label   = Label(buttons_layout[2, 1][1, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Min photons"))...)
     lifetime_map_toggle = Toggle(buttons_layout[1, 1][1, 2];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => false))...)
-    min_photons_textbox = Textbox(buttons_layout[2, 1][1, 2]; merge(TEXT_ATTRS,   Dict{Symbol, Any}(:displayed_string => "25", :stored_string => "25"))...)
+    min_photons_textbox = Textbox(buttons_layout[2, 1][1, 2]; merge(TEXT_ATTRS,   Dict{Symbol, Any}(:displayed_string => "50", :stored_string => "50"))...)
 
-    im_import_button    = Button(buttons_layout[1, 2];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import image"))...)
+    im_import_button    = Button(buttons_layout[1, 2];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => IMAGE_BUTTON_LABEL))...)
     cellpose_button     = Button(buttons_layout[2, 2];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Cellpose"))...)
     roi_import_button   = Button(buttons_layout[1, 3];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Import ROI"))...)
     roi_export_button   = Button(buttons_layout[2, 3];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Export ROI"))...)
@@ -891,6 +609,13 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     y_min_textbox = Textbox(buttons_layout[4, 3]; merge(TEXT_ATTRS, Dict{Symbol, Any}(:displayed_string => string(app.roi.v_min_y), :stored_string => string(app.roi.v_min_y), :width => 100))...)
     y_max_textbox = Textbox(buttons_layout[4, 4]; merge(TEXT_ATTRS, Dict{Symbol, Any}(:displayed_string => string(app.roi.v_max_y), :stored_string => string(app.roi.v_max_y), :width => 100))...)
 
+    # Which card the image shows (channel 1, the FLIM channel, by default).
+    channel_menu = Menu(buttons_layout[5, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ROI_IMAGE_CHANNELS, :default => "Channel 1"))...)
+
+    # What the Image button did last (acquiring, size, photons, or why not).
+    popup_status = Observable("Image: $(ROI_IMAGE_FRAMES) frames from the SPC-150N (scanner running)")
+    Label(buttons_layout[5, 2:4], popup_status; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :left, :tellwidth => false))...)
+
     image_plot = Ref{Any}(nothing)
     # Every ROI currently shown on image_axis (imported or manually drawn),
     # each bundling its own plot objects so a single ROI can be deleted (D +
@@ -902,13 +627,17 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # stay aligned with the centered, padded image rather than its own
     # un-padded coordinates.
     image_offset = Ref((0.0, 0.0))
-    # Raw per-pixel time-bin volume backing the currently displayed image
-    # (same (x, y) extent, already padded-row-trimmed to match) — the data
-    # ROI lifetime fits are actually computed from.
-    pixel_volume = Ref{Union{Nothing, Array{Float64,3}}}(nothing)
+    # The SPC image backing the display — summed arrival times for the
+    # lifetime map, raw photon stream for each ROI's decay (`RoiImage`) —
+    # and every card's image of the last acquisition (the channel menu
+    # switches between them).
+    roi_image = Ref{Union{Nothing, RoiImage}}(nothing)
+    image_parts = Ref{Union{Nothing, Dict{Int, FLIMCore.ImageSomme}}}(nothing)
+    # An Image request is out (the engine is acquiring).
+    image_requested = Ref(false)
     # Grayscale intensity image for the currently displayed image, cached
-    # alongside pixel_volume so update_lifetime_overlay! (below) can redraw
-    # the overlay without re-reading the SDT file.
+    # alongside roi_image so update_lifetime_overlay! (below) can redraw
+    # the overlay without recomputing it.
     intensity_image = Ref{Union{Nothing, Matrix{Float64}}}(nothing)
     # The lifetime-map overlay heatmap, drawn on top of the always-visible
     # grayscale image[] — nothing if none has been computed yet (or the
@@ -930,7 +659,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         update_lifetime_overlay!()
 
     Recompute the lifetime-map overlay (`pixel_lifetime_map`,
-    lifetime_analysis.jl) from the cached `pixel_volume`/`min_photons` and
+    lifetime_analysis.jl) from the cached `roi_image`/`min_photons` and
     redraw it — called once right after an image import and again whenever
     `min_photons_textbox` commits a new threshold, so the overlay is always
     ready the moment `lifetime_map_toggle` is switched on (no compute lag on
@@ -957,8 +686,8 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     lifetime_overlay_request = Ref(0)
 
     function update_lifetime_overlay!()
-        volume = pixel_volume[]
-        volume === nothing && return nothing
+        image = roi_image[]
+        image === nothing && return nothing
         threshold = min_photons[]
         lifetime_overlay_request[] += 1
         request = lifetime_overlay_request[]
@@ -967,7 +696,8 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         # back here on the GUI thread (this @async task stays on it).
         @async begin
             lifetime_map = try
-                fetch(Threads.@spawn pixel_lifetime_map(volume; min_photons=threshold))
+                ctx = roi_image_fit_context(image)
+                fetch(Threads.@spawn pixel_lifetime_map(image.intensity, image.sum_t; min_photons=threshold, ctx=ctx))
             catch e
                 @warn "Failed to compute pixel lifetime map" error=string(e)
                 return nothing
@@ -1015,7 +745,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
 
         lifetime_map_plot[] = heatmap!(image_axis, xs, ys, clamped_map; colormap = :turbo, colorrange = (lo, hi), nan_color = :transparent, visible = lifetime_map_toggle.active[])
         if lifetime_map_toggle.active[]
-            lifetime_colorbar[] = Colorbar(axis_layout[1, 2]; colormap = :turbo, limits = (lo, hi), label = "ns")
+            lifetime_colorbar[] = Colorbar(axis_layout[1, 2]; colormap = :turbo, limits = (lo, hi), label = LIFETIME_PREVIEW_LABEL)
         end
 
         return nothing
@@ -1025,10 +755,16 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # drawn_rois holds this popup's GUI plot objects (never leaves this
     # function), app_run.rois holds the plain boundary data other
     # panels/functions can read.
-    function add_and_track_roi!(volume::Array{Float64,3}, x_offset::Real, y_offset::Real, xs::Vector{Float64}, ys::Vector{Float64}, label::AbstractString)
-        push!(drawn_rois, add_roi_from_boundary!(image_axis, volume, x_offset, y_offset, xs, ys, label))
-        push!(app_run.rois[], RoiCoordinates(String(label), xs, ys))
+    function add_and_track_roi!(histogram, x_offset::Real, y_offset::Real, xs::Vector{Float64}, ys::Vector{Float64}, label::AbstractString)
+        image = roi_image[]
+        ctx = image === nothing ? fit_context() : roi_image_fit_context(image)
+        push!(drawn_rois, add_roi_from_boundary!(image_axis, histogram, x_offset, y_offset, xs, ys, label; fit_ctx = ctx))
+        # Both cards see the same pixels: the ROI holds for both channels;
+        # the session records which one its lifetime was fitted on.
+        push!(app_run.rois[], RoiCoordinates(String(label), xs, ys, image === nothing ? -1 : image.channel))
         notify(app_run.rois)
+        n = length(app_run.rois[])
+        n > ROI_MAX && (popup_status[] = "$n ROIs: the Realtime mode takes at most $ROI_MAX (4-bit routing code, code 0 reserved)")
         return nothing
     end
 
@@ -1066,9 +802,9 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
                 clear_drawing_preview!()
 
                 if length(drawing_points) >= 3
-                    volume = pixel_volume[]
-                    if volume === nothing
-                        @warn "No image imported yet; cannot create manual ROI"
+                    image = roi_image[]
+                    if image === nothing
+                        @warn "No image acquired yet; cannot create manual ROI"
                     elseif app_run.running[]
                         @warn "Acquisition is running; skipping manual ROI lifetime fitting"
                     else
@@ -1079,7 +815,9 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
                         push!(ys, ys[1])
 
                         manual_roi_count[] += 1
-                        add_and_track_roi!(volume, x_offset, y_offset, xs, ys, "manual-$(manual_roi_count[])")
+                        pixels = roi_pixel_mask(xs, ys, size(image.intensity)...)
+                        histogram = isempty(pixels) ? nothing : only(roi_histograms(image, [pixels]))
+                        add_and_track_roi!(histogram, x_offset, y_offset, xs, ys, "manual-$(manual_roi_count[])")
                     end
                 end
 
@@ -1128,59 +866,92 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         return Consume(false)
     end
 
+    # Image: ROI_IMAGE_FRAMES frames from the SPC-150N (FLIMCore's Imagerie,
+    # keeping the raw stream). The engine acquires on its own thread; the
+    # result comes back through the refresh tick into app_run.spc.roi_image,
+    # listened to below (and released when this popup closes).
     on(im_import_button.clicks) do _
-        filepath = pick_non_empty_path(() -> pick_file(filterlist="sdt"); error_msg="Image import file dialog failed")
-        filepath === nothing && return
-
-        # extract_sdt_image_streamed does its own file I/O and decompresses
-        # in bounded chunks (see its docstring) rather than materializing
-        # the whole block at once like SdtFile.read_sdt — the difference
-        # that matters for a large image (e.g. a real 2048x2048x256 file
-        # needs on the order of 10GB through the old path just to load,
-        # before any padding this lab's setup can store around the true
-        # content is even trimmed off). Still seconds of work: read on a
-        # worker thread, displayed back here on the GUI thread.
-        @async begin
-            intensity, volume = try
-                fetch(Threads.@spawn extract_sdt_image_streamed(filepath))
-            catch e
-                @error "Image import failed" path=filepath error=string(e)
-                return nothing
-            end
-            if intensity === nothing
-                @info "SDT file is a histogram, not an image; nothing to display" path=filepath
-                return
-            end
-            pixel_volume[] = volume
-            intensity_image[] = intensity
-
-            n_cols, n_rows = size(intensity)
-            canvas_size = max(n_cols, n_rows)
-            x_offset = (canvas_size - n_cols) ÷ 2
-            y_offset = (canvas_size - n_rows) ÷ 2
-            image_offset[] = (x_offset, y_offset)
-            # Recorded so the galvo voltage mapping (roi_geometry.jl) can apply this
-            # same centering to app_run.rois's coordinates (in this image's own,
-            # un-padded pixel space) at Start-button time, long after this popup
-            # and its local x_offset/y_offset above have gone away.
-            app_run.imported_image_size = (n_cols, n_rows)
-
-            # Grayscale base image: always drawn, never hidden by the lifetime
-            # toggle below — the lifetime map (if any) is a separate heatmap
-            # layered on top of it.
-            if image_plot[] !== nothing
-                delete!(image_axis, image_plot[])
-            end
-            image_plot[] = heatmap!(image_axis, x_offset:(x_offset + n_cols - 1), y_offset:(y_offset + n_rows - 1), intensity, colormap = :grays)
-            update_lifetime_overlay!()
-            # Set the limits attribute directly rather than calling limits!/ylims!:
-            # those helpers reset ax.yreversed[] to false whenever the y-limits are
-            # passed low-to-high (their own convention for "not reversed"), which
-            # would silently undo the yreversed=true set at axis construction.
-            image_axis.limits[] = (0, canvas_size, 0, canvas_size)
-
-            @info "Image imported" path=filepath size=size(intensity) canvas_size=canvas_size offset=(x_offset, y_offset)
+        image_requested[] && return
+        reason = spc_request_roi_image!(app_run.spc)
+        if !isempty(reason)
+            popup_status[] = "Image: " * reason
+            @warn "Cannot acquire the ROI image" reason=reason
+            return
         end
+        image_requested[] = true
+        im_import_button.label[] = "Acquiring…"
+        popup_status[] = "Acquiring $(ROI_IMAGE_FRAMES) frames…"
+    end
+
+    # Show the menu's channel of the last acquisition: base image, lifetime
+    # preview, the size the ROIs are drawn on.
+    function show_channel_image!()
+        parts = image_parts[]
+        parts === nothing && return nothing
+        choice = channel_menu.selection[]
+        choice isa AbstractString || (choice = "Channel 1")
+        selected = roi_image_parts(parts, choice)
+        if isempty(selected)
+            popup_status[] = "$choice: no image (cards: $(join(sort!(collect(keys(parts))), ", ")))"
+            return nothing
+        end
+        image = RoiImage(selected, choice == "Sum" ? 0 : choice == "Channel 2" ? 2 : 1)
+        cards = join(image.cards, " + ")
+        if sum(image.intensity) == 0
+            popup_status[] = "$choice (card $cards): no photon in the image (laser, detectors?)"
+            return nothing
+        end
+        roi_image[] = image
+        intensity = image.intensity
+        intensity_image[] = intensity
+
+        n_cols, n_rows = size(intensity)
+        canvas_size = max(n_cols, n_rows)
+        x_offset = (canvas_size - n_cols) ÷ 2
+        y_offset = (canvas_size - n_rows) ÷ 2
+        image_offset[] = (x_offset, y_offset)
+        # Recorded so the galvo voltage mapping (roi_geometry.jl) can apply this
+        # same centering to app_run.rois's coordinates (in this image's own,
+        # un-padded pixel space) at Start-button time, long after this popup
+        # and its local x_offset/y_offset above have gone away.
+        app_run.imported_image_size = (n_cols, n_rows)
+
+        # Grayscale base image: always drawn, never hidden by the lifetime
+        # toggle below — the lifetime map (if any) is a separate heatmap
+        # layered on top of it.
+        if image_plot[] !== nothing
+            delete!(image_axis, image_plot[])
+        end
+        image_plot[] = heatmap!(image_axis, x_offset:(x_offset + n_cols - 1), y_offset:(y_offset + n_rows - 1), intensity, colormap = :grays)
+        update_lifetime_overlay!()
+        # Set the limits attribute directly rather than calling limits!/ylims!:
+        # those helpers reset ax.yreversed[] to false whenever the y-limits are
+        # passed low-to-high (their own convention for "not reversed"), which
+        # would silently undo the yreversed=true set at axis construction.
+        image_axis.limits[] = (0, canvas_size, 0, canvas_size)
+        image_axis.title[] = "ROI image — $choice"
+
+        popup_status[] = "$choice (card $cards): $(image.frames) frames, $(round(Int, sum(intensity))) photons, $n_cols × $n_rows pixels"
+        @info "ROI image shown" channel=choice cards=image.cards frames=image.frames size=size(intensity)
+        return nothing
+    end
+
+    image_listener = on(app_run.spc.roi_image) do parts
+        image_requested[] || return
+        image_requested[] = false
+        im_import_button.label[] = IMAGE_BUTTON_LABEL
+        if parts === nothing || isempty(parts) || all(p -> isempty(p.mots), values(parts))
+            popup_status[] = "No image: no line/frame clock? (see the SPC window's alerts)"
+            return
+        end
+        image_parts[] = parts
+        show_channel_image!()
+    end
+
+    # Another channel of the same acquisition: no new image is taken. ROIs
+    # already drawn keep the lifetime fit on the channel they were drawn on.
+    on(channel_menu.selection) do _
+        show_channel_image!()
     end
 
     # Cheap show/hide: no recompute, since update_lifetime_overlay! already
@@ -1194,7 +965,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         if is_active
             if plot !== nothing && lifetime_colorbar[] === nothing
                 lo, hi = plot.colorrange[]
-                lifetime_colorbar[] = Colorbar(axis_layout[1, 2]; colormap = :turbo, limits = (lo, hi), label = "ns")
+                lifetime_colorbar[] = Colorbar(axis_layout[1, 2]; colormap = :turbo, limits = (lo, hi), label = LIFETIME_PREVIEW_LABEL)
             end
         elseif lifetime_colorbar[] !== nothing
             delete!(lifetime_colorbar[])
@@ -1245,9 +1016,9 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             return
         end
 
-        volume = pixel_volume[]
-        if volume === nothing
-            @warn "No image imported yet; cannot fit ROI lifetimes" path=filepath
+        image = roi_image[]
+        if image === nothing
+            @warn "No image acquired yet; cannot fit ROI lifetimes" path=filepath
             return
         end
 
@@ -1260,20 +1031,22 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         end
 
         x_offset, y_offset = image_offset[]
+        boundaries = [roi_boundary_points(roi) for roi in rois]
+        histograms = roi_histograms(image, [roi_pixel_mask(xs, ys, size(image.intensity)...) for (xs, ys) in boundaries])
 
-        for roi in rois
-            xs, ys = roi_boundary_points(roi)
-            add_and_track_roi!(volume, x_offset, y_offset, xs, ys, roi.name)
+        for (k, roi) in enumerate(rois)
+            xs, ys = boundaries[k]
+            add_and_track_roi!(histograms[k], x_offset, y_offset, xs, ys, roi.name)
         end
 
         @info "ROIs imported" path=filepath count=length(rois)
     end
 
     on(cellpose_button.clicks) do _
-        volume = pixel_volume[]
+        image = roi_image[]
         intensity = intensity_image[]
-        if volume === nothing || intensity === nothing
-            @warn "No image imported yet; cannot run Cellpose"
+        if image === nothing || intensity === nothing
+            @warn "No image acquired yet; cannot run Cellpose"
             return
         end
 
@@ -1310,17 +1083,22 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
 
                 x_offset, y_offset = image_offset[]
                 labels = sort(filter(!=(0), unique(masks)))
-                n_added = 0
-
+                traced = Tuple{Int, Vector{Float64}, Vector{Float64}}[]
                 for label in labels
                     xs, ys = pixel_label_boundary(masks, label)
                     if isempty(xs)
                         @warn "Skipping a Cellpose object whose boundary could not be traced" label=label
                         continue
                     end
-                    add_and_track_roi!(volume, x_offset, y_offset, xs, ys, "cellpose-$label")
-                    n_added += 1
+                    push!(traced, (label, xs, ys))
                 end
+                # Every object's decay in one pass over the raw stream, off the GUI thread.
+                pixel_sets = [roi_pixel_mask(xs, ys, size(image.intensity)...) for (_, xs, ys) in traced]
+                histograms = fetch(Threads.@spawn roi_histograms(image, pixel_sets))
+                for (k, (label, xs, ys)) in enumerate(traced)
+                    add_and_track_roi!(histograms[k], x_offset, y_offset, xs, ys, "cellpose-$label")
+                end
+                n_added = length(traced)
 
                 @info "Cellpose ROIs imported" found=length(labels) added=n_added
             finally
@@ -1352,7 +1130,9 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     end
 
     on(events(popup_figure).window_open) do is_open
-        if !is_open && roi_popup_screen[] === popup_screen
+        is_open && return
+        off(image_listener)          # app_run.spc.roi_image outlives this popup
+        if roi_popup_screen[] === popup_screen
             roi_popup_screen[] = nothing
         end
     end

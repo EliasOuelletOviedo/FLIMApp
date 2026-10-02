@@ -11,7 +11,7 @@ the exchanges below, none of which can make the DAQ loop wait:
 | display data        | `Ring` (lock, overwrite)      | analysis/loop → GUI  |
 | loop commands       | `Channel{LoopCommand}`        | GUI → loop           |
 | stop                | `Threads.Atomic{Bool}`        | GUI → loop           |
-| PI command values   | `Threads.Atomic{Float64}` × 2 | analysis → loop      |
+| PI command values   | `Threads.Atomic{Float64}`, 2 per ROI | analysis → loop |
 | analysis settings   | `SettingsBox` (`@atomic`)     | GUI → analysis       |
 | journal             | `JournalQueue` (lock, drops)  | everyone → journal   |
 | loop status         | `StatusBox` (`@atomic`)       | loop → GUI           |
@@ -98,9 +98,9 @@ end
 """
     FrameRecord
 
-One analyzed file as published by the analysis worker: its results plus the
-ROI it was assigned to (round-robin with missed-file repair, see
-`assign_roi!` in analysis/acquisition.jl).
+One analyzed histogram as published by the analysis worker: its results
+plus the drawn index of its ROI (1 without ROIs) — the routing code the
+cards read during the pass (`pass_roi`, analysis/acquisition.jl).
 """
 struct FrameRecord
     sample::AcquisitionSample
@@ -134,10 +134,12 @@ end
 
 Everything the DAQ loop needs to build the slot pattern, copied from the
 GUI's state at START (the loop never reads `AppState`/`AppRun` itself).
-`order` is the ROI visiting order (`roi_visit_order`, roi_geometry.jl),
-shared with the analysis so both agree on which ROI each slot scans. The
+`order` is the ROI visiting order (`roi_visit_order`, roi_geometry.jl). The
 galvos scan the ROIs only when `roi_active` and `rois` isn't empty;
-otherwise they stay at 0 V and only the command outputs play.
+otherwise they stay at 0 V with the same scan/pause rhythm.
+`invert_routing` (`[clamp] inverser_routage` in config/spc.toml): write
+NOT(code) on P0.4–P0.7 so the SPC-150N, whose routing inputs are active
+low, reads the code itself.
 """
 struct ScanRequest
     rois::Vector{RoiCoordinates}
@@ -152,12 +154,18 @@ struct ScanRequest
     scan_time_ms::Int
     shift_time_ms::Int
     image_size::Tuple{Int, Int}
+    invert_routing::Bool
 end
+
+ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_per_roi, spiral_turns,
+            scan_time_ms, shift_time_ms, image_size) =
+    ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_per_roi, spiral_turns,
+                scan_time_ms, shift_time_ms, image_size, true)
 
 """
     AnalysisSettings
 
-The settings the analysis worker reads on every file: copies, never
+The settings the analysis worker reads on every frame: copies, never
 mutated after being published (the GUI publishes a fresh one whenever the
 user changes something, see `publish_analysis_settings!` in gui/refresh.jl).
 """
@@ -282,17 +290,26 @@ struct JournalEvent <: JournalEntry
     message::String
 end
 
-"""Opens a run folder; `info` is written to its run.toml."""
+"""
+Opens run folder `dir` (`new_run_dir`, journal.jl): `info` is written to
+its run.toml, `irfs` (one `[t_ns counts]` per channel) to its irf.csv and
+`irf_info` (the settings the IRF was taken with) to its irf.toml.
+"""
 struct JournalRunStart <: JournalEntry
     time::Float64
+    dir::String
     info::Dict{String, Any}
+    irfs::Vector{Matrix{Float64}}
+    irf_info::Dict{String, Any}
 end
+
+JournalRunStart(time, dir, info, irfs) = JournalRunStart(time, dir, info, irfs, Dict{String, Any}())
 
 struct JournalRunEnd <: JournalEntry
     time::Float64
 end
 
-"""One analyzed file (a line of files.csv)."""
+"""One analyzed histogram (a line of frames.csv)."""
 struct JournalFrame <: JournalEntry
     record::FrameRecord
 end
@@ -384,9 +401,8 @@ struct Exchange
     status::StatusBox
     commands::Channel{LoopCommand}
     stop::Threads.Atomic{Bool}
-    command_values::NTuple{2, Threads.Atomic{Float64}}
+    command_values::NTuple{2, Vector{Threads.Atomic{Float64}}}
     settings::SettingsBox
-    save_progress::Threads.Atomic{Float64}
     journal::JournalQueue
     shutdown::Threads.Atomic{Bool}
 end
@@ -399,9 +415,8 @@ function Exchange(; frame_capacity::Integer = 16_384, slot_capacity::Integer = 1
         StatusBox(LoopStatus(LOOP_DISCONNECTED, "")),
         Channel{LoopCommand}(LOOP_COMMAND_CAPACITY),
         Threads.Atomic{Bool}(false),
-        (Threads.Atomic{Float64}(NaN), Threads.Atomic{Float64}(NaN)),
+        Tuple([Threads.Atomic{Float64}(NaN) for _ in 1:FLIMCore.ROI_MAX] for _ in 1:2),
         SettingsBox(AnalysisSettings()),
-        Threads.Atomic{Float64}(NaN),
         JournalQueue(journal_capacity),
         Threads.Atomic{Bool}(false)
     )
@@ -438,16 +453,26 @@ blocks (every `block_ms`), stops the tasks and zeroes every output.
 request_stop!(ex::Exchange) = (ex.stop[] = true; nothing)
 
 """
+    set_command_values!(ex, roi, command1, command2)
     set_command_values!(ex, command1, command2)
 
-Latest PI commands (percent, `NaN` = controller off) for the DAQ loop,
-which writes them into the next slot it prepares.
+Latest PI commands of ROI `roi` (its drawn index; 1 without ROIs), in
+percent (`NaN` = controller off), for the DAQ loop: it writes them into
+the next slot that scans that ROI. Without `roi`: every ROI.
 """
-function set_command_values!(ex::Exchange, command1::Real, command2::Real)
-    ex.command_values[1][] = Float64(command1)
-    ex.command_values[2][] = Float64(command2)
+function set_command_values!(ex::Exchange, roi::Integer, command1::Real, command2::Real)
+    ex.command_values[1][roi][] = Float64(command1)
+    ex.command_values[2][roi][] = Float64(command2)
     return nothing
 end
+
+function set_command_values!(ex::Exchange, command1::Real, command2::Real)
+    foreach(roi -> set_command_values!(ex, roi, command1, command2), 1:FLIMCore.ROI_MAX)
+    return nothing
+end
+
+"""PI commands (percent) the DAQ loop writes into a slot of ROI `roi` (1 without ROIs)."""
+command_values(ex::Exchange, roi::Integer) = (ex.command_values[1][roi][], ex.command_values[2][roi][])
 
 current_settings(ex::Exchange)::AnalysisSettings = @atomic ex.settings.value
 publish_settings!(ex::Exchange, settings::AnalysisSettings) = (@atomic ex.settings.value = settings; nothing)

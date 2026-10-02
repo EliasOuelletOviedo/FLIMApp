@@ -8,7 +8,7 @@ runs, one iteration per slot (plan §3):
     card plays slot s          loop reads slot s's readback in blocks of
                                `block_ms`, checking the stop flag between blocks
     end of slot s              loop prepares and writes slot s + lead (latest
-                               PI commands), publishes slot s's summary and
+                               PI commands of that slot's ROI), publishes slot s's summary and
                                readback, hands them to the journal
 
 Slots s + 1 … s + lead − 1 are already in the card's buffer, so the deadline
@@ -81,7 +81,8 @@ end
     initialize_hardware!(hw, cfg, ex)::Bool
 
 INIT: check and reset the cards, zero everything, warm up the iteration
-code. READY on success, FAULT (with the reason) otherwise.
+code. READY on success; otherwise back to DISCONNECTED with the reason
+("connection failed: …"), which the GUI shows with a RECONNECT button.
 """
 function initialize_hardware!(hw::Hardware, cfg::BenchConfig, ex::Exchange)::Bool
     set_loop_status!(ex, LOOP_INIT, "checking the cards")
@@ -93,7 +94,8 @@ function initialize_hardware!(hw::Hardware, cfg::BenchConfig, ex::Exchange)::Boo
         return true
     catch e
         message = describe_loop_error(e)
-        set_loop_status!(ex, LOOP_FAULT, "connection failed: $message")
+        # Not a fault: nothing ran. The GUI offers RECONNECT.
+        set_loop_status!(ex, LOOP_DISCONNECTED, "connection failed: $message")
         journal_event!(ex.journal, :error, "DAQ connection failed: $message")
         @warn "DAQ connection failed" error=message
         return false
@@ -176,14 +178,16 @@ function journal_readback!(ex::Exchange, pool::Union{Nothing, ReadbackPool}, rea
 end
 
 """
-    read_span!(hw, readback, n, cfg, ex, n_read)::Bool
+    read_span!(hw, readback, n, cfg, ex, n_read; first=0)::Bool
 
-Read `n` readback samples into `readback[:, 1:n]` in blocks of
+Read `n` readback samples into `readback[:, first+1:first+n]` in blocks of
 `cfg.block_samples`, re-arming the watchdog after each block. Returns
 `false` as soon as the stop flag is seen (checked before every block).
 """
-function read_span!(hw::Hardware, readback::Matrix{Float64}, n::Integer, cfg::BenchConfig, ex::Exchange, n_read::Base.RefValue{Int32})::Bool
-    position = 0
+function read_span!(hw::Hardware, readback::Matrix{Float64}, n::Integer, cfg::BenchConfig, ex::Exchange,
+                    n_read::Base.RefValue{Int32}; first::Integer = 0)::Bool
+    position = first
+    n += first
     while position < n
         ex.stop[] && return false
         block = min(cfg.block_samples, n - position)
@@ -197,14 +201,16 @@ end
 """
     write_slot!(hw, buffers, pattern, s, cfg, ex, written_commands)
 
-Prepare slot `s` with the latest PI commands, check it, write it, and
-remember the command voltages it carries (for its summary, published once
-it has played).
+Prepare slot `s` with the latest PI commands of the ROI it scans (each ROI
+has its own controllers; ROI 1 without ROI scanning), check it, write it,
+and remember the command voltages it carries (for its summary, published
+once it has played).
 """
 function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s::Integer,
                      cfg::BenchConfig, ex::Exchange, written_commands::Matrix{Float64})
-    command1_v = command_volts(ex.command_values[1][], cfg)
-    command2_v = command_volts(ex.command_values[2][], cfg)
+    command1, command2 = command_values(ex, max(1, slot_roi(pattern, s)))
+    command1_v = command_volts(command1, cfg)
+    command2_v = command_volts(command2, cfg)
     prepare_slot!(buffers, pattern, s, command1_v, command2_v)
     check_slot(buffers, cfg)
     hw_write!(hw, buffers)
@@ -215,7 +221,7 @@ function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s
 end
 
 # Below this, a garbage-collector pause (a few hundred ms have been measured
-# during heavy Playback fitting, see the Console panel) can miss a slot.
+# during heavy fitting, see the Console panel) can miss a slot.
 const SHORT_DEADLINE_S = 0.5
 
 """
@@ -273,7 +279,7 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
     fault = nothing
     set_loop_status!(ex, LOOP_RUNNING, description)
     try
-        hw_prepare!(hw, n_entry + (lead + 2) * n)
+        hw_prepare!(hw, n_entry + (lead + 2) * n; pass_ticks = (n_entry, pattern.scan_samples, pattern.shift_samples))
         n_entry > 0 && hw_write!(hw, entry_buffers(pattern))
         for s in 0:lead-1
             write_slot!(hw, buffers, pattern, s, cfg, ex, written_commands)

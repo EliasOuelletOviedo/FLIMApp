@@ -33,8 +33,11 @@ const SPC_ALERT_HISTORY = 30
 
 const SPC_ENGINE_STATE_NAMES = Dict(
     :demarrage => "starting…", :pret => "ready", :imagerie => "imaging",
-    :single => "Single", :arrete => "stopped"
+    :single => "Single", :clamp => "Realtime", :arrete => "stopped"
 )
+
+"""Frames summed into the ROI popup's image ("Image" button, gui/roi_popup.jl)."""
+const ROI_IMAGE_FRAMES = 100
 
 """
     SpcCard
@@ -124,6 +127,11 @@ mutable struct SpcView
     unlock_armed_until::Float64
     last_state::Symbol
     texts_dirty::Bool
+    clamp_stop_sent::Bool
+    roi_image_pending::Bool
+    roi_image_parts::Dict{Int, FLIMCore.ImageSomme}
+    roi_image::Observable{Any}
+    banner::String
     status::Observable{String}
     check_text::Observable{String}
     alerts_text::Observable{String}
@@ -161,7 +169,8 @@ function SpcView(settings_path::AbstractString, journal::Union{Nothing, JournalQ
     settings = load_spc_settings(settings_path)
     view = SpcView(String(settings_path), settings, nothing, nothing, journal, Dict{Int, SpcCard}(),
                    nothing, FLIMCore.Alerte[], nothing, "", 0.0, time(), UInt64(0), false, nothing, 0.0,
-                   :none, true, Observable("SPC: not connected"), Observable(""), Observable(""), Observable(""))
+                   :none, true, false, false, Dict{Int, FLIMCore.ImageSomme}(), Observable{Any}(nothing), "",
+                   Observable("SPC: not connected"), Observable(""), Observable(""), Observable(""))
     for card in spc_displayed_cards(view)
         view.cards[card] = SpcCard(card)
     end
@@ -172,6 +181,24 @@ end
 spc_displayed_cards(view::SpcView) = sort!(unique(vcat(view.settings.modules_imagerie, view.settings.modules_single)))
 
 spc_card!(view::SpcView, card::Integer) = get!(() -> SpcCard(card), view.cards, Int(card))
+
+"""
+    spc_applied_settings(view)::Dict{Int, Dict{String, Float64}}
+
+Per channel ([verification] series), the settings read back from its card
+at the last check ("demandé → appliqué"); empty before any check. What
+`irf_mismatches` compares an IRF with.
+"""
+function spc_applied_settings(view::SpcView)::Dict{Int, Dict{String, Float64}}
+    applied = Dict{Int, Dict{String, Float64}}()
+    check = view.check
+    check === nothing && return applied
+    for c in check.cartes
+        (c.pret && c.canal > 0) || continue
+        applied[c.canal] = Dict{String, Float64}(l.cle => l.applique for l in c.tableau if isfinite(l.applique))
+    end
+    return applied
+end
 
 """Engine state, `:none` when no engine is running."""
 spc_state(view::SpcView)::Symbol = view.engine === nothing ? :none : FLIMCore.etat_moteur(view.engine)
@@ -275,14 +302,16 @@ end
     spc_edit_setting!(view, field, value)
 
 Change one setting and rewrite config/spc.toml (a few kB; the engine reads
-it at the next measurement start). An invalid value is refused and the
-previous one kept.
+it at the next measurement start). An invalid value (`FLIMCore.valider_reglages`:
+e.g. an image height other than 1024, 512, 256 or 128 lines) is refused and
+the previous one kept.
 """
 function spc_edit_setting!(view::SpcView, field::Symbol, value)::Bool
     s = view.settings
     previous = getfield(s, field)
     try
         setfield!(s, field, convert(fieldtype(FLIMCore.Reglages, field), value))
+        FLIMCore.valider_reglages(s)
         FLIMCore.ecrire_reglages(view.settings_path, s)
         spc_error!(view, "")
         return true
@@ -304,6 +333,38 @@ end
 function spc_journal!(view::SpcView, level::Symbol, message::AbstractString)
     view.journal === nothing || journal_event!(view.journal, level, message)
     return nothing
+end
+
+"""
+    spc_stop_clamp!(view)
+
+Stop the engine's Realtime measurement (STOP, end of a run); sent once per
+run, the refresh tick calling this on every tick until the run closes.
+"""
+function spc_stop_clamp!(view::SpcView)
+    view.clamp_stop_sent && return nothing
+    spc_state(view) == :clamp || return nothing
+    view.clamp_stop_sent = spc_command!(view, FLIMCore.Arret())
+    return nothing
+end
+
+"""
+    spc_request_roi_image!(view; frames=ROI_IMAGE_FRAMES)::String
+
+Ask the engine for an image of `frames` complete frames, keeping its raw
+stream (for the ROI popup's per-ROI decays): the result arrives as one
+`ImageSomme` per card, gathered until the measurement ends and then put in
+`view.roi_image` (a `Dict` card => `ImageSomme`). Returns "" when sent,
+otherwise why not (engine missing or busy).
+"""
+function spc_request_roi_image!(view::SpcView; frames::Integer = ROI_IMAGE_FRAMES)::String
+    state = spc_state(view)
+    state == :none && return "SPC engine not running: CONNECT it in the SPC window"
+    state == :pret || return "SPC engine busy ($(SPC_ENGINE_STATE_NAMES[state]))"
+    empty!(view.roi_image_parts)
+    view.roi_image_pending = spc_command!(view, FLIMCore.Imagerie(FLIMCore.geometrie(view.settings);
+                                                                    trames = frames, garder_mots = true))
+    return view.roi_image_pending ? "" : "SPC engine not taking commands"
 end
 
 """Stop the engine at shutdown (window closed); returns the stopping task, if any."""
@@ -404,9 +465,19 @@ function spc_handle_result!(view::SpcView, r::FLIMCore.Alerte)
     return nothing
 end
 
+function spc_handle_result!(view::SpcView, r::FLIMCore.ImageSomme)
+    view.roi_image_pending && (view.roi_image_parts[r.carte] = r)
+    return nothing
+end
+
 function spc_handle_result!(view::SpcView, r::FLIMCore.Fin)
     view.last_fin = r
-    what = r.mesure == :imagerie ? "imaging" : r.mesure == :single ? "Single" : "engine"
+    if view.roi_image_pending && r.mesure == :imagerie
+        view.roi_image_pending = false
+        view.roi_image[] = copy(view.roi_image_parts)        # the ROI popup listens
+        empty!(view.roi_image_parts)
+    end
+    what = r.mesure == :imagerie ? "imaging" : r.mesure == :single ? "Single" : r.mesure == :clamp ? "Realtime" : "engine"
     spc_journal!(view, r.erreur ? :error : :info, "SPC $what ended: $(r.raison); $(length(r.fichiers)) file(s)" *
                                                   (isempty(r.fichiers) ? "" : " in $(dirname(first(r.fichiers)))"))
     view.texts_dirty = true
@@ -588,14 +659,15 @@ fmt_rate(x) = isfinite(x) ? @sprintf("%.3g", x) : "—"
 """
     spc_status_text(view)::String
 
-One line for the main window's top bar: engine state, each card's CFD rate
+One line for the main window's top bar: the offline banner if any
+(`view.banner`, see `offline_reason`), engine state, each card's CFD rate
 and SYNC, and the last error of the last 30 s.
 """
 function spc_status_text(view::SpcView)::String
     state = spc_state(view)
     head = state == :none ? (view.last_fin !== nothing && view.last_fin.erreur ? "SPC: stopped — $(view.last_fin.raison)" : "SPC: not connected") :
            "SPC: " * SPC_ENGINE_STATE_NAMES[state]
-    parts = String[head]
+    parts = isempty(view.banner) ? String[head] : String["⚠ " * view.banner, head]
     if state != :none
         for c in sort!(collect(keys(view.cards)))
             r = view.cards[c].last_rates
@@ -622,10 +694,9 @@ function spc_update_texts!(view::SpcView)
         push!(lines, "Source: $(check.source) — " * (check.ok ? "all checks passed" : "$(length(check.problemes)) problem(s)"))
         for c in check.cartes
             if c.pret
-                expected = check.source == "cartes" && !isempty(c.serie_attendue) && c.serie != c.serie_attendue
-                serial = expected ? "$(c.serie) (expected $(c.serie_attendue))" : c.serie
+                channel = c.canal > 0 ? "channel $(c.canal)" : "not in [verification] series"
                 applied = count(l -> l.statut == :ok, c.tableau)
-                push!(lines, "Card $(c.carte): $serial, $(get(FLIMCore.SPCLite.MESSAGES_SYNC, c.sync, "SYNC state $(c.sync)")), " *
+                push!(lines, "Card $(c.carte): $(c.serie) ($channel), $(get(FLIMCore.SPCLite.MESSAGES_SYNC, c.sync, "SYNC state $(c.sync)")), " *
                              "CFD $(fmt_rate(c.cfd)) /s, $applied/$(length(c.tableau)) settings applied")
             else
                 push!(lines, "Card $(c.carte): not ready — $(c.etat_init)")
@@ -638,7 +709,8 @@ function spc_update_texts!(view::SpcView)
     fin = view.last_fin
     if fin !== nothing && fin.mesure != :moteur
         push!(lines, "")
-        push!(lines, "Last $(fin.mesure == :imagerie ? "imaging" : "Single"): $(fin.raison)" *
+        what = fin.mesure == :imagerie ? "imaging" : fin.mesure == :single ? "Single" : "Realtime"
+        push!(lines, "Last $what: $(fin.raison)" *
                      (isempty(fin.fichiers) ? "" : " — files in $(dirname(first(fin.fichiers)))"))
     end
     view.check_text[] = join(lines, "\n")
@@ -670,7 +742,8 @@ end
 function spc_diagnostics_text(view::SpcView)::String
     engine = view.engine
     engine === nothing && return "SPC engine: not running"
-    return "SPC engine: $(SPC_ENGINE_STATE_NAMES[FLIMCore.etat_moteur(engine)])   results dropped $(engine.perdus[])   frames not shown $(engine.trames_sautees[])"
+    return "SPC engine: $(SPC_ENGINE_STATE_NAMES[FLIMCore.etat_moteur(engine)])   results dropped $(engine.perdus[])   " *
+           "frames not shown $(engine.trames_sautees[])   Realtime histograms dropped $(engine.histos_perdus[])"
 end
 
 """

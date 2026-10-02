@@ -72,9 +72,8 @@ end
 """
     make_plot_axes!(left_grid, app, app_run)
 
-Create the counts bar, Plot 1 / Plot 2 axes, and the save-progress bar (with
-its live-updating fill driven by `app_run.save_progress`). Returns a
-NamedTuple of the created axes.
+Create the counts bar and the Plot 1 / Plot 2 axes. Returns a NamedTuple
+of the created axes.
 """
 function make_plot_axes!(left_grid, app, app_run)
     counts_axis = Axis(left_grid[2:3, 2]; AXIS_COUNTS_ATTRS...)
@@ -82,78 +81,50 @@ function make_plot_axes!(left_grid, app, app_run)
     plot_1 = Axis(left_grid[2, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 1\n($(app.layout.plot1))"))...)
     plot_2 = Axis(left_grid[3, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 2\n($(app.layout.plot2))"))...)
 
-    save_progress_axis = Axis(left_grid[4, 2:4]; PROGRESS_BAR_ATTRS...)
-    hidedecorations!(save_progress_axis)
-    xlims!(save_progress_axis, 0.0, 100.0)
-    ylims!(save_progress_axis, 0.0, 20.0)
-
-    save_outline_color = lift(app_run.save_progress) do p
-        return isfinite(Float64(p)) ? COLOR_5 : RGBAf(1.0, 1.0, 1.0, 0.0)
-    end
-    lines!(save_progress_axis, [0.0, 100.0, 100.0, 0.0, 0.0], [0.0, 0.0, 20.0, 20.0, 0.0], color=save_outline_color, linewidth=1.5)
-
-    save_fill_width = lift(app_run.save_progress, save_progress_axis.scene.viewport) do p, viewport
-        width_units = Float64(viewport.widths[1])
-        height_units = Float64(viewport.widths[2])
-
-        if !isfinite(width_units) || width_units <= 0.0 || !isfinite(height_units) || height_units <= 0.0
-            return 0.0
-        end
-
-        # Convert one-bar-height in viewport units to x-axis data units so 0% starts as a square.
-        min_width_units = clamp(height_units * (100.0 / width_units), 0.0, 100.0)
-
-        if !isfinite(Float64(p))
-            return min_width_units
-        end
-
-        clamped = clamp(Float64(p), 0.0, 100.0)
-        return min_width_units + (100.0 - min_width_units) * (clamped / 100.0)
-    end
-
-    save_fill_color = lift(app_run.save_progress) do p
-        return isfinite(Float64(p)) ? COLOR_5 : RGBAf(COLOR_5.r, COLOR_5.g, COLOR_5.b, 0.0)
-    end
-    vspan!(save_progress_axis, 0.0, save_fill_width, color=save_fill_color)
-
     for (series, color) in ((app_run.ch1, PLOT_COLOR_CH1), (app_run.ch2, PLOT_COLOR_CH2))
         hspan!(counts_axis, 1, series.counts, color = (color, 0.1))
         hlines!(counts_axis, series.counts, color = color, linewidth = PLOT_LINEWIDTH)
     end
 
-    return (counts_axis=counts_axis, plot_1=plot_1, plot_2=plot_2, save_progress_axis=save_progress_axis)
+    return (counts_axis=counts_axis, plot_1=plot_1, plot_2=plot_2)
 end
 
 """
-    make_control_widgets!(button_grid, panelbtn_grid)
+    make_control_widgets!(button_grid, panelbtn_grid, app_run)
 
-Create the START/CLEAR buttons, IRF/data-folder path controls, DAQ status
-label + CONNECT button, info label, mode/lifetimes menus, and the panel
+Create the START/CLEAR buttons, the IRF path, recording-folder and
+Playback session-folder controls, DAQ status label + CONNECT button, info
+label and Playback frequency box, mode/lifetimes menus, and the panel
 switch buttons. Returns a NamedTuple of the created widgets.
 """
-function make_control_widgets!(button_grid, panelbtn_grid)
+function make_control_widgets!(button_grid, panelbtn_grid, app_run)
     start = Button(button_grid[1, 1]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "START"))...)
     stop  = Button(button_grid[1, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CLEAR"))...)
 
     initial_irf_name = cached_basename(irf_filepath_cache())
-    initial_folder_name = cached_basename(folderpath_cache(); fallback_path=get_data_root_path())
-    irf_path      = Textbox(button_grid[2, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "IRF path", :displayed_string => initial_irf_name, :stored_string => initial_irf_name))...)
-    folder_path   = Textbox(button_grid[3, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Folder path", :displayed_string => initial_folder_name, :stored_string => initial_folder_name))...)
+    initial_record_name = basename(rstrip(FLIMCore.dossier_spc(app_run.spc.settings), ['/', '\\']))
+    initial_folder_name = cached_basename(session_folder_cache())
+    irf_path      = Textbox(button_grid[2, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "IRF path (.sdt of a Single)", :displayed_string => initial_irf_name, :stored_string => initial_irf_name))...)
+    record_path   = Textbox(button_grid[3, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Recording folder", :displayed_string => initial_record_name, :stored_string => initial_record_name))...)
+    folder_path   = Textbox(button_grid[4, 1:2]; merge(PATH_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Session to replay (Playback)", :displayed_string => initial_folder_name, :stored_string => initial_folder_name))...)
     irf_button    = Button(button_grid[2, 1:2];  PATH_BUTTON_ATTRS...)
-    folder_button = Button(button_grid[3, 1:2];  PATH_BUTTON_ATTRS...)
+    record_button = Button(button_grid[3, 1:2];  PATH_BUTTON_ATTRS...)
+    folder_button = Button(button_grid[4, 1:2];  PATH_BUTTON_ATTRS...)
 
-    daq_label = Label(button_grid[4, 1], loop_status_text(LoopStatus(LOOP_DISCONNECTED, "")); merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
-    connect = Button(button_grid[4, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
+    daq_label = Label(button_grid[5, 1], loop_status_text(LoopStatus(LOOP_DISCONNECTED, "")); merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
+    connect = Button(button_grid[5, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "CONNECT"))...)
 
-    label = Label(button_grid[5, 1], "Frequency: -- Hz\nFile: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
-    default_target_freq_string = string(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ)
-    target_freq = Textbox(button_grid[5, 2]; merge(SPINNER_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Target frequency (Hz)", :displayed_string => default_target_freq_string, :stored_string => default_target_freq_string, :validator => make_float_range_validator(0.01, 1.0e6)))...)
-
-    mode = Menu(button_grid[6, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["Playback", "Realtime", "Save"]))...)
-    lifetimes = Menu(button_grid[6, 2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["1 lifetime", "2 lifetimes", "3 lifetimes"]))...)
+    label = Label(button_grid[6, 1], "Frame rate: -- Hz\nFrame: --"; merge(LABEL_ATTRS, Dict{Symbol, Any}(:justification => :left, :halign => :left, :tellwidth => false))...)
+    # Playback speed: the target pass rate (Hz); 0 = the experiment's own pace (1×).
+    target_freq = Textbox(button_grid[6, 2]; merge(SPINNER_TEXT_ATTRS, Dict{Symbol, Any}(:placeholder => "Frequency (Hz), 0 = 1×", :displayed_string => "0", :stored_string => "0", :validator => make_float_range_validator(0.0, 1.0e6)))...)
+    # Offline (no driver on this computer): Playback first, Realtime refused at START.
+    default_mode = isempty(app_run.offline) ? "Realtime" : PLAYBACK_SESSION_MODE
+    mode = Menu(button_grid[7, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => RUN_MODES, :default => default_mode))...)
+    lifetimes = Menu(button_grid[7, 2]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ["1 lifetime", "2 lifetimes", "3 lifetimes"]))...)
 
     Box(button_grid[2, 1:2]; PATH_BOX_ATTRS...)
     Box(button_grid[3, 1:2]; PATH_BOX_ATTRS...)
+    Box(button_grid[4, 1:2]; PATH_BOX_ATTRS...)
 
     panel = Dict{Symbol, Button}(
         :layout     => Button(panelbtn_grid[1, 1]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "Layout"))...),
@@ -163,18 +134,19 @@ function make_control_widgets!(button_grid, panelbtn_grid)
     )
 
     return (start_button=start, stop_button=stop, irf_path_textbox=irf_path, irf_button=irf_button,
+            record_path_textbox=record_path, record_button=record_button,
             folder_path_textbox=folder_path, folder_button=folder_button, daq_label=daq_label,
             connect_button=connect, info_label=label, target_freq_textbox=target_freq,
-            mode_menu=mode, lifetimes_menu=lifetimes,
-            panel_buttons=panel)
+            mode_menu=mode, lifetimes_menu=lifetimes, panel_buttons=panel)
 end
 
 """
     make_top_bar_widgets!(top_grid, app_run)
 
-The top bar: the SPC engine's status line (cards, CFD rates, last error —
-kept current by the refresh tick through `app_run.spc.status`) and the SPC
-button that opens the SPC window (gui/spc_window.jl).
+The top bar: the SPC engine's status line (the offline banner, cards, CFD
+rates, last error — kept current by the refresh tick through
+`app_run.spc.status`) and the SPC button that opens the SPC window
+(gui/spc_window.jl).
 """
 function make_top_bar_widgets!(top_grid, app_run)
     spc_label = Label(top_grid[1, 1:4], app_run.spc.status; merge(LABEL_ATTRS, Dict{Symbol, Any}(
@@ -216,7 +188,7 @@ function make_gui(app, app_run)
 
     grids = make_gui_grids(fig)
     axes = make_plot_axes!(grids.left_grid, app, app_run)
-    widgets = make_control_widgets!(grids.button_grid, grids.panelbtn_grid)
+    widgets = make_control_widgets!(grids.button_grid, grids.panelbtn_grid, app_run)
     top_bar = make_top_bar_widgets!(grids.top_grid, app_run)
 
     apply_gui_layout_tweaks!(fig, grids)
@@ -233,21 +205,22 @@ function make_gui(app, app_run)
         stop_button         = widgets.stop_button,
         irf_path_textbox    = widgets.irf_path_textbox,
         irf_button          = widgets.irf_button,
+        record_path_textbox = widgets.record_path_textbox,
+        record_button       = widgets.record_button,
         folder_path_textbox = widgets.folder_path_textbox,
         folder_button       = widgets.folder_button,
         daq_label           = widgets.daq_label,
         connect_button      = widgets.connect_button,
-        target_freq_textbox = widgets.target_freq_textbox,
         mode_menu           = widgets.mode_menu,
         lifetimes_menu      = widgets.lifetimes_menu,
         panel_buttons       = widgets.panel_buttons,
         info_label          = widgets.info_label,
+        target_freq_textbox = widgets.target_freq_textbox,
         spc_label           = top_bar.spc_label,
         spc_button          = top_bar.spc_button,
         counts_axis         = axes.counts_axis,
         plot_1_axis         = axes.plot_1,
-        plot_2_axis         = axes.plot_2,
-        save_progress_axis  = axes.save_progress_axis
+        plot_2_axis         = axes.plot_2
     )
 
     draw_initial_plots!(app, app_run, blocks)

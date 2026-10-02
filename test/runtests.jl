@@ -2,7 +2,6 @@ using Test
 using FLIMApp
 using FLIMApp: ChannelFrame, ChannelSeries, AcquisitionSample, ProtocolSettings,
                LayoutSettings, ControllerSettings, RoiSettings, ConsoleSettings
-using ZipFile
 
 # These tests cover the GUI-free logic: protocol schedule math, smoothing,
 # state persistence, spinner stepping, plot windowing, the MLE lifetime fit
@@ -21,6 +20,25 @@ test_bench_config(overrides = Dict{String, Any}()) = FLIMApp.bench_config_from_d
           overrides); source = "test")
 
 square_roi(x0, y0) = FLIMApp.RoiCoordinates("roi", [x0, x0 + 40, x0 + 40, x0, x0], [y0, y0, y0 + 40, y0 + 40, y0])
+
+"""Every pass the analysis published so far (`ex.frames`), as columns."""
+function published(ex)
+    records = FLIMApp.FrameRecord[]
+    FLIMApp.take_new!(records, ex.frames, 0)
+    s = [r.sample for r in records]
+    return (roi_index = [r.roi_index for r in records], pass = [x.pass for x in s], timestamp = [x.timestamps for x in s],
+            complete = [x.complete for x in s], excluded_because = [x.excluded_because for x in s],
+            command1 = [x.command1 for x in s], lifetime_ch1 = [x.ch1.lifetime for x in s],
+            lifetime_kalman_ch1 = [x.ch1.lifetime_kalman for x in s], lifetime_ch2 = [x.ch2.lifetime for x in s])
+end
+
+"""The record of an IRF taken with `settings` (what `import_irf_sdt` writes), for the checks at START."""
+irf_info_for(settings) = Dict{String, Any}(
+    "channels" => [Dict{String, Any}("serial" => serial,
+                                     "settings" => Dict{String, Any}(k => Float64(v) for (k, v) in settings.spc
+                                                                     if k in first.(FLIMApp.IRF_CARD_SETTINGS)))
+                   for serial in settings.series],
+    "dcc" => Dict{String, Any}(settings.dcc))
 
 @testset "FLIMApp" begin
 
@@ -212,8 +230,8 @@ end
     @test series1.concentration == [1.5]
     @test isnan(app_run.ch2_rois[1].lifetime[1])          # absent-channel sentinel
 
-    # A whole analyzed file goes to its ROI's series and the global ones.
-    sample = AcquisitionSample(frame, ChannelFrame(), 12.0, NaN, 1.0, 4.0, UInt32(7), "f_0007.sdt", 7, NaN)
+    # A whole analyzed histogram goes to its ROI's series and the global ones.
+    sample = AcquisitionSample(frame, ChannelFrame(), 12.0, NaN, 1.0, 4.0, UInt32(7), 6, 0.05, 1.0, true, 0.0)
     FLIMApp.accumulate_frame!(app, app_run, FLIMApp.FrameRecord(sample, 1))
     @test app_run.command1 == [12.0] && app_run.protocol_setpoint == [4.0] && app_run.i == 7
     @test length(series1.timestamps) == 2
@@ -226,12 +244,14 @@ end
     FLIMApp.fill_points!(points, xs, xs, Inf, 10)
     @test length(points) <= 11 && last(points)[1] == 1000.0
 
+    FLIMApp.reset_acquisition_state!(app, app_run; n_rois = 3)            # a Playback session's ROIs
+    @test length(app_run.ch1_rois) == 3 && length(app_run.ch2_rois) == 3
     FLIMApp.reset_acquisition_state!(app, app_run)
+    @test length(app_run.ch1_rois) == 1
     @test isempty(app_run.ch1_rois[1].photons)
     @test isempty(app_run.ch2_rois[1].lifetime)
     @test isempty(app_run.command1)
     @test app_run.ch1.counts[] == 0.0
-    @test isnan(app_run.save_progress[])
 end
 
 @testset "PI command" begin
@@ -327,7 +347,7 @@ end
     n_scan, n_shift = 950, 50
     @test pattern.slot_samples == n_scan + n_shift
     @test FLIMApp.slots_per_cycle(pattern) == 3
-    @test FLIMApp.slot_duration_s(pattern) ≈ FLIMApp.roi_scan_period_s(ProtocolSettings(scan_time=95, shift_time=5))
+    @test FLIMApp.slot_duration_s(pattern) ≈ (95 + 5) / 1000
     @test pattern.roi_order == order
     @test FLIMApp.slot_roi(pattern, 4) == order[2] && FLIMApp.slot_visit(pattern, 4) == 1
 
@@ -343,13 +363,23 @@ end
         @test all(==(2.0), buffers.commands[1:n_scan]) && all(==(0.0), buffers.commands[n_scan+1:pattern.slot_samples])
         @test all(==(0.5), buffers.commands[pattern.slot_samples+1:pattern.slot_samples+n_scan])
         @test buffers.commands[end] == 0.0 && buffers.lines[end] & FLIMApp.do_bit(FLIMApp.DO_BIT_GATE) == 0
-        # Drawn index − 1 of the visited ROI on bits 4–7, enable on throughout.
-        @test all(==(order[s + 1] - 1), buffers.lines .>> FLIMApp.DO_ROI_CODE_SHIFT)
+        # During the scan, the visited ROI's routing code (its drawn index),
+        # written as NOT(code) on bits 4–7 — the SPC-150N's routing inputs are
+        # active low, it reads the code itself; during the move, the reserved
+        # code, whose photons the decoding throws away. Enable on throughout.
+        codes = buffers.lines .>> FLIMApp.DO_ROI_CODE_SHIFT
+        @test all(==(~UInt8(order[s + 1]) & 0x0f), codes[1:n_scan]) && all(==(0x0f), codes[n_scan+1:end])
         @test all(==(1), line(FLIMApp.DO_BIT_ENABLE))
-        @test sum(line(FLIMApp.DO_BIT_ROI)) == round(Int, cfg.sync_pulse_s * cfg.sample_rate_hz)
-        @test sum(line(FLIMApp.DO_BIT_SEQUENCE)) == (s == 0 ? round(Int, cfg.sync_pulse_s * cfg.sample_rate_hz) : 0)
+        pulse = round(Int, cfg.sync_pulse_s * cfg.sample_rate_hz)
+        @test sum(line(FLIMApp.DO_BIT_ROI)) == pulse
+        @test sum(line(FLIMApp.DO_BIT_SEQUENCE)) == (s == 0 ? pulse : 0)
         FLIMApp.check_slot(buffers, cfg)
     end
+
+    # The entry onto the first ROI: the reserved code, everything else off.
+    @test all(==(0xf0), FLIMApp.entry_buffers(pattern).lines)
+    # No CNTE line any more (the reserved code does its job).
+    @test_throws ErrorException test_bench_config(Dict{String, Any}("sync" => Dict{String, Any}("cnte_line" => 3)))
 
     # The spiral points in order, each held equally long; the shift ends on
     # the next ROI's center (half-cosine move); the entry reaches the first.
@@ -361,10 +391,28 @@ end
     @test pattern.entry_x[1] == 0.0 && pattern.entry_x[end] ≈ segments[1].center[1] / 1000
     @test maximum(abs, pattern.x) <= 1.0 && maximum(abs, pattern.y) <= 1.0    # default ±1000 mV range
 
-    # Without ROI scanning: galvos parked at 0 V, port 0 low, commands only.
+    # Without ROI scanning: galvos still at 0 V, the same scan/pause rhythm:
+    # the no-ROI code during the scan, the reserved code during the pause.
     idle = FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(rois, Int[], false, -1000, 1000, -1000, 1000, 20, 3, 95, 5, (1024, 1024)), cfg)
     FLIMApp.prepare_slot!(buffers, idle, 7, 1.0, 0.0)
-    @test all(==(0.0), buffers.galvos) && all(==(0x00), buffers.lines) && buffers.commands[1] == 1.0
+    gate = (buffers.lines .>> FLIMApp.DO_BIT_GATE) .& 0x01
+    codes = buffers.lines .>> FLIMApp.DO_ROI_CODE_SHIFT
+    @test all(==(0.0), buffers.galvos) && buffers.commands[1] == 1.0
+    @test all(==(1), gate[1:n_scan]) && all(==(0), gate[n_scan+1:end])
+    @test all(==(~UInt8(FLIMCore.CODE_SANS_ROI) & 0x0f), codes[1:n_scan]) && all(==(0x0f), codes[n_scan+1:end])
+    @test FLIMApp.routing_byte(FLIMCore.CODE_HORS_ROI, false) == 0x00
+    @test FLIMApp.slots_per_cycle(idle) == 1 && FLIMApp.slot_duration_s(idle) ≈ 0.1
+
+    # More ROIs than routing codes (4 lines, code 0 reserved: 15 ROIs): refused.
+    many = [square_roi(10.0 * k, 10.0 * k) for k in 1:16]
+    @test_throws FLIMApp.SafetyError FLIMApp.build_scan_pattern(
+        FLIMApp.ScanRequest(many, collect(1:16), true, -1000, 1000, -1000, 1000, 20, 3, 95, 5, (1024, 1024)), cfg)
+    @test FLIMApp.build_scan_pattern(
+        FLIMApp.ScanRequest(many[1:15], collect(1:15), true, -1000, 1000, -1000, 1000, 20, 3, 95, 5, (1024, 1024)), cfg) isa FLIMApp.ScanPattern
+
+    # The pass counter needs at least two samples of scan and of pause.
+    @test_throws FLIMApp.SafetyError FLIMApp.build_scan_pattern(
+        FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 95, 0, (1024, 1024)), cfg)
 
     # Refused before anything reaches the card.
     @test_throws FLIMApp.SafetyError FLIMApp.build_scan_pattern(
@@ -392,8 +440,10 @@ end
     rois = [square_roi(100.0, 100.0), square_roi(600.0, 300.0), square_roi(300.0, 800.0)]
     order = FLIMApp.roi_visit_order(rois)
     request = FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 45, 5, (1024, 1024))
-    FLIMApp.send_journal!(ex.journal, FLIMApp.JournalRunStart(time(), Dict{String, Any}("mode" => "test")))
-    FLIMApp.set_command_values!(ex, 40.0, NaN)
+    FLIMApp.send_journal!(ex.journal, FLIMApp.JournalRunStart(time(), FLIMApp.new_run_dir(FLIMApp.journal_root(cfg), time()),
+                                                              Dict{String, Any}("mode" => "test"), Matrix{Float64}[]))
+    FLIMApp.set_command_values!(ex, 40.0, NaN)                 # every ROI
+    FLIMApp.set_command_values!(ex, order[2], 60.0, NaN)       # one PI per ROI
     FLIMApp.send_command!(ex, FLIMApp.StartCommand(request))
     @test await(() -> state() == FLIMApp.LOOP_RUNNING)
     summaries = FLIMApp.SlotSummary[]
@@ -402,7 +452,8 @@ end
     # Slots follow the visiting order; commands carried as written; the loop
     # stays far from its deadline.
     @test [s.roi for s in summaries[1:3]] == order
-    @test all(s -> s.command1_v == FLIMApp.command_volts(40.0, cfg) && s.command2_v == 0.0, summaries)
+    # Each ROI's scan carries that ROI's commands.
+    @test all(s -> s.command1_v == FLIMApp.command_volts(s.roi == order[2] ? 60.0 : 40.0, cfg) && s.command2_v == 0.0, summaries)
     @test all(s -> s.iteration_s < s.deadline_s / 2, summaries)
 
     # The readback is what was written (the simulation mirrors the outputs).
@@ -444,6 +495,7 @@ end
 
     # The journal wrote one run folder with the visits and the readback.
     run_dir = only(filter(isdir, readdir(FLIMApp.journal_root(cfg); join=true)))
+    @test readlines(joinpath(run_dir, "frames.csv")) == [FLIMApp.FRAMES_CSV_HEADER]
     visits = readlines(joinpath(run_dir, "visits.csv"))
     @test visits[1] == FLIMApp.VISITS_CSV_HEADER && length(visits) > 6
     readback = reinterpret(Float32, read(joinpath(run_dir, "readback.bin")))
@@ -453,173 +505,451 @@ end
 end
 
 @testset "DAQ loop without the NI driver" begin
-    # Connecting fails into FAULT with the reason; nothing throws.
+    # Connecting fails into a disconnected state with the reason — RECONNECT
+    # retries; no fault, nothing throws.
+    disconnected = FLIMApp.LoopStatus(FLIMApp.LOOP_DISCONNECTED, "")
+    failed = FLIMApp.LoopStatus(FLIMApp.LOOP_DISCONNECTED, "connection failed: no card")
+    @test FLIMApp.connect_button_label(disconnected) == "CONNECT" && FLIMApp.connect_button_label(failed) == "RECONNECT"
+    @test FLIMApp.connect_button_label(FLIMApp.LoopStatus(FLIMApp.LOOP_FAULT, "x")) == "RESET"
+    @test FLIMApp.loop_status_text(failed) == "DAQ: connection failed"
     if isempty(Base.Libc.Libdl.find_library("nicaiu"))
         cfg = FLIMApp.bench_config_from_dict(Dict{String, Any}("journal" => Dict{String, Any}("directory" => mktempdir())))
         ex = FLIMApp.Exchange(cfg)
         loop = Threads.@spawn FLIMApp.daq_loop(cfg, ex)
         FLIMApp.send_command!(ex, FLIMApp.ConnectCommand())
-        @test timedwait(() -> FLIMApp.loop_status(ex).state == FLIMApp.LOOP_FAULT, 10.0) === :ok
-        @test occursin("connection failed", FLIMApp.loop_status(ex).message)
+        @test timedwait(() -> startswith(FLIMApp.loop_status(ex).message, "connection failed"), 10.0) === :ok
+        @test FLIMApp.loop_status(ex).state == FLIMApp.LOOP_DISCONNECTED
         FLIMApp.send_command!(ex, FLIMApp.QuitCommand())
         @test timedwait(() -> istaskdone(loop), 10.0) === :ok
+
+        # This computer (no NI-DAQmx): offline — Realtime refused, Playback available.
+        reason = FLIMApp.offline_reason(cfg, FLIMCore.Reglages())
+        @test occursin("OFFLINE", reason) && occursin("NI-DAQmx", reason)
+        @test FLIMApp.offline_reason(test_bench_config(), FLIMCore.Reglages(source = "simulation")) == ""
     end
 end
 
-@testset "analysis output: ROI assignment by visiting order" begin
+@testset "Realtime analysis: passes to frames" begin
+    # A pass: two cards (channels 1 and 2), 256 channels × 16 routing codes.
+    function pass(code_counts; pertes = 0, passe = 3)
+        m1, m2 = zeros(UInt32, 256, 16), zeros(UInt32, 256, 16)
+        for (code, n) in code_counts
+            m1[10, code + 1] = n
+            m2[20, code + 1] = n ÷ 2
+        end
+        return FLIMCore.HistoClamp(passe, 2.0, 2.95, [1, 0], ["3N0317", "3N0318"], [m1, m2], pertes, 12.5 / 256)
+    end
+
+    # The ROI of a pass is the routing code most of its photons carry.
+    @test FLIMApp.pass_roi(pass([0 => 5, 2 => 100, 3 => 2]), [1, 3, 2]) == (2, 2)
+    @test FLIMApp.pass_roi(pass([0 => 5]), [1, 2]) == (0, 0)                # only the reserved code
+    @test FLIMApp.pass_roi(pass([4 => 50]), [1, 2]) == (0, 4)               # not one of this run's ROIs
+    @test FLIMApp.pass_roi(pass([0 => 5, 2 => 100]), Int[]) == (1, -1)      # no ROI: every photon
+    h = pass([0 => 5, 2 => 100])
+    @test sum(FLIMApp.pass_histogram(h.histogrammes[1], -1)) == 105
+    @test sum(FLIMApp.pass_histogram(h.histogrammes[1], 2)) == 100 && sum(FLIMApp.pass_histogram(h.histogrammes[2], 2)) == 50
+
+    # Finer cards are summed down to the analysis (and IRF) resolution.
+    @test FLIMApp.analysis_histogram(fill(UInt16(1), 1024)) == fill(4.0, 256)
+    @test FLIMApp.analysis_histogram(UInt16[1, 2, 3]) == [1.0, 2.0, 3.0]
+
+    # emit_frame! publishes for the GUI, the DAQ loop (that ROI's commands),
+    # the journal and the save.
     ex = FLIMApp.Exchange()
-    frame = ChannelFrame([1.0], [1.0], 10.0, 3.0, 1.0)
-    sample(n) = AcquisitionSample(frame, ChannelFrame(), 25.0, 30.0, Float64(n), NaN, UInt32(n), "f_$(n).sdt", n, NaN)
-
-    # The k-th file of each cycle belongs to the k-th ROI visited.
-    out = FLIMApp.AnalysisOutput(ex; roi_order=[1, 3, 2])
-    @test [FLIMApp.assign_roi!(out, sample(n)) for n in 1:6] == [1, 3, 2, 1, 3, 2]
-    @test FLIMApp.assign_roi!(FLIMApp.AnalysisOutput(ex), sample(5)) == 1    # not split per ROI
-
-    # emit_frame! publishes for the GUI, the DAQ loop and the journal.
-    @test FLIMApp.emit_frame!(out, sample(7))
+    frame = ChannelFrame([1.0], [1.0], 10.0, 3.0, 1.0, 2.9)
+    out = FLIMApp.AnalysisOutput(ex; roi_order=[1, 2])
+    FLIMApp.emit_frame!(out, AcquisitionSample(frame, ChannelFrame(), 25.0, 30.0, 0.9, NaN, UInt32(1), 3, 0.05, 0.9, true, 0.0), 2)
     records = FLIMApp.FrameRecord[]
     FLIMApp.take_new!(records, ex.frames, 0)
-    @test only(records).roi_index == 1
-    @test ex.command_values[1][] == 25.0 && ex.command_values[2][] == 30.0
-    @test FLIMApp.pending_journal(ex.journal) == 1
-
-    realtime = FLIMApp.AnalysisOutput(ex; roi_order=[1, 2], realtime=true, nominal_period_s=1.0)
-    FLIMApp.emit_frame!(realtime, sample(1))
-    @test FLIMApp.nrow(realtime.realtime_rows) == 1
+    @test only(records).roi_index == 2 && only(records).sample.pass == 3
+    @test FLIMApp.command_values(ex, 2) == (25.0, 30.0) && all(isnan, FLIMApp.command_values(ex, 1))
+    @test FLIMApp.pending_journal(ex.journal) == 1 && only(records).sample.ch1.lifetime_kalman == 2.9
+    @test isnan(ChannelFrame([1.0], [1.0], 1.0, 1.0, 1.0).lifetime_kalman)
+    # Playback: the PI outputs are only simulated, never written for the DAQ loop.
+    replay = FLIMApp.AnalysisOutput(ex; roi_order=[1, 2], drive_outputs=false)
+    FLIMApp.emit_frame!(replay, AcquisitionSample(frame, ChannelFrame(), 70.0, 80.0, 1.9, NaN, UInt32(2), 4, 1.05, 1.9, true, 0.0), 1)
+    @test all(isnan, FLIMApp.command_values(ex, 1)) && FLIMApp.command_values(ex, 2) == (25.0, 30.0)
 end
 
-@testset "acquisition helpers" begin
-    @test FLIMApp.initial_guess_for_lifetimes("1 lifetime") == [3.0, 0.0, 5.0e-5]
-    @test length(FLIMApp.initial_guess_for_lifetimes("2 lifetimes")) == 5
-    @test length(FLIMApp.initial_guess_for_lifetimes("3 lifetimes")) == 7
+@testset "Realtime worker: per ROI and channel, lossy passes kept out of the PI" begin
+    saved = [(c.irf, c.irf_bin_size, c.tcspc_window_size) for c in (FLIMApp.RUNTIME[], FLIMApp.RUNTIME_CH2[])]
+    try
+        irf = FLIMApp.simulated_irf()
+        FLIMApp.set_irfs!([irf, irf])
+        @test FLIMApp.channel_fit_context(2) === FLIMApp.RUNTIME_CH2[] && FLIMApp.loaded_irfs() == [irf, irf]
+        FLIMApp.warmup_lifetime_fitting!()
+        x = FLIMApp.get_x_data(256, irf[2, 1])
+        decay(tau) = round.(UInt32, FLIMApp.conv_irf_data(x, (tau, 0.0, 0.0), irf) .* 50_000)     # normalized model
+        tau = Dict(0 => 2.5, 1 => 2.0, 2 => 3.5)
+        function pass(n, code; pertes = 0)
+            m1, m2 = zeros(UInt32, 256, 16), zeros(UInt32, 256, 16)
+            m1[:, code + 1] = decay(tau[code])
+            m2[:, code + 1] = decay(tau[code] + 0.5)
+            return FLIMCore.HistoClamp(n, n - 0.95, Float64(n), [1, 0], ["3N0317", "3N0318"], [m1, m2], pertes, 12.5 / 256)
+        end
 
-    @test FLIMApp.resolve_protocol_config(nothing) === nothing
-    p = ProtocolSettings()
-    @test FLIMApp.resolve_protocol_config(p) === p
-
-    @test FLIMApp.parse_file_sequence_number("/data/sample_00042.sdt") == 42
-    @test FLIMApp.parse_file_sequence_number("/data/sample.sdt") === nothing
-
-    # scan_time + shift_time, ms -> s
-    @test FLIMApp.roi_scan_period_s(ProtocolSettings(scan_time=950, shift_time=50)) == 1.0
-    @test isnan(FLIMApp.roi_scan_period_s(ProtocolSettings(scan_time=0, shift_time=0)))
-end
-
-@testset "ROI slot tracking (missed-file repair)" begin
-    # Helper: feed a whole run of (time, sequence_number) pairs through one
-    # tracker and collect the ROI index each file would be assigned to.
-    function roi_indices(period_s, n_rois, files)
-        tracker = FLIMApp.RoiSlotTracker(period_s)
-        return map(files) do (t, seq)
-            slot, _, _ = FLIMApp.next_roi_slot!(tracker, Float64(t), seq)
-            mod1(slot, n_rois)
+        ex = FLIMApp.Exchange()
+        FLIMApp.publish_settings!(ex, FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = true, P1 = 1.0),
+                                                               ProtocolSettings()))
+        histograms = Channel{FLIMCore.HistoClamp}(16)
+        codes = [1, 2, 1, 2, 1, 2]
+        foreach(n -> put!(histograms, pass(n, codes[n]; pertes = n == 5 ? 3 : 0)), eachindex(codes))
+        put!(histograms, pass(7, 0))                                   # reserved code only: not analyzed
+        done = Threads.Atomic{Bool}(true)                              # the replay is over: ends once all are taken
+        out = FLIMApp.AnalysisOutput(ex; roi_order = [1, 2])
+        FLIMApp.start_realtime(out, Threads.Atomic{Bool}(true), histograms; initial_guess = [3.0, 0.0, 5.0e-5],
+                               source_done = done)
+        rows = published(ex)
+        @test length(rows.pass) == 6 && rows.roi_index == codes && rows.pass == 1:6
+        @test out.unmatched_passes == 1 && out.excluded_passes == 1 && rows.complete == [true, true, true, true, false, true]
+        @test occursin("GAP", rows.excluded_because[5]) && all(isempty, rows.excluded_because[[1, 2, 3, 4, 6]])
+        # Each ROI and channel fit on its own decays.
+        @test all(k -> isapprox(rows.lifetime_ch1[k], tau[codes[k]]; atol = 0.15), 1:6)
+        @test all(k -> isapprox(rows.lifetime_ch2[k], tau[codes[k]] + 0.5; atol = 0.15), 1:6)
+        @test rows.timestamp ≈ (1:6) .- 0.05                        # from the start of the first pass
+        # One PI per ROI (setpoint 4 ns, P = 1): ROI 1 is further from it.
+        @test rows.command1[1] > rows.command1[2] > 0
+        @test all(k -> rows.command1[k] ≈ clamp(4.0 - rows.lifetime_kalman_ch1[k], 0, 100), [1, 2, 3, 4, 6])
+        # The lossy pass (ROI 1): shown, but no observer update, command held.
+        @test isnan(rows.lifetime_kalman_ch1[5]) && rows.command1[5] == rows.command1[3]
+        @test all(isnan, FLIMApp.command_values(ex, 1))                     # cleared when the worker ends
+    finally
+        for (c, v) in zip((FLIMApp.RUNTIME[], FLIMApp.RUNTIME_CH2[]), saved)
+            c.irf, c.irf_bin_size, c.tcspc_window_size = v
         end
     end
+end
 
-    # Nothing missing: the first file's own sequence number is the origin,
-    # so a clean run reproduces plain mod1(sequence_number, n_rois) exactly.
-    clean = [(Float64(k - 1), k) for k in 1:8]
-    @test roi_indices(1.0, 2, clean) == [1, 2, 1, 2, 1, 2, 1, 2]
-    @test roi_indices(1.0, 3, clean) == [1, 2, 3, 1, 2, 3, 1, 2]
+@testset "Realtime chain: simulated DAQ, simulated SPC-150N, analysis" begin
+    # The whole Realtime procedure without hardware: the DAQ loop plays 50 ms
+    # slots (45 ms scan, CNTE high, then the pause) over two ROIs; the SPC
+    # engine (simulation source) cuts the passes the 6321 counter would mark
+    # (M0/M3) and the cards would route; the worker fits them per ROI and
+    # channel and writes each ROI's commands for the DAQ loop.
+    saved = [(c.irf, c.irf_bin_size, c.tcspc_window_size) for c in (FLIMApp.RUNTIME[], FLIMApp.RUNTIME_CH2[])]
+    cfg = test_bench_config()
+    ex = FLIMApp.Exchange(cfg)
+    hw = FLIMApp.SimulatedHardware(cfg; realtime=true, strict_timing=false)
+    loop = Threads.@spawn FLIMApp.daq_loop(cfg, ex; hardware=hw)
+    engine = FLIMCore.demarrer_moteur(FLIMCore.Reglages(source = "simulation", dossier = mktempdir(), seuil_cfd = 10.0))
+    running = Threads.Atomic{Bool}(true)
+    await(f; timeout=60.0) = timedwait(f, timeout; pollint=0.01) === :ok
+    try
+        FLIMApp.set_irfs!([FLIMApp.simulated_irf()])
+        FLIMApp.warmup_lifetime_fitting!()
 
-    # The reported failure: the source writes no file for ROI 2's fourth
-    # scan, and because it numbers files as they are written, the numbering
-    # stays consecutive right across the hole. Only the doubled delay
-    # betrays it — file 4 (seq 4, which mod1 alone would send to ROI 2) is
-    # really ROI 1's.
-    missed = [(0.0, 1), (1.0, 2), (2.0, 3), (4.0, 4), (5.0, 5), (6.0, 6)]
-    @test roi_indices(1.0, 2, missed) == [1, 2, 1, 1, 2, 1]
-    # Same input keyed on the sequence number alone: ROI 1 scanned twice in
-    # a row but both files land on different ROIs — the misalignment.
-    @test [mod1(seq, 2) for (_, seq) in missed] == [1, 2, 1, 2, 1, 2]
+        FLIMApp.send_command!(ex, FLIMApp.ConnectCommand())
+        @test await(() -> FLIMApp.loop_status(ex).state == FLIMApp.LOOP_READY)
+        @test await(() -> FLIMCore.etat_moteur(engine) == :pret)
 
-    # Skips are reported, and only when they happen.
-    tracker = FLIMApp.RoiSlotTracker(1.0)
-    @test FLIMApp.next_roi_slot!(tracker, 0.0, 1) == (1, 0, false)
-    @test FLIMApp.next_roi_slot!(tracker, 1.0, 2) == (2, 0, false)
-    # Three periods of silence: two scans produced nothing.
-    slot, skipped, _ = FLIMApp.next_roi_slot!(tracker, 4.0, 3)
-    @test (slot, skipped) == (5, 2)
-    @test tracker.skipped_total == 2
+        rois = [square_roi(100.0, 100.0), square_roi(600.0, 300.0)]
+        order = FLIMApp.roi_visit_order(rois)
+        request = FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 45, 5, (1024, 1024))
+        session = mktempdir()
+        FLIMCore.commander!(engine, FLIMCore.Clamp(rois = order, ordre = order, dossier = joinpath(session, "spc"),
+                                                   scan_s = 0.045, pause_s = 0.005))
+        @test await(() -> FLIMCore.etat_moteur(engine) == :clamp)
+        FLIMApp.send_command!(ex, FLIMApp.StartCommand(request))
+        out = FLIMApp.AnalysisOutput(ex; roi_order=order)
+        worker = Threads.@spawn FLIMApp.start_realtime(out, running, engine.histogrammes; initial_guess=[3.0, 0.0, 5.0e-5])
 
-    # A gap in the numbering itself (file written, never seen by this app)
-    # is still honored — that's what the sequence number is good at.
-    tracker = FLIMApp.RoiSlotTracker(1.0)
-    FLIMApp.next_roi_slot!(tracker, 0.0, 1)
-    slot, skipped, _ = FLIMApp.next_roi_slot!(tracker, 2.0, 3)
-    @test (slot, skipped) == (3, 1)
+        records = FLIMApp.FrameRecord[]
+        @test await(() -> (FLIMApp.take_new!(records, ex.frames, length(records)); length(records) >= 8))
+        # Each frame is the ROI the cards read on the routing lines, in
+        # visiting order, with photons on both cards, at most one scan's worth.
+        @test [r.roi_index for r in records[1:4]] == [order; order]
+        @test [r.sample.pass for r in records] == 1:length(records) && all(r -> r.sample.complete, records)
+        @test all(r -> 0 < r.sample.ch1.photons < 2e4 && r.sample.ch2.photons > 0, records)
+        @test all(r -> r.sample.pass_end_s - r.sample.pass_start_s ≈ 0.045, records)
+        # Simulated lifetimes: 1.8 + 0.25 code + 0.15 channel (± 0.2 over 15 s).
+        @test all(r -> abs(r.sample.ch1.lifetime - (1.95 + 0.25 * r.roi_index)) < 0.35, records)
+        @test count(r -> r.sample.ch2.lifetime > r.sample.ch1.lifetime, records) >= length(records) - 1
 
-    # The two estimates disagreeing takes the larger: neither mechanism can
-    # invent scans that never happened, so each is a lower bound.
-    tracker = FLIMApp.RoiSlotTracker(1.0)
-    FLIMApp.next_roi_slot!(tracker, 0.0, 1)
-    @test FLIMApp.next_roi_slot!(tracker, 1.0, 4)[1] == 4      # numbering wins
-    @test FLIMApp.next_roi_slot!(tracker, 4.0, 5)[1] == 7      # timing wins
-
-    # Timing jitter well inside half a period must not read as a skip.
-    jittery = [(0.0, 1), (0.78, 2), (1.85, 3), (2.75, 4), (4.05, 5), (5.2, 6)]
-    @test roi_indices(1.0, 2, jittery) == [1, 2, 1, 2, 1, 2]
-
-    # No usable timestamp (mtime unreadable): falls back to the numbering
-    # rather than treating NaN as a gap, and the *next* gap is measured from
-    # the new reference instead of spanning two files (which would read as a
-    # phantom skip).
-    tracker = FLIMApp.RoiSlotTracker(1.0)
-    FLIMApp.next_roi_slot!(tracker, 0.0, 1)
-    @test FLIMApp.next_roi_slot!(tracker, NaN, 2) == (2, 0, false)
-    @test FLIMApp.next_roi_slot!(tracker, 5.0, 3) == (3, 0, false)
-    @test FLIMApp.next_roi_slot!(tracker, 6.0, 4) == (4, 0, false)
-
-    # The real period being consistently longer than the protocol's nominal
-    # one (per-file overhead at the source) must not manufacture a skip on
-    # every single file: ambiguous gaps are declined until the measured
-    # period has been established, and then it takes over.
-    stretched = [(1.6 * (k - 1), k) for k in 1:12]
-    @test roi_indices(1.0, 2, stretched) == [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2]
-    tracker = FLIMApp.RoiSlotTracker(1.0)
-    for (t, seq) in stretched
-        FLIMApp.next_roi_slot!(tracker, t, seq)
+        running[] = false
+        FLIMApp.request_stop!(ex)
+        FLIMCore.commander!(engine, FLIMCore.Arret())
+        @test await(() -> istaskdone(worker))
+        @test await(() -> FLIMApp.loop_status(ex).state == FLIMApp.LOOP_READY && FLIMCore.etat_moteur(engine) == :pret)
+        # The session holds each card's stream: Playback can replay it.
+        @test FLIMApp.is_session_dir(session)
+    finally
+        running[] = false
+        FLIMCore.arreter_moteur(engine)
+        FLIMApp.send_command!(ex, FLIMApp.QuitCommand())
+        timedwait(() -> istaskdone(loop), 10.0)
+        for (c, v) in zip((FLIMApp.RUNTIME[], FLIMApp.RUNTIME_CH2[]), saved)
+            c.irf, c.irf_bin_size, c.tcspc_window_size = v
+        end
     end
-    @test tracker.skipped_total == 0
-    @test tracker.period_est_s ≈ 1.6
+end
 
-    # ... and a genuine miss is still caught once that longer period is the
-    # one being measured against. The 12th file sits at t = 17.6; nothing is
-    # written for the scan after it, so the 13th arrives two periods later.
-    long_run = vcat(stretched, [(17.6 + 3.2, 13), (17.6 + 4.8, 14)])
-    long_indices = roi_indices(1.0, 2, long_run)
-    @test long_indices[13] == 2    # ... which mod1(13, 2) alone would call ROI 1
-    @test long_indices[14] == 1
+@testset "Playback of a simulated session" begin
+    # simulate_session writes a session in the format of a real one (written
+    # by the SPC engine itself); Playback replays it through the same engine
+    # and analysis, with the session's ROIs and IRF.
+    saved = [(c.irf, c.irf_bin_size, c.tcspc_window_size) for c in (FLIMApp.RUNTIME[], FLIMApp.RUNTIME_CH2[])]
+    dir = joinpath(mktempdir(), "session")
+    try
+        FLIMApp.simulate_session(dir; duration_s = 9, photons_per_s = 2e4)
+        @test FLIMApp.is_session_dir(dir) && !FLIMApp.is_session_dir(mktempdir())
+        @test sort(filter(f -> endswith(f, ".spc"), readdir(joinpath(dir, "spc")))) == ["3N0317.spc", "3N0318.spc"]
+        @test isfile(joinpath(dir, "spc", "3N0317_acquisition.ini")) && isfile(joinpath(dir, "spc", "3N0317_parametres.ini"))
+        s = FLIMApp.read_session(dir)
+        @test length(s.rois) == 3 && sort(s.roi_order) == [1, 2, 3] && s.image_size == (1024, 512) && length(s.irfs) == 2
+        info = s.info
+        @test info["mode"] == "Simulation" && info["versions"]["flimcore"] == FLIMCore.VERSION_CORE
+        @test [e["code_written"] for e in info["roi"]["list"]] == [15 - e["index"] for e in info["roi"]["list"]]
+        @test info["daq"]["scan_samples"] == 9500 && info["spc"]["code_sans_roi"] == FLIMCore.CODE_SANS_ROI
+        @test_throws ErrorException FLIMApp.simulate_session(dir)              # never over an existing session
+        @test s.irf_info["channels"][2]["serial"] == "3N0318" && haskey(s.irf_info, "dcc")
 
-    # A doubled gap must not drag the period estimate up toward 1.5x and
-    # start hiding further misses — that's why the estimator is a median.
-    with_misses = [(0.0, 1), (1.0, 2), (2.0, 3), (3.0, 4), (4.0, 5),
-                   (6.0, 6), (7.0, 7), (9.0, 8), (10.0, 9)]
-    tracker = FLIMApp.RoiSlotTracker(1.0)
-    for (t, seq) in with_misses
-        FLIMApp.next_roi_slot!(tracker, t, seq)
+        # The session's settings by default (layout, gains, protocol), and its pass timing.
+        @test FLIMApp.session_pass_timing(s) == (1.0, 0.95, 1e-4)
+        @test FLIMApp.playback_speed(0, s) == 1.0 && FLIMApp.playback_speed(5.0, s) == 5.0
+        layout = FLIMApp.settings_from_dict(LayoutSettings, FLIMApp.settings_dict(LayoutSettings(binning = 7, smoothing = 3)))
+        @test layout.binning == 7 && layout.smoothing == 3
+        @test FLIMApp.settings_from_dict(ControllerSettings, Dict{String, Any}("P1" => "oops", "I1" => 2.0)).I1 == 2.0
+        @test FLIMApp.session_analysis_settings(s).layout.binning == LayoutSettings().binning
+
+        # The clamp series model: a first-order response on channel 1, channel 2 flat.
+        clamp = FLIMApp.clamp_series_model(noise_ns = 0.0)
+        @test clamp.lifetime_ns(1, 2, 30.0) == 2.5 && clamp.lifetime_ns(1, 1, 59.9) == 2.45
+        @test clamp.lifetime_ns(1, 2, 70.0) ≈ 2.0 + 0.5 * exp(-1)                       # 10 s into the first clamp
+        @test clamp.lifetime_ns(1, 2, 120.0) ≈ 2.0 + 0.5 * exp(-6)
+        @test clamp.lifetime_ns(1, 2, 130.0) ≈ 2.5 - 0.5 * (1 - exp(-6)) * exp(-1)      # back toward the basal level
+        @test clamp.lifetime_ns(1, 3, 600.0) ≈ 2.55 atol = 1e-3                          # after the series
+        @test all(t -> clamp.lifetime_ns(2, 2, t) == 2.5, 0.0:7.0:540.0)                 # channel 2: not clamped
+        noisy = FLIMApp.clamp_series_model()
+        deviations = [noisy.lifetime_ns(1, 2, t) - clamp.lifetime_ns(1, 2, t) for t in 0.0:1.0:539.0]
+        @test 0.04 < sqrt(sum(abs2, deviations) / length(deviations)) < 0.06 && noisy.lifetime_ns(1, 2, 70.0) == noisy.lifetime_ns(1, 2, 70.0)
+        p = clamp.protocol
+        # Clamped over 60–120, 180–240, 300–360 and 420–480 s.
+        @test [FLIMApp.protocol_setpoint_at(p, t) for t in (30, 90, 150, 210, 450, 510)] ≈ [NaN, 2.0, NaN, 2.0, 2.0, NaN] nans = true
+        @test isnan(FLIMApp.protocol_setpoint_at(p, 540.5)) && clamp.controller.ch1_on && clamp.controller.ch1_inv
+
+        # What start_playback! sets up, without a window: the session's IRF,
+        # its own replay engine, the worker ending once the replay is over
+        # (playback_tick!, from the refresh tick, raises source_done).
+        FLIMApp.set_irfs!(s.irfs; info = s.irf_info)
+        app, app_run = AppState(true), AppRun(test_bench_config())
+        app_run.playback.dir = dir
+        @test FLIMApp.playback_start_refusal(app_run) == ""
+        playback = app_run.playback
+        engine = FLIMCore.demarrer_moteur(FLIMCore.Reglages(source = "rejeu"); source = FLIMCore.source_session(dir; vitesse = 0))
+        playback.engine, playback.session = engine, s
+        _, scan_s, sample_s = FLIMApp.session_pass_timing(s)               # the engine checks M3 − M0 against them
+        FLIMCore.commander!(engine, FLIMCore.Clamp(rois = s.roi_order, ordre = s.roi_order, scan_s = scan_s, echantillon_s = sample_s))
+        # With the session's settings, the GUI's edits don't reach the worker.
+        app_run.run_mode, app_run.run_open, playback.session_settings = "Playback", true, true
+        FLIMApp.publish_settings!(app_run.exchange, FLIMApp.session_analysis_settings(s))
+        app.layout.binning = 9
+        FLIMApp.publish_analysis_settings!(app, app_run)
+        @test FLIMApp.current_settings(app_run.exchange).layout.binning == LayoutSettings().binning
+        out = FLIMApp.AnalysisOutput(app_run.exchange; roi_order = s.roi_order, drive_outputs = false)
+        worker = Threads.@spawn FLIMApp.start_realtime(out, app_run.running, engine.histogrammes;
+                                                       initial_guess = [3.0, 0.0, 5.0e-5], source_done = playback.source_done)
+        app_run.running[] = true
+        @test timedwait(() -> (FLIMApp.playback_tick!(app_run); istaskdone(worker)), 120.0; pollint = 0.01) === :ok
+        @test playback.source_done[] && playback.fin.mesure == :clamp && !playback.fin.erreur
+        FLIMCore.arreter_moteur(engine)
+        app_run.run_rois = s.rois
+        info = FLIMApp.run_info(app, app_run, s.roi_order; mode = FLIMApp.PLAYBACK_SESSION_MODE, session = s,
+                                settings = FLIMApp.session_analysis_settings(s))
+        @test info["mode"] == "Playback" && info["playback"]["session"] == dir && info["roi"]["image_size"] == [1024, 512]
+        @test info["playback"]["settings"] == "session" && startswith(info["pi_outputs"], "simulated")
+        @test !isempty(sprint(io -> FLIMApp.TOML.print(io, info; sorted = true)))
+        rows = published(app_run.exchange)
+        @test length(rows.pass) == 9 && rows.roi_index == repeat(s.roi_order, 3) && all(rows.complete)
+        @test all(isnan, FLIMApp.command_values(app_run.exchange, s.roi_order[1]))      # simulated PI: no output
+        @test all(k -> abs(rows.lifetime_ch1[k] - (1.95 + 0.25 * rows.roi_index[k])) < 0.35, 1:9)
+    finally
+        for (c, v) in zip((FLIMApp.RUNTIME[], FLIMApp.RUNTIME_CH2[]), saved)
+            c.irf, c.irf_bin_size, c.tcspc_window_size = v
+        end
     end
-    @test tracker.period_est_s ≈ 1.0
-    @test tracker.skipped_total == 2
+end
 
-    # No nominal period available at all (unusable protocol values): the
-    # tracker still bootstraps one from what it observes.
-    tracker = FLIMApp.RoiSlotTracker(NaN)
-    for k in 1:6
-        FLIMApp.next_roi_slot!(tracker, 2.0 * (k - 1), k)
+@testset "Realtime START checks" begin
+    # What start_pressed checks and sends, without a window: refusals in
+    # order (IRF, DAQ, SPC engine, 16 ROIs, offline), the Clamp command,
+    # run.toml; Playback's refusals.
+    ctx = FLIMApp.RUNTIME[]
+    saved = (ctx.irf, ctx.irf_bin_size, ctx.tcspc_window_size)
+    cfg = test_bench_config()
+    app = AppState(true)
+    app_run = AppRun(cfg)
+    path = joinpath(mktempdir(), "spc.toml")
+    FLIMCore.ecrire_reglages(path, FLIMCore.Reglages(source = "simulation", dossier = mktempdir(), seuil_cfd = 10.0))
+    app_run.spc = FLIMApp.SpcView(path, app_run.exchange.journal)
+    ex = app_run.exchange
+    loop = Threads.@spawn FLIMApp.daq_loop(cfg, ex; hardware=FLIMApp.SimulatedHardware(cfg; realtime=false))
+    tick() = FLIMApp.spc_tick!(app_run.spc, time_ns())
+    await(f) = timedwait(() -> (tick(); f()), 60.0; pollint = 0.02) === :ok
+    saved_info = FLIMApp.IRF_INFO[]
+    try
+        ctx.irf = nothing
+        @test occursin("IRF", FLIMApp.realtime_start_refusal(app, app_run))
+        ctx.irf, ctx.irf_bin_size, ctx.tcspc_window_size = [0.0 1.0; 0.05 0.0], 0.05, 12.5
+        # An IRF without the record of its settings, or taken with others: refused.
+        FLIMApp.IRF_INFO[] = Dict{String, Any}()
+        @test occursin("no record", FLIMApp.realtime_start_refusal(app, app_run))
+        settings = app_run.spc.settings
+        other = irf_info_for(settings)
+        other["channels"][1]["settings"]["tac_gain"] = settings.spc["tac_gain"] + 1
+        FLIMApp.IRF_INFO[] = other
+        @test occursin("channel 1: tac_gain", FLIMApp.realtime_start_refusal(app, app_run))
+        other = irf_info_for(settings)
+        other["dcc"]["gain_c1_pourcent"] = 70.0
+        FLIMApp.IRF_INFO[] = other
+        @test occursin("detector: gain_c1_pourcent", FLIMApp.realtime_start_refusal(app, app_run))
+        FLIMApp.IRF_INFO[] = irf_info_for(settings)
+        @test occursin("DAQ not ready", FLIMApp.realtime_start_refusal(app, app_run))
+        # The recording folder's free space, for the status line and the check.
+        free, seconds, text = FLIMApp.recording_space(settings)
+        @test free > 0 && seconds ≈ free / (4e6 * length(settings.series)) && occursin("GB free", text)
+        @test FLIMApp.sessions_root(settings) == joinpath(FLIMCore.dossier_spc(settings), "sessions")
+        FLIMApp.send_command!(ex, FLIMApp.ConnectCommand())
+        @test await(() -> FLIMApp.loop_status(ex).state == FLIMApp.LOOP_READY)
+        @test occursin("SPC engine not running", FLIMApp.realtime_start_refusal(app, app_run))
+        FLIMApp.spc_connect!(app_run.spc)
+        @test await(() -> FLIMApp.spc_state(app_run.spc) == :pret)
+        @test FLIMApp.realtime_start_refusal(app, app_run) == ""
+
+        app.roi.active = true
+        app_run.rois[] = [square_roi(10.0 * k, 10.0 * k) for k in 1:16]
+        @test occursin("16 ROIs", FLIMApp.realtime_start_refusal(app, app_run))
+        app_run.rois[] = [square_roi(100.0, 100.0), square_roi(600.0, 300.0), square_roi(300.0, 800.0)]
+        @test FLIMApp.realtime_start_refusal(app, app_run) == ""
+
+        order = FLIMApp.roi_visit_order(app_run.rois[])
+        dir = FLIMApp.new_run_dir(FLIMApp.journal_root(cfg), time())
+        c = FLIMApp.clamp_command(app, app_run, order, dir)
+        @test c.rois == order && c.ordre == order && c.dossier == joinpath(dir, "spc")
+        @test c.scan_s == app.protocol.scan_time / 1000 && c.pause_s == app.protocol.shift_time / 1000
+        @test c.echantillon_s == 1 / cfg.sample_rate_hz                         # M3 − M0 checked by the engine
+        @test isempty(FLIMApp.clamp_command(app, app_run, Int[], dir).rois)      # ROI off: the no-ROI code
+        @test FLIMApp.scan_request(app, app_run, order).invert_routing == app_run.spc.settings.inverser_routage
+        app_run.run_rois = copy(app_run.rois[])
+        info = FLIMApp.run_info(app, app_run, order)
+        @test info["mode"] == "Realtime" && info["spc"]["source"] == "simulation" && info["roi"]["visit_order"] == order
+        @test [e["code_read"] for e in info["roi"]["list"]] == [1, 2, 3] && info["roi"]["image_size"] == [1024, 1024]
+        @test info["layout"]["binning"] == app.layout.binning && info["controller"]["P1"] == app.controller.P1
+        @test info["daq"]["scan_samples"] == 9500 && info["spc"]["spc_module"]["tac_gain"] == settings.spc["tac_gain"]
+        @test all(e -> e["fit_channel"] == "", info["roi"]["list"])
+        @test haskey(info["versions"], "git_commit") && info["versions"]["spclite"] == FLIMCore.SPCLite.VERSION_LITE
+        @test FLIMApp.TOML.parse(sprint(io -> FLIMApp.TOML.print(io, info; sorted = true)))["roi"]["visit_order"] == order
+
+        # Offline (no driver): Realtime refused with the banner's reason.
+        app_run.offline = "OFFLINE (test)"
+        @test FLIMApp.realtime_start_refusal(app, app_run) == "OFFLINE (test)"
+        app_run.offline = ""
+
+        # Playback needs a session.
+        @test occursin("Pick a session", FLIMApp.playback_start_refusal(app_run))
+        app_run.playback.dir = mktempdir()
+        @test occursin("Not a session", FLIMApp.playback_start_refusal(app_run))
+    finally
+        ctx.irf, ctx.irf_bin_size, ctx.tcspc_window_size = saved
+        FLIMApp.IRF_INFO[] = saved_info
+        FLIMApp.spc_disconnect!(app_run.spc)
+        app_run.spc.stopping === nothing || timedwait(() -> istaskdone(app_run.spc.stopping), 10.0)
+        FLIMApp.send_command!(ex, FLIMApp.QuitCommand())
+        timedwait(() -> istaskdone(loop), 10.0)
     end
-    @test tracker.period_est_s ≈ 2.0
-    @test tracker.skipped_total == 0
-    # Sixth file sat at t = 10; a 4s gap is two periods, so one missed scan.
-    @test FLIMApp.next_roi_slot!(tracker, 14.0, 7)[2] == 1
+end
 
-    # An absurd timestamp (garbage mtime) is bounded rather than thrown on.
-    tracker = FLIMApp.RoiSlotTracker(1.0)
-    FLIMApp.next_roi_slot!(tracker, 0.0, 1)
-    slot, skipped, ambiguous = FLIMApp.next_roi_slot!(tracker, 1.0e30, 2)
-    @test skipped == FLIMApp.ROI_SLOT_MAX_STEP - 1
-    @test ambiguous
+@testset "IRF from a Single .sdt (two channels)" begin
+    # A Single measurement as SPCM saves it: one uncompressed decay block per
+    # card, 4096 channels over a 50 ns TAC with gain 4 (12.5 ns); each block
+    # with its card's measurement description (serial number, CFD, SYNC).
+    adc_re = 4096
+    curves = [[k == 200 ? 1000 : 3 for k in 1:adc_re], [k == 216 ? 500 : 2 for k in 1:adc_re]]
+    serials = ["3N0318", "3N0317"]                    # in the file: channel 2's card first
+    meas_len, header_len, block_header_len = 220, 42, 22
+    data_len = 2 * adc_re
+    io = IOBuffer()
+    first_block = header_len + 2 * meas_len
+    write(io, Int16(0), Int32(0), Int16(0), Int32(0), UInt16(0))                 # revision, info, setup
+    write(io, Int32(first_block), Int16(2), UInt32(data_len))                     # data blocks
+    write(io, Int32(header_len), Int16(2), Int16(meas_len))                       # measurement descriptions
+    write(io, UInt16(0x5555), UInt32(0), UInt16(0), UInt16(0))
+    put!(buffer, offset, value) = (buffer[offset + 1:offset + sizeof(value)] = reinterpret(UInt8, [value]))
+    for serial in serials
+        meas = zeros(UInt8, meas_len)
+        meas[21:20 + length(serial)] = codeunits(serial)                          # mod_ser_no (offset 20)
+        put!(meas, 38, Float32(-50))                                              # cfd_ll
+        put!(meas, 64, Float32(50e-9))                                            # tac_r (s)
+        put!(meas, 68, Int16(4))                                                  # tac_g
+        put!(meas, 82, Int16(adc_re))                                             # adc_re
+        put!(meas, 133, Float32(-60))                                             # syn_th
+        write(io, meas)
+    end
+    for (b, curve) in enumerate(curves)
+        start = first_block + (b - 1) * (block_header_len + data_len)
+        next = b == 1 ? start + block_header_len + data_len : 0
+        # Old-format block header; block_type 0x0001: measured data, a decay, UInt16, uncompressed.
+        write(io, Int16(b - 1), Int32(start + block_header_len), Int32(next), UInt16(0x0001), Int16(b - 1), UInt32(0), UInt32(data_len))
+        foreach(v -> write(io, UInt16(v)), curve)
+    end
+    path = joinpath(mktempdir(), "irf_single.sdt")
+    write(path, take!(io))
+
+    in_file, _ = FLIMApp.read_sdt_irf(path)                                     # no series: file order
+    @test argmax(in_file[1][:, 2]) == 13 && argmax(in_file[2][:, 2]) == 14
+    irfs, channels = FLIMApp.read_sdt_irf(path; series = ["3N0317", "3N0318"])  # by serial: channel 1 first
+    @test [c["serial"] for c in channels] == ["3N0317", "3N0318"]
+    @test length(irfs) == 2 && all(irf -> size(irf) == (256, 2), irfs)
+    @test irfs[1][2, 1] ≈ 12.5 / 256 && irfs[1][1, 1] == 0.0
+    @test argmax(irfs[2][:, 2]) == 13 && irfs[2][13, 2] == 1000 + 15 * 3 - 16 * 3     # median removed per channel
+    @test argmax(irfs[1][:, 2]) == 14 && irfs[1][14, 2] == 500 + 15 * 2 - 16 * 2
+    @test FLIMApp.compute_irf_bin_size(irfs[1]) ≈ 12.5 / 256
+    settings = channels[1]["settings"]
+    @test settings["tac_range"] ≈ 50 && settings["tac_gain"] == 4 && settings["cfd_limit_low"] == -50 && settings["sync_threshold"] == -60
+
+    # Taken with the settings the cards measure with, or refused (and why).
+    spc(; kw...) = FLIMCore.Reglages(; spc = Dict{String, Any}("tac_range" => 50.0, "tac_gain" => 4, "cfd_limit_low" => -49.5,
+                                                               "sync_threshold" => -60.0),
+                                     dcc = Dict{String, Any}("gain_c1_pourcent" => 82.0), kw...)
+    info = Dict{String, Any}("channels" => channels, "dcc" => Dict{String, Any}("gain_c1_pourcent" => 82.0))
+    @test isempty(FLIMApp.irf_mismatches(info, spc()))                          # -49.5 vs -50: the DLL's rounding
+    gain2 = spc(); gain2.spc["tac_gain"] = 2
+    @test length(FLIMApp.irf_mismatches(info, gain2)) == 2                      # both channels
+    @test length(FLIMApp.irf_mismatches(info, gain2; applied = Dict(1 => Dict("tac_gain" => 4.0)))) == 1   # read back: 4
+    cfd = spc(); cfd.spc["cfd_limit_low"] = -80.0
+    @test any(m -> occursin("cfd_limit_low", m), FLIMApp.irf_mismatches(info, cfd))
+    @test any(m -> occursin("is card 3N0399", m), FLIMApp.irf_mismatches(info, spc(series = ["3N0399", "3N0318"])))
+    detector = spc(); detector.dcc["gain_c1_pourcent"] = 85.0
+    @test only(FLIMApp.irf_mismatches(info, detector)) == "detector: gain_c1_pourcent = 82.0 for the IRF, 85.0 now ([dcc] in config/spc.toml)"
+    added = spc(); added.dcc["gain_c3_pourcent"] = 82.0
+    @test any(m -> occursin("gain_c3_pourcent wasn't declared", m), FLIMApp.irf_mismatches(info, added))
+    @test occursin("no record", only(FLIMApp.irf_mismatches(Dict{String, Any}(), spc())))
+
+    # The record is kept next to the CSV.
+    record = FLIMApp.write_irf_info(FLIMApp.irf_info_path(joinpath(mktempdir(), "irf.csv")), info)
+    @test endswith(record, "irf.toml") && isempty(FLIMApp.irf_mismatches(FLIMApp.read_irf_info(record), spc()))
+
+    # Kept as CSV (one column per channel), read back identical.
+    csv = FLIMApp.write_irf_csv(joinpath(mktempdir(), "irf.csv"), irfs)
+    @test readline(csv) == "time_ns,ch1,ch2" && FLIMApp.read_irf_csv(csv) == irfs
+
+    # Each channel fits against its own IRF; a single-channel IRF serves both.
+    saved = [(c.irf, c.irf_bin_size, c.tcspc_window_size) for c in (FLIMApp.RUNTIME[], FLIMApp.RUNTIME_CH2[])]
+    saved_info = FLIMApp.IRF_INFO[]
+    try
+        FLIMApp.set_irfs!(irfs; info)
+        @test FLIMApp.loaded_irf_info() == info
+        @test FLIMApp.channel_fit_context(1) === FLIMApp.RUNTIME[] && FLIMApp.channel_fit_context(2) === FLIMApp.RUNTIME_CH2[]
+        @test FLIMApp.with_fit_context(() -> FLIMApp.fit_context().irf, FLIMApp.channel_fit_context(2)) == irfs[2]
+        @test FLIMApp.fit_context() === FLIMApp.RUNTIME[]
+        FLIMApp.set_irfs!(irfs[1:1])
+        @test FLIMApp.channel_fit_context(2) === FLIMApp.RUNTIME[] && length(FLIMApp.loaded_irfs()) == 1
+    finally
+        FLIMApp.IRF_INFO[] = saved_info
+        for (c, v) in zip((FLIMApp.RUNTIME[], FLIMApp.RUNTIME_CH2[]), saved)
+            c.irf, c.irf_bin_size, c.tcspc_window_size = v
+        end
+    end
+    @test_throws Exception FLIMApp.read_sdt_irf(joinpath(mktempdir(), "missing.sdt"))
 end
 
 @testset "MLE lifetime fit recovers a known lifetime" begin
@@ -681,15 +1011,14 @@ end
         ctx.irf_bin_size = bin
         mean_irf = FLIMApp.find_mean_arrival_time(irf[:, 2])
 
-        # 1x3 "image": pixel 1 is a bright, late point-mass decay; pixel 2 an
-        # equally bright but earlier one; pixel 3 is placed like pixel 1 but
-        # too dim overall to trust.
-        volume = zeros(1, 3, n)
-        volume[1, 1, 50] = 1000.0
-        volume[1, 2, 20] = 1000.0
-        volume[1, 3, 50] = 5.0
+        # 1x3 SPC image (photons, summed arrival times at channel centers):
+        # pixel 1 is a bright, late point-mass decay; pixel 2 an equally
+        # bright but earlier one; pixel 3 is placed like pixel 1 but too dim
+        # overall to trust.
+        intensity = [1000.0 1000.0 5.0]
+        sum_t = [1000 * 49.5 * bin 1000 * 19.5 * bin 5 * 49.5 * bin]
 
-        result = FLIMApp.pixel_lifetime_map(volume; min_photons=50.0)
+        result = FLIMApp.pixel_lifetime_map(intensity, sum_t; min_photons=50.0)
         @test size(result) == (1, 3)
 
         # Point-mass histograms make find_mean_arrival_time exact, so the
@@ -703,7 +1032,7 @@ end
         # No IRF loaded: errors rather than returning a meaningless map.
         ctx.irf = nothing
         ctx.irf_bin_size = nothing
-        @test_throws ErrorException FLIMApp.pixel_lifetime_map(volume)
+        @test_throws ErrorException FLIMApp.pixel_lifetime_map(intensity, sum_t)
     finally
         ctx.irf, ctx.irf_bin_size, ctx.tcspc_window_size = saved
     end
@@ -884,245 +1213,6 @@ end
     @test read(script_path2, String) == FLIMApp.CELLPOSE_SEGMENT_SCRIPT
 end
 
-@testset "extract_sdt_volume / extract_sdt_image width inference" begin
-    # extract_sdt_volume/extract_sdt_image only ever read sdt.data — every
-    # other SdtData field is placeholder/zero-valued here, never touched by
-    # the code under test. Regression coverage for a real bug: a genuine
-    # 2048x2048 scan (n_pixels = 4,194,304) was misclassified as "not an
-    # image" because the width was previously hardcoded to 1024 (this lab's
-    # usual file size) instead of inferred from the data.
-    function fake_sdt(block::Array)
-        header = FLIMApp.SdtFile.FileHeader(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-        return FLIMApp.SdtFile.SdtData(
-            "fake.sdt", 0, "", "", "", header,
-            FLIMApp.SdtFile.MeasureInfo[], FLIMApp.SdtFile.DataBlock[],
-            Array[block], Vector{Float64}[],
-        )
-    end
-
-    # Perfect-square pixel count (3x3 image, 4 time bins) -> correctly
-    # inferred and reshaped, same code path a real 2048x2048 file takes.
-    n_bins = 4
-    flat = reshape(Float64.(1:9*n_bins), 9, n_bins)
-    volume = FLIMApp.extract_sdt_volume(fake_sdt(flat))
-    @test volume !== nothing
-    @test size(volume) == (3, 3, n_bins)
-    # reshape_row_major-independent sanity check: every original pixel's
-    # bin vector is recoverable somewhere in the reshaped volume, unchanged.
-    @test Set(eachrow(flat)) == Set(vec(volume[x, y, :]) for x in 1:3, y in 1:3)
-
-    # The actual regression: a large perfect square (2048x2048 pixel count)
-    # infers correctly without ever needing to allocate anything close to
-    # that size here — the logic is scale-invariant, so a tiny stand-in with
-    # the same n_pixels-is-a-perfect-square shape exercises the identical path.
-    @test isqrt(4_194_304) == 2048 && isqrt(4_194_304)^2 == 4_194_304
-
-    # Non-perfect-square pixel count -> nothing, not a wrong guess (this is
-    # what the old hardcoded-1024 logic would have silently gotten wrong for
-    # any non-1024-wide square file instead of failing safely).
-    flat_bad = reshape(Float64.(1:10*n_bins), 10, n_bins)
-    @test FLIMApp.extract_sdt_volume(fake_sdt(flat_bad)) === nothing
-
-    # 3D block (scan_x/scan_y populated case) is unaffected by the width
-    # inference change — still just permutedims'd, not reshaped.
-    block_3d = Float64.(reshape(1:24, 2, 3, 4))
-    volume_3d = FLIMApp.extract_sdt_volume(fake_sdt(block_3d))
-    @test size(volume_3d) == (3, 2, 4)
-
-    # Plain histogram (1D block) is still correctly rejected, not
-    # misinterpreted as a 1x1 image.
-    @test FLIMApp.extract_sdt_volume(fake_sdt(Float64[1.0, 2.0, 3.0])) === nothing
-
-    # extract_sdt_image_and_volume / extract_sdt_image agree with
-    # extract_sdt_volume on the same perfect-square case end-to-end.
-    image, vol2 = FLIMApp.extract_sdt_image_and_volume(fake_sdt(flat))
-    @test image !== nothing
-    @test size(image) == (3, 3)
-    @test image == dropdims(sum(vol2; dims=3); dims=3)
-    @test FLIMApp.extract_sdt_image(fake_sdt(flat_bad)) === nothing
-end
-
-@testset "active_bounding_box" begin
-    # Contiguous-block padding pattern (a smaller real scan stored inside a
-    # larger fixed buffer) -- distinct from padded_row_keep_range's
-    # interleaved-row one. Regression coverage for the real bug found on a
-    # genuine 2048x2048-stored file whose true content was only in
-    # columns 1:1062, rows 1:1048 (everything else exactly zero).
-    img = zeros(10, 10)
-    img[1:6, 1:4] .= 1.0   # (x, y): active x=1:6, y=1:4
-    x_range, y_range = FLIMApp.active_bounding_box(img)
-    @test x_range == 1:6
-    @test y_range == 1:4
-
-    # No padding at all -> full range back.
-    full = fill(1.0, 5, 5)
-    x2, y2 = FLIMApp.active_bounding_box(full)
-    @test x2 == 1:5 && y2 == 1:5
-
-    # All zero -> degrades to the full range (nothing to trim safely).
-    empty_img = zeros(4, 4)
-    x3, y3 = FLIMApp.active_bounding_box(empty_img)
-    @test x3 == 1:4 && y3 == 1:4
-
-    # A small amount of leakage into the "padding" region (dark counts /
-    # crosstalk, same rationale as PADDED_ROW_ENERGY_FRACTION) must not
-    # defeat the crop -- only a few percent of a typical active row/col.
-    noisy = zeros(10, 10)
-    noisy[1:6, 1:4] .= 100.0
-    noisy[8, 2] = 1.0   # tiny leakage well outside the active block
-    x4, y4 = FLIMApp.active_bounding_box(noisy)
-    @test x4 == 1:6 && y4 == 1:4
-end
-
-@testset "stream_stored_rows / locate_zip_deflate_payload" begin
-    # Build a small ZIP-wrapped raw pixel buffer the same way a real SDT
-    # "compressed" IMG block actually is (see locate_zip_deflate_payload's
-    # docstring) -- exercises the ZIP-unwrap step and the row-streaming
-    # step together, the same way they're chained in production.
-    stored_width, adc_re = 4, 3
-    pixels = [Float64((r-1)*stored_width*10 + (c-1)*10) .+ (1:adc_re)
-              for r in 1:stored_width, c in 1:stored_width]  # pixels[r,c]::Vector{Float64}, length adc_re
-
-    flat = UInt8[]
-    io = IOBuffer()
-    for r in 1:stored_width, c in 1:stored_width
-        for v in pixels[r, c]
-            write(io, UInt16(v))
-        end
-    end
-    flat = take!(io)
-
-    zip_io = IOBuffer()
-    w = ZipFile.Writer(zip_io)
-    f = ZipFile.addfile(w, "data"; method=ZipFile.Deflate)
-    write(f, flat)
-    close(w)
-    zip_bytes = take!(zip_io)
-
-    loc = FLIMApp.SdtFile.locate_zip_deflate_payload(zip_bytes)
-    @test loc !== nothing
-    @test loc.method == ZipFile.Deflate
-    @test loc.uncompressedsize == length(flat)
-
-    payload = view(zip_bytes, loc.datapos+1 : loc.datapos+loc.compressedsize)
-
-    collected = Dict{Int, Matrix{UInt16}}()
-    ok = FLIMApp.stream_stored_rows(payload, stored_width, adc_re) do y, row_u16
-        collected[y] = collect(row_u16)   # (adc_re, stored_width), copy -- view is only valid during this call
-    end
-    @test ok
-    @test length(collected) == stored_width
-    for r in 1:stored_width, c in 1:stored_width
-        @test collected[r][:, c] == UInt16.(pixels[r, c])
-    end
-end
-
-@testset "extract_sdt_image_streamed (synthetic .sdt file, end to end)" begin
-    # Byte-for-byte hand-built minimal SDT file matching SdtFile.jl's exact
-    # field offsets (FileHeader/MeasureInfo/BlockHeader), with BOTH real
-    # padding patterns this app has to handle simultaneously: a
-    # contiguous-block active region (rows 1:5, cols 1:6 out of an 8x8
-    # stored buffer) that itself has interleaved-row padding within it
-    # (only odd rows 1/3/5 are real, matching collapse_padded_rows' own
-    # pattern) -- regression coverage for both extract_sdt_image_streamed's
-    # new contiguous-block crop AND the pre-existing interleave detection,
-    # composed together, without needing the real multi-GB file this was
-    # written against.
-    stored_width, adc_re = 8, 4
-    active_rows = [1, 3, 5]
-    active_cols = 1:6
-
-    pixels = [zeros(Float64, adc_re) for _ in 1:stored_width, _ in 1:stored_width]  # [row, col]
-    val = 100.0
-    for r in active_rows, c in active_cols
-        pixels[r, c] = collect(val:(val+adc_re-1))
-        val += 10
-    end
-
-    io = IOBuffer()
-    for r in 1:stored_width, c in 1:stored_width
-        for v in pixels[r, c]
-            write(io, UInt16(v))
-        end
-    end
-    flat = take!(io)
-
-    zip_io = IOBuffer()
-    zw = ZipFile.Writer(zip_io)
-    zf = ZipFile.addfile(zw, "data"; method=ZipFile.Deflate)
-    write(zf, flat)
-    close(zw)
-    zip_bytes = take!(zip_io)
-
-    # FileHeader (42 bytes, exact field order/sizes from SdtFile.jl's FileHeader).
-    function write_file_header(io; info_offset, info_length, setup_offs, setup_length,
-                                    data_block_offset, no_of_data_blocks, data_block_length,
-                                    meas_desc_block_offset, no_of_meas_desc_blocks, meas_desc_block_length)
-        write(io, Int16(0))                        # revision (old block format)
-        write(io, Int32(info_offset), Int16(info_length))
-        write(io, Int32(setup_offs), UInt16(setup_length))
-        write(io, Int32(data_block_offset), Int16(no_of_data_blocks), UInt32(data_block_length))
-        write(io, Int32(meas_desc_block_offset), Int16(no_of_meas_desc_blocks), Int16(meas_desc_block_length))
-        write(io, UInt16(0x5555))                   # header_valid
-        write(io, UInt32(0), UInt16(0), UInt16(0))   # reserved1, reserved2, chksum
-    end
-
-    meas_len = 100
-    FILE_HEADER_SIZE = 42
-    meas_off = FILE_HEADER_SIZE
-    block_hdr_off = meas_off + meas_len
-    block_data_off = block_hdr_off + 22
-
-    sdt_io = IOBuffer()
-    write_file_header(sdt_io;
-        info_offset=0, info_length=0, setup_offs=0, setup_length=0,
-        data_block_offset=block_hdr_off, no_of_data_blocks=1, data_block_length=length(flat),
-        meas_desc_block_offset=meas_off, no_of_meas_desc_blocks=1, meas_desc_block_length=meas_len,
-    )
-    @test position(sdt_io) == FILE_HEADER_SIZE
-
-    # MeasureInfo: all zero except adc_re at its documented offset (82,
-    # Int16) -- scan_x/scan_y (173/177) stay 0, matching this lab's real files.
-    meas_buf = zeros(UInt8, meas_len)
-    meas_buf[83:84] = reinterpret(UInt8, [Int16(adc_re)])  # offset 82 is 0-based -> 1-based index 83
-    write(sdt_io, meas_buf)
-    @test position(sdt_io) == block_hdr_off
-
-    # BlockHeader (old format, 22 bytes): block_no(i2) data_offs(i4)
-    # next_block_offs(i4) block_type(u2) meas_desc_block_no(i2) lblock_no(u4) block_length(u4).
-    # block_type = mode(1, MEAS_DATA) | IMG_BLOCK(0x60) | compressed(0x1000).
-    write(sdt_io, Int16(0))
-    write(sdt_io, Int32(block_data_off), Int32(block_data_off + length(zip_bytes)))
-    write(sdt_io, UInt16(0x1061), Int16(0))
-    write(sdt_io, UInt32(0), UInt32(length(flat)))   # block_length = TRUE uncompressed size
-    @test position(sdt_io) == block_data_off
-
-    write(sdt_io, zip_bytes)
-
-    sdt_path = tempname() * ".sdt"
-    write(sdt_path, take!(sdt_io))
-
-    try
-        # Sanity: the existing, unmodified read path parses this fixture
-        # too (confirms the fixture itself is a valid, realistic SDT file,
-        # not just something extract_sdt_image_streamed happens to accept).
-        old_sdt = FLIMApp.SdtFile.read_sdt(read(sdt_path), "tiny.sdt")
-        @test size(old_sdt.data[1]) == (stored_width*stored_width, adc_re)
-
-        image, volume = FLIMApp.extract_sdt_image_streamed(sdt_path)
-        @test image !== nothing
-        @test size(image) == (length(active_cols), length(active_rows))
-        @test size(volume) == (length(active_cols), length(active_rows), adc_re)
-
-        for (yi, r) in enumerate(active_rows), (xi, c) in enumerate(active_cols)
-            @test volume[xi, yi, :] == pixels[r, c]
-        end
-        @test image == dropdims(sum(volume; dims=3); dims=3)
-    finally
-        rm(sdt_path; force=true)
-    end
-end
-
 include("test_flimcore.jl")
 
 @testset "SPC window state, without a window" begin
@@ -1150,7 +1240,7 @@ include("test_flimcore.jl")
 
     FLIMApp.spc_toggle_imaging!(view)
     @test await(() -> FLIMApp.spc_state(view) == :imagerie)
-    @test await(() -> all(c -> size(c.intensity[]) == (1111, 576), values(view.cards)))   # x = pixel, y = line
+    @test await(() -> all(c -> size(c.intensity[]) == (1024, 512), values(view.cards)))   # x = pixel, y = line
     card = view.cards[0]
     @test await(() -> count(isfinite, card.mean_time[]) > 100)      # running sum: enough photons per block
     @test card.intensity_range[][2] >= 1 && 0 < card.time_range[][1] < card.time_range[][2] < 12.5
@@ -1171,6 +1261,23 @@ include("test_flimcore.jl")
     FLIMApp.spc_toggle_imaging!(view)           # STOP
     @test await(() -> FLIMApp.spc_state(view) == :pret && view.last_fin !== nothing)
     @test !view.last_fin.erreur && any(f -> endswith(f, "module0.spc"), view.last_fin.fichiers)
+
+    # The ROI popup's Image button: 100 frames per card, with the raw stream.
+    @test FLIMApp.spc_request_roi_image!(view) == ""
+    @test await(() -> view.roi_image[] !== nothing)
+    parts = view.roi_image[]
+    @test sort(collect(keys(parts))) == [0, 1]
+    # The popup's channel menu: channel i is the card with the i-th serial of
+    # [verification] series, the sum both.
+    @test only(FLIMApp.roi_image_parts(parts, "Channel 1")).canal == 1 && only(FLIMApp.roi_image_parts(parts, "Channel 2")).canal == 2
+    image = FLIMApp.RoiImage(FLIMApp.roi_image_parts(parts, "Channel 1"), 1)
+    @test image.frames >= FLIMApp.ROI_IMAGE_FRAMES && size(image.intensity) == (1024, 512) && !isempty(image.streams[1].mots)
+    disk = [(x, y) for x in 480:540 for y in 230:280]                 # inside the simulated disk
+    h = only(FLIMApp.roi_histograms(image, [disk]))
+    @test length(h) == 256 && sum(h) == sum(image.intensity[x, y] for (x, y) in disk) > 0
+    both = FLIMApp.RoiImage(FLIMApp.roi_image_parts(parts, "Sum"), 0)
+    @test both.cards == [0, 1] && both.intensity == image.intensity + FLIMApp.RoiImage(parts[1]).intensity
+    @test sum(only(FLIMApp.roi_histograms(both, [disk]))) == sum(both.intensity[x, y] for (x, y) in disk)
 
     FLIMApp.spc_disconnect!(view)
     @test await(() -> view.engine === nothing)

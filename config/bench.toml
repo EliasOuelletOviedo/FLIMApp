@@ -28,6 +28,14 @@ readback_signals = ["galvo_x", "galvo_y", "command_1", "command_2",
 # Static digital line that opens the shutter while a scan runs (high =
 # open). Empty: no shutter. Keep it outside port 0, e.g. "X6321/port1/line0".
 shutter = ""
+# Pass signal for the SPC-150N: a counter clocked by the AO sample clock,
+# high during each scan. One TTL output feeds four inputs: M0 (rising edge:
+# start of pass) and M3 (falling edge: end of pass) of both cards, with a
+# common ground (D GND on pin 15). Check the wiring with test_spc4,
+# module_no = 0 then 1: 200 markers on M0 and 200 on M3 for each card.
+# Empty: no pass signal.
+passes = "X6321/ctr1"
+passes_terminal = ""                    # output PFI; "" = the counter's default, PFI13 (CTR 1 OUT), validated by test_spc4
 
 [timing]
 sample_rate_hz = 10000.0
@@ -40,7 +48,7 @@ command_full_scale_v = 5.0     # output for a 100 % PI command
 command_max_v = 5.0            # AO range declared to NI-DAQmx: it refuses any write beyond
 
 [sync]
-pulse_s = 0.001                # width of the sequence and ROI pulses
+pulse_s = 0.001                # width of the sequence (P0.2) and ROI (P0.3) pulses
 
 [watchdog]
 # 6321 watchdog: if the loop stops re-arming it for timeout_s, the lines

@@ -284,9 +284,11 @@ end
 # =============================================================================
 
 # Pixel coordinate -> galvo voltage (mV): linear over the image span,
-# sign-flipped for the galvo's mirrored axis convention.
+# sign-flipped for the galvo's mirrored axis convention. ROI coordinates are
+# 0-based, pixel k's center at k (`roi_pixel_mask`, roi_popup.jl): the first
+# pixel's center is at `v_min`, the last one's (n_pixels - 1) at `v_max`.
 to_voltage(coord::Real, n_pixels::Real, v_min::Real, v_max::Real) =
-    -(v_min + (coord - 1) * (v_max - v_min) / (n_pixels - 1))
+    -(v_min + coord * (v_max - v_min) / (n_pixels - 1))
 
 """
     roi_visit_order(rois)::Vector{Int}

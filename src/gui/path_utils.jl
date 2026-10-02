@@ -29,16 +29,18 @@ end
 """
     open_irf_dialog()::Union{String, Nothing}
 
-Open a file picker for IRF selection.
+Open a file picker for IRF selection: the .sdt of a Single measurement,
+one curve per channel (`import_irf_sdt`, lifetime_analysis.jl).
 """
 function open_irf_dialog()::Union{String, Nothing}
-    return pick_non_empty_path(pick_file; error_msg="IRF file dialog failed")
+    return pick_non_empty_path(() -> pick_file(filterlist="sdt"); error_msg="IRF file dialog failed")
 end
 
 """
     open_folder_dialog()::Union{String, Nothing}
 
-Open a folder picker for data-root selection.
+Open a folder picker (the session Playback replays: a run folder of the
+journal, see analysis/session.jl).
 """
 function open_folder_dialog()::Union{String, Nothing}
     return pick_non_empty_path(pick_folder; error_msg="Folder dialog failed")
@@ -67,6 +69,20 @@ function update_path_textbox!(textbox, full_path::AbstractString)
     textbox.displayed_string[] = short_name
     textbox.stored_string[] = short_name
     return nothing
+end
+
+"""
+    cached_path(cache_path)::String
+
+The full path a cache file holds ("" when the file is missing or unreadable).
+"""
+function cached_path(cache_path::AbstractString)::String
+    isfile(cache_path) || return ""
+    return try
+        String(strip(read(cache_path, String)))
+    catch
+        ""
+    end
 end
 
 """

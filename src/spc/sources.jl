@@ -17,7 +17,9 @@
 #   lire_sync(s, m), lire_remplissage(s, m), lire_etat(s, m)
 #   infos_fifo(s, m)         -> (horloge_macro_s, entete)
 #   lancer!(s, m), stopper!(s, m), lire_mots!(s, m, tampon) -> n, epuisee(s, m)
-#   preparer_memoire!(s, m, bits) -> canaux ; effacer_page!(s, m) ; lire_histo(s, m, n)
+#   preparer_memoire!(s, m, bits, bits_routage) -> (canaux, courbes)
+#   effacer_page!(s, m) ; lire_histo(s, m, n; bloc)
+#   preparer_passes!(s, modules, codes, scan_s, pause_s)   simulation : les passes à fabriquer
 #   verrouilles(s), forcer!(s, modules)
 
 abstract type Source end
@@ -95,10 +97,14 @@ lancer!(::SourceCartes, m::Integer) = (SPCLite.demarrer(m); nothing)
 stopper!(::SourceCartes, m::Integer) = (SPCLite.arreter(m); nothing)
 lire_mots!(::SourceCartes, m::Integer, tampon::Vector{UInt16}) = SPCLite.lire_fifo!(m, tampon)
 
-function preparer_memoire!(::SourceCartes, m::Integer, bits::Integer)
-    mem = SPCLite.configurer_memoire(m, bits, 0)
+"""
+Mémoire en courbes de 2^`bits` canaux, 2^`bits_routage` courbes par trame :
+le routage choisit la courbe (le bloc) où va chaque photon.
+"""
+function preparer_memoire!(::SourceCartes, m::Integer, bits::Integer, bits_routage::Integer = 0)
+    mem = SPCLite.configurer_memoire(m, bits, bits_routage)
     mem.longueur_bloc > 0 || error("module $m : mémoire mal configurée ($mem)")
-    return mem.longueur_bloc
+    return (canaux = mem.longueur_bloc, courbes = mem.blocs_par_trame)
 end
 
 function effacer_page!(::SourceCartes, m::Integer)
@@ -107,7 +113,14 @@ function effacer_page!(::SourceCartes, m::Integer)
     return nothing
 end
 
-lire_histo(::SourceCartes, m::Integer, n::Integer) = SPCLite.lire_bloc(m, n; bloc = 0, page = 0)
+lire_histo(::SourceCartes, m::Integer, n::Integer; bloc::Integer = 0) = SPCLite.lire_bloc(m, n; bloc = bloc, page = 0)
+
+"""
+Simulation seulement : les passes du Realtime à fabriquer (codes de routage
+dans l'ordre de visite, durées de scan et de pause). Les cartes, elles,
+reçoivent les marqueurs de passe et le routage par leurs entrées.
+"""
+preparer_passes!(::Source, modules, codes, scan_s, pause_s) = nothing
 
 """Modules détectés restés verrouillés par un autre programme (état -6)."""
 verrouilles(::SourceCartes) = Int[k for k in SPCLite.modules_detectes() if SPCLite.etat_init(k) == -6]
@@ -151,13 +164,15 @@ mutable struct FluxRejeu
     t_origine::Int64              # macrotemps au lancement
     t0::Float64                   # heure du lancement
     en_cours::Bool
-    single::Bool                  # mode histogramme (Single)
+    single::Bool                  # mode histogramme (Single, clamp)
     bits_single::Int
     temps_single::Float64
+    histo::Union{Nothing,Vector{Int}}   # 4096 canaux du dernier Single, temps croissant
     fini::Bool                    # tout livré, sans boucle
+    serie::String                 # n° de série de la carte enregistrée
 end
 
-function FluxRejeu(mots::Vector{UInt16}, entete, tic_s, fenetre_ns)
+function FluxRejeu(mots::Vector{UInt16}, entete, tic_s, fenetre_ns; serie::AbstractString = "")
     mots = isodd(length(mots)) ? mots[1:end - 1] : mots
     d = decoder!(Decodeur(), mots)
     base = Int64(0)
@@ -168,7 +183,7 @@ function FluxRejeu(mots::Vector{UInt16}, entete, tic_s, fenetre_ns)
     duree = t_fin * tic_s
     return FluxRejeu(mots, UInt32(entete), Float64(tic_s), Float64(fenetre_ns),
                      duree > 0 ? d.photons / duree : 0.0,
-                     1, 0, 0, 0, 0.0, false, false, 12, 1.0, false)
+                     1, 0, 0, 0, 0.0, false, false, 12, 1.0, nothing, false, String(serie))
 end
 
 """
@@ -182,7 +197,8 @@ un histogramme les photons du flux pendant le temps de collecte.
 
 Taux : SYNC à 80 MHz, CFD, TAC et ADC au débit moyen de photons du flux
 (`cfd_impose` le remplace, pour les tests). `panne_apres = n` : erreur
-simulée à la n-ième lecture du FIFO. `ouvertures`/`fermetures` comptent
+simulée à la n-ième lecture du FIFO ; `fovfl_a_lecture = n` : SPC_FOVFL
+levé (et gardé) à partir de la n-ième lecture. `ouvertures`/`fermetures` comptent
 les SPC_init et SPC_close simulés, et `trace`, si non vide, est un fichier
 où chacun est noté (tests d'arrêt brutal).
 """
@@ -198,11 +214,12 @@ mutable struct SourceRejeu <: Source
     panne_apres::Int
     cfd_impose::Float64
     trace::String
+    fovfl_a_lecture::Int
 end
 
 SourceRejeu(flux::Dict{Int,FluxRejeu}; nom::AbstractString = "rejeu", vitesse::Real = 1.0,
             boucle::Bool = true, trace::AbstractString = "") =
-    SourceRejeu(flux, String(nom), Float64(vitesse), boucle, false, 0, 0, 0, 0, NaN, String(trace))
+    SourceRejeu(flux, String(nom), Float64(vitesse), boucle, false, 0, 0, 0, 0, NaN, String(trace), 0)
 
 """
     source_rejeu(fichiers; vitesse=1.0, boucle=true) -> SourceRejeu
@@ -217,30 +234,50 @@ function source_rejeu(fichiers::AbstractVector{<:AbstractString}; vitesse::Real 
         prefixe = prefixe_acquisition(expanduser(f))
         isfile(prefixe * ".spc") || error("rejeu : introuvable : $(prefixe).spc")
         meta = lire_ini(prefixe * "_acquisition.ini"; section = "acquisition")
+        serie = get(lire_ini_textes(prefixe * "_acquisition.ini"; section = "clamp"), "serie", "")
         entete, mots = lire_spc(prefixe * ".spc")
         m = round(Int, get(meta, "module", Float64(i - 1)))
         haskey(flux, m) && error("rejeu : deux fichiers pour le module $m")
-        flux[m] = FluxRejeu(mots, entete, meta["tic_s"], meta["fenetre_ns"])
+        flux[m] = FluxRejeu(mots, entete, meta["tic_s"], meta["fenetre_ns"]; serie = serie)
     end
     return SourceRejeu(flux; nom = "rejeu", vitesse = vitesse, boucle = boucle)
 end
 
 """
-    source_simulation(modules; vitesse=1.0) -> SourceRejeu
+    source_session(dossier; vitesse=1.0) -> SourceRejeu
+
+Rejeu d'une session Realtime enregistrée (Playback) : les flux FIFO de ses
+cartes (`dossier/spc/*.spc`, avec leurs _acquisition.ini), une seule fois,
+marqueurs de passe et routage compris.
+"""
+function source_session(dossier::AbstractString; vitesse::Real = 1.0)
+    rep = joinpath(dossier, "spc")
+    isdir(rep) || error("session sans dossier spc/ : $dossier")
+    fichiers = sort!([joinpath(rep, f) for f in readdir(rep) if endswith(lowercase(f), ".spc")])
+    isempty(fichiers) && error("session sans flux .spc : $rep")
+    return source_rejeu(fichiers; vitesse = vitesse, boucle = false)
+end
+
+"""
+    source_simulation(modules; vitesse=1.0, series=String[], boucle=true) -> SourceRejeu
 
 Un scanner imaginaire à 31,25 trames/s (576 lignes de 55,5 µs, tic de
 25 ns) et un disque au centre de l'image, environ 5 × 10^5 photons/s par
-carte : de quoi faire tourner le GUI sans les cartes.
+carte : de quoi faire tourner le GUI sans les cartes. La carte `modules[i]`
+porte le n° de série `series[i]` (comme [verification] series : le canal
+i), "SIMULATION-<module>" sans. En Realtime, `preparer_passes!` remplace ces
+flux par des passes ; `boucle = false` : une seule fois (session simulée).
 """
-function source_simulation(modules::AbstractVector{<:Integer}; vitesse::Real = 1.0)
+function source_simulation(modules::AbstractVector{<:Integer}; vitesse::Real = 1.0,
+                           series::AbstractVector{<:AbstractString} = String[], boucle::Bool = true)
     flux = Dict{Int,FluxRejeu}()
     for (i, m) in enumerate(modules)
         mots = flux_synthetique(trames = 16, lignes_par_trame = 576, periode_ligne = 2222,
                                 lignes_avant = 5, photons_par_ligne = 60, graine = 17 + i,
                                 egalites = false, tau_ns = (1.2 + 0.3i, 3.0))
-        flux[Int(m)] = FluxRejeu(mots, 0x00000000, 25e-9, 12.5)
+        flux[Int(m)] = FluxRejeu(mots, 0x00000000, 25e-9, 12.5; serie = i <= length(series) ? String(series[i]) : "")
     end
-    return SourceRejeu(flux; nom = "simulation", vitesse = vitesse, boucle = true)
+    return SourceRejeu(flux; nom = "simulation", vitesse = vitesse, boucle = boucle)
 end
 
 nom_source(s::SourceRejeu) = s.nom
@@ -272,7 +309,8 @@ function fermer!(s::SourceRejeu)
     return nothing
 end
 
-identifier(s::SourceRejeu, m::Integer) = (type = 151, serie = uppercase(s.nom) * "-$m")
+identifier(s::SourceRejeu, m::Integer) =
+    (type = 151, serie = isempty(s.flux[m].serie) ? uppercase(s.nom) * "-$m" : s.flux[m].serie)
 
 function configurer!(s::SourceRejeu, m::Integer, parametres::AbstractDict, fichier::AbstractString)
     f = s.flux[m]
@@ -304,10 +342,32 @@ function lancer!(s::SourceRejeu, m::Integer)
     f.en_cours = true
     f.t0 = time()
     f.t_origine = f.t_dernier
+    f.histo = nothing
     return nothing
 end
 
 stopper!(s::SourceRejeu, m::Integer) = (s.flux[m].en_cours = false; nothing)
+
+"""
+Simulation : remplace le flux de chaque module par des passes (le
+générateur de `flux_passes_synthetique`), une passe par créneau de la NI
+avec le code de routage de sa ROI, un déclin propre à chaque ROI qui varie
+lentement : de quoi faire tourner le Realtime sans les cartes. Sans effet
+sur un rejeu de fichiers.
+"""
+function preparer_passes!(s::SourceRejeu, modules, codes, scan_s, pause_s)
+    s.nom == "simulation" || return nothing
+    passes = max(length(codes), ceil(Int, 20 / (scan_s + pause_s)))          # environ 20 s, puis en boucle
+    for (i, m) in enumerate(modules)
+        f = s.flux[m]
+        mots = flux_passes_synthetique(codes = codes, passes = passes, scan_s = scan_s, pause_s = pause_s,
+                                       tic_s = f.tic_s, fenetre_ns = f.fenetre_ns, graine = 100 + i,
+                                       photons_pause_par_s = 1e4,
+                                       tau_ns = (code, t) -> 1.8 + 0.25 * code + 0.15 * i + 0.2 * sin(2π * t / 15))
+        s.flux[m] = FluxRejeu(mots, f.entete, f.tic_s, f.fenetre_ns; serie = f.serie)
+    end
+    return nothing
+end
 
 """Bits de SPC_test_state simulés : armé tant que la mesure court."""
 function lire_etat(s::SourceRejeu, m::Integer)
@@ -317,6 +377,7 @@ function lire_etat(s::SourceRejeu, m::Integer)
         ecoule = s.vitesse > 0 ? (time() - f.t0) * s.vitesse : Inf
         return ecoule >= f.temps_single ? SPC_TIME_OVER : SPC_ARMED
     end
+    s.fovfl_a_lecture > 0 && s.lectures >= s.fovfl_a_lecture && return SPC_ARMED | SPC_FOVFL
     return SPC_ARMED
 end
 
@@ -362,27 +423,25 @@ function lire_mots!(s::SourceRejeu, m::Integer, tampon::Vector{UInt16})
     end
 end
 
-preparer_memoire!(s::SourceRejeu, m::Integer, bits::Integer) = (s.flux[m].bits_single = bits; 1 << bits)
+preparer_memoire!(s::SourceRejeu, m::Integer, bits::Integer, bits_routage::Integer = 0) =
+    (s.flux[m].bits_single = bits; (canaux = 1 << bits, courbes = 1 << bits_routage))
 effacer_page!(::SourceRejeu, m) = nothing
 
 """Histogramme des photons du flux pendant le temps de collecte (temps croissant, comme la mémoire de la carte)."""
-function lire_histo(s::SourceRejeu, m::Integer, n::Integer)
+function lire_histo(s::SourceRejeu, m::Integer, n::Integer; bloc::Integer = 0)
     f = s.flux[m]
-    h = zeros(Int, n)
-    decalage = 12 - round(Int, log2(n))
-    cible = f.t_dernier + round(Int64, f.temps_single / f.tic_s)
-    mots = UInt16[]
-    _avancer!(s, f, cible, typemax(Int) - 2) do w
-        push!(mots, UInt16(w & 0xffff), UInt16(w >> 16))
+    if f.histo === nothing
+        cible = f.t_dernier + round(Int64, f.temps_single / f.tic_s)
+        mots = UInt16[]
+        _avancer!(s, f, cible, typemax(Int) - 2) do w
+            push!(mots, UInt16(w & 0xffff), UInt16(w >> 16))
+        end
+        f.histo = reverse(decoder!(Decodeur(), mots).adc)
+        f.en_cours = false
     end
-    d = decoder!(Decodeur(), mots)
-    for (i, c) in enumerate(d.adc)
-        c == 0 && continue
-        canal = (4095 - (i - 1)) >> decalage
-        h[canal + 1] += c
-    end
-    f.en_cours = false
-    return UInt16[min(x, 65535) for x in h]
+    bloc == 0 || return zeros(UInt16, n)
+    groupe = 4096 ÷ n
+    return UInt16[min(sum(view(f.histo, (k - 1) * groupe + 1:k * groupe)), 65535) for k in 1:n]
 end
 
 verrouilles(::SourceRejeu) = Int[]
@@ -401,5 +460,5 @@ La source que [source] type demande : "cartes", "rejeu" ou "simulation".
 function source_depuis(r::Reglages)
     r.source == "cartes" && return SourceCartes()
     r.source == "rejeu" && return source_rejeu(r.rejeu; vitesse = r.vitesse)
-    return source_simulation(sort!(unique(vcat(r.modules_imagerie, r.modules_single))); vitesse = r.vitesse)
+    return source_simulation(sort!(unique(vcat(r.modules_imagerie, r.modules_single))); vitesse = r.vitesse, series = r.series)
 end

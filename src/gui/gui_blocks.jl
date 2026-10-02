@@ -34,20 +34,21 @@ Base.@kwdef struct GuiBlocks
     stop_button::Button
     irf_path_textbox::Textbox
     irf_button::Button
+    record_path_textbox::Textbox
+    record_button::Button
     folder_path_textbox::Textbox
     folder_button::Button
     daq_label::Label
     connect_button::Button
-    target_freq_textbox::Textbox
     mode_menu::Menu
     lifetimes_menu::Menu
     panel_buttons::Dict{Symbol, Button}
     info_label::Label
+    target_freq_textbox::Textbox
     spc_label::Label
     spc_button::Button
     # Axes
     counts_axis::Axis
     plot_1_axis::Axis
     plot_2_axis::Axis
-    save_progress_axis::Axis
 end

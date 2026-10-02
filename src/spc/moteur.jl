@@ -48,6 +48,31 @@ mutable struct ImageTrame <: Resultat
     generation::Int
 end
 
+"""
+    ImageSomme
+
+Fin d'une acquisition d'imagerie, pour une carte : la somme de toutes ses
+trames (`intensite`, `somme_t`, `declin` comme une `ImageTrame`), et, si
+l'`Imagerie` le demandait (`garder_mots`), le flux FIFO rangé dans l'image
+(`mots`), avec la géométrie résolue (`geometrie`, tailles explicites) : de
+quoi refaire un déclin par groupe de pixels (`histogrammes_pixels`).
+`serie` et `canal` : la carte qui l'a faite (canal 0 : n° de série absent
+de [verification] series).
+"""
+struct ImageSomme <: Resultat
+    carte::Int
+    serie::String
+    canal::Int
+    intensite::Matrix{UInt32}
+    somme_t::Matrix{Float64}
+    declin::Vector{Int}
+    dt_ns::Float64
+    tic_s::Float64
+    trames::Int
+    geometrie::Geometrie
+    mots::Vector{UInt16}
+end
+
 """Un histogramme Single (`numero` sur `total`), construit dans la carte ; temps croissant."""
 struct HistoSingle <: Resultat
     carte::Int
@@ -92,16 +117,55 @@ struct Fin <: Resultat
     t::Float64
 end
 
+"""
+    HistoClamp
+
+Une passe du mode Realtime (un scan d'une ROI), délimitée par les cartes
+elles-mêmes : marqueur M0 au début, M3 à la fin (`t_debut_s`, `t_fin_s`,
+temps de la première carte depuis le début de la mesure). `histogrammes[i]`
+est la carte `cartes[i]` (canal i : ordre de [verification] series) :
+`canaux` × 16, une colonne par code de routage lu par la carte (colonne
+`code + 1` ; la colonne du code réservé reste vide : ses photons sont
+jetés). Temps croissant, canaux de `dt_ns`. `pertes` : enregistrements GAP
+depuis la passe précédente, toutes cartes.
+
+`motifs` : pourquoi la passe ne doit pas nourrir le PI (vide : elle peut).
+Trois cas, sur n'importe quelle carte : un enregistrement porte le drapeau
+de perte (GAP) ; SPC_FOVFL est apparu pendant la passe ; M3 − M0 s'écarte
+de la durée programmée de plus d'un échantillon de l'AO et 100 ppm (un
+marqueur perdu ou en trop). Publiés dans `m.histogrammes`, que lit
+l'analyse.
+"""
+struct HistoClamp
+    passe::Int
+    t_debut_s::Float64
+    t_fin_s::Float64
+    cartes::Vector{Int}
+    series::Vector{String}
+    histogrammes::Vector{Matrix{UInt32}}
+    pertes::Int
+    dt_ns::Float64
+    motifs::Vector{String}
+end
+
+HistoClamp(passe, t_debut_s, t_fin_s, cartes, series, histogrammes, pertes, dt_ns) =
+    HistoClamp(passe, t_debut_s, t_fin_s, cartes, series, histogrammes, pertes, dt_ns,
+               pertes > 0 ? ["GAP : $pertes enregistrement(s) perdus"] : String[])
+
 const LigneTableau = NamedTuple{(:cle, :demande, :applique, :statut),Tuple{String,Any,Float64,Symbol}}
 
-"""Une carte vue à la vérification : identité, SYNC, CFD, tableau « demandé → appliqué »."""
+"""
+Une carte vue à la vérification : identité, canal (sa place dans
+[verification] series, 0 si son n° de série n'y est pas), SYNC, CFD,
+tableau « demandé → appliqué ».
+"""
 mutable struct EtatCarte
     carte::Int
     pret::Bool
     etat_init::String
     type::Int
     serie::String
-    serie_attendue::String
+    canal::Int
     sync::Int
     cfd::Float64
     tableau::Vector{LigneTableau}
@@ -122,12 +186,21 @@ end
 
 abstract type Commande end
 
-"""Imagerie en FIFO avec les horloges du scanner, en continu (`duree = Inf`) ou pour une durée."""
+"""
+    Imagerie(geometrie; duree=Inf, trames=0, garder_mots=false)
+
+Imagerie en FIFO avec les horloges du scanner, en continu (`duree = Inf`),
+pour une durée, ou jusqu'à `trames` trames complètes. À la fin, une
+`ImageSomme` par carte, avec le flux brut si `garder_mots`.
+"""
 struct Imagerie <: Commande
     geometrie::Geometrie
     duree::Float64
+    trames::Int
+    garder_mots::Bool
 end
-Imagerie(g::Geometrie = Geometrie(); duree::Real = Inf) = Imagerie(g, Float64(duree))
+Imagerie(g::Geometrie = Geometrie(); duree::Real = Inf, trames::Integer = 0, garder_mots::Bool = false) =
+    Imagerie(g, Float64(duree), Int(trames), garder_mots)
 
 """`n` histogrammes Single de `temps_s` secondes, construits dans les cartes."""
 struct Single <: Commande
@@ -135,6 +208,44 @@ struct Single <: Commande
     n::Int
 end
 Single(temps_s::Real, n::Integer = 1) = Single(Float64(temps_s), Int(n))
+
+"""
+    Clamp(; rois=Int[], ordre=rois, dossier="", scan_s=0.95, pause_s=0.05, echantillon_s=NaN)
+
+Mode Realtime en FIFO avec routage : les cartes horodatent chaque photon
+avec son code de routage, et les fronts du signal de passe (M0 début, M3
+fin). Le moteur lit le FIFO au fil de l'eau, découpe les passes (`Passes`)
+et publie un `HistoClamp` par passe dans `m.histogrammes`. Aucune échéance
+logicielle : un retard ne fait que remplir le FIFO des cartes.
+
+- Sans ROI (`rois` vide) : la NI écrit `CODE_SANS_ROI` pendant les scans.
+- Avec ROI : la carte lit le code de la ROI scannée (`code_routage` : son
+  n° dessiné, 1 à 15). Plus de 15 ROI : refusé.
+- Pendant les déplacements et les pauses : le code réservé
+  (`CODE_HORS_ROI`), dont les photons sont jetés.
+
+`dossier` : où enregistrer la session (pour chaque carte, le flux FIFO
+`<série>.spc`, son `_acquisition.ini` et ses paramètres relus) ; "" : rien.
+`echantillon_s` : la période d'échantillonnage de l'AO ; avec `scan_s`, la
+durée programmée d'un scan, elle sert au contrôle de M3 − M0 (tolérance :
+un échantillon et 100 ppm) ; NaN : pas de contrôle. `ordre` et `pause_s`
+ne servent qu'à la simulation, qui fabrique les passes que la NI
+produirait.
+"""
+struct Clamp <: Commande
+    rois::Vector{Int}
+    ordre::Vector{Int}
+    dossier::String
+    scan_s::Float64
+    pause_s::Float64
+    echantillon_s::Float64
+end
+Clamp(; rois::AbstractVector{<:Integer} = Int[], ordre::AbstractVector{<:Integer} = rois,
+      dossier::AbstractString = "", scan_s::Real = 0.95, pause_s::Real = 0.05, echantillon_s::Real = NaN) =
+    Clamp(Int.(rois), Int.(ordre), String(dossier), Float64(scan_s), Float64(pause_s), Float64(echantillon_s))
+
+"""Écart toléré sur M3 − M0 : un échantillon de l'AO et 100 ppm de la durée programmée."""
+tolerance_passe(c::Clamp) = c.echantillon_s + 100e-6 * c.scan_s
 
 """Arrête la mesure en cours (réponse : un `Fin`)."""
 struct Arret <: Commande end
@@ -164,14 +275,17 @@ end
 
 Poignée du moteur rendue par `demarrer_moteur`. Le GUI n'utilise que
 `commander!`, `m.resultats` (take!/isready), `rendre!`, `etat_moteur`,
-`verifier` et `arreter_moteur`.
+`verifier` et `arreter_moteur` ; l'analyse du mode Realtime lit
+`m.histogrammes` (un `HistoClamp` par période), que le GUI ne touche pas.
 """
 mutable struct Moteur
     commandes::Channel{Commande}
     resultats::Channel{Resultat}
+    histogrammes::Channel{HistoClamp}
     tache::Union{Nothing,Task}
     arret::Threads.Atomic{Bool}
     perdus::Threads.Atomic{Int}
+    histos_perdus::Threads.Atomic{Int}
     trames_sautees::Threads.Atomic{Int}
     @atomic etat::Symbol
     reglages::Reglages
@@ -183,7 +297,7 @@ mutable struct Moteur
     raison_arret::String          # écrite par la tâche avant de finir
 end
 
-"""État du moteur : :demarrage, :pret, :imagerie, :single ou :arrete."""
+"""État du moteur : :demarrage, :pret, :imagerie, :single, :clamp ou :arrete."""
 etat_moteur(m::Moteur) = @atomic m.etat
 _etat!(m::Moteur, e::Symbol) = (@atomic m.etat = e; nothing)
 
@@ -203,8 +317,8 @@ function demarrer_moteur(reglages::Reglages; source::Union{Nothing,Source} = not
                          capacite::Integer = 1024, tampons::Integer = 4)
     Threads.nthreads() == 1 &&
         @warn "Julia tourne avec un seul fil : le moteur SPC partagera le fil du GUI. Lance julia -t auto."
-    m = Moteur(Channel{Commande}(64), Channel{Resultat}(capacite), nothing,
-               Threads.Atomic{Bool}(false), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
+    m = Moteur(Channel{Commande}(64), Channel{Resultat}(capacite), Channel{HistoClamp}(256), nothing,
+               Threads.Atomic{Bool}(false), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
                :demarrage, copier_reglages(reglages), source, ReentrantLock(),
                Dict{Int,PoolTrames}(), max(1, tampons), 0, "")
     lock(() -> push!(_MOTEURS, m), _VERROU_MOTEURS)
@@ -331,10 +445,11 @@ mutable struct Contexte
     etats::Dict{Int,Int}
     sync_ok::Dict{Int,Bool}
     cfd_ok::Dict{Int,Bool}
+    series::Dict{Int,String}
 end
 
 function _boucle_moteur(m::Moteur)
-    ctx = Contexte(m.reglages, 0, Int[], Int[], Dict{Int,Int}(), Dict{Int,Bool}(), Dict{Int,Bool}())
+    ctx = Contexte(m.reglages, 0, Int[], Int[], Dict{Int,Int}(), Dict{Int,Bool}(), Dict{Int,Bool}(), Dict{Int,String}())
     raison, erreur = "arrêt demandé", false
     try
         m.source === nothing && (m.source = source_depuis(ctx.reglages))
@@ -406,6 +521,8 @@ function _executer!(m::Moteur, src::Source, ctx::Contexte, c::Commande)
             _single!(m, src, ctx, c)
         elseif c isa Verifier
             _verifier!(m, src, ctx, c.reponse)
+        elseif c isa Clamp
+            _clamp!(m, src, ctx, c)
         elseif c isa Deverrouiller
             _deverrouiller!(m, src, ctx)
         end                                  # Arret sans mesure en cours : rien à faire
@@ -513,6 +630,20 @@ end
 # Vérification
 # ---------------------------------------------------------------------
 
+"""Canal d'un n° de série : sa place dans [verification] series (0 : absent)."""
+canal_serie(r::Reglages, serie::AbstractString) = something(findfirst(==(serie), r.series), 0)
+
+"""
+Modules prêts dans l'ordre des canaux : celui dont le n° de série est
+`series[1]`, puis `series[2]`… Les n° de module peuvent changer avec les
+châssis, pas les n° de série. Si aucune carte prête n'a un n° de série de
+la liste (simulation, rejeu ancien), l'ordre des modules.
+"""
+function _cartes_par_canal(ctx::Contexte, r::Reglages)
+    par_serie = [k for s in r.series for k in ctx.prets if get(ctx.series, k, "") == s]
+    return isempty(par_serie) ? sort(ctx.prets) : unique(par_serie)
+end
+
 function _verifier!(m::Moteur, src::Source, ctx::Contexte, reponse)
     r = _reglages_courants!(m, ctx)
     parametres, _ = parametres_imagerie(r, geometrie(r))
@@ -524,16 +655,14 @@ function _verifier!(m::Moteur, src::Source, ctx::Contexte, reponse)
         k in ctx.detectes || push!(problemes, "module $k non détecté (modules vus : $(ctx.detectes))")
     end
     for k in ctx.detectes
-        attendue = k + 1 <= length(r.series) ? r.series[k + 1] : ""
         etat = explication_init(get(ctx.etats, k, -1))
         if !(k in ctx.prets)
             push!(problemes, "module $k pas prêt : $etat")
-            push!(cartes, EtatCarte(k, false, etat, 0, "", attendue, -1, NaN, LigneTableau[]))
+            push!(cartes, EtatCarte(k, false, etat, 0, "", 0, -1, NaN, LigneTableau[]))
             continue
         end
         id = identifier(src, k)
-        est_materiel(src) && !isempty(attendue) && id.serie != attendue &&
-            push!(problemes, "module $k : n° de série $(id.serie), attendu $attendue")
+        ctx.series[k] = id.serie
         s = lire_sync(src, k)
         ctx.sync_ok[k] = s == 1
         s == 1 || push!(problemes, "module $k : $(get(MESSAGES_SYNC, s, "SYNC état $s")) (laser allumé ? câble du SYNC ?)")
@@ -542,7 +671,14 @@ function _verifier!(m::Moteur, src::Source, ctx::Contexte, reponse)
         for l in tableau
             l.statut == :ok || push!(problemes, _texte_ecart(k, l))
         end
-        push!(cartes, EtatCarte(k, true, etat, id.type, id.serie, attendue, s, NaN, tableau))
+        push!(cartes, EtatCarte(k, true, etat, id.type, id.serie, canal_serie(r, id.serie), s, NaN, tableau))
+    end
+    # Les cartes sont identifiées par n° de série : chaque canal doit trouver la sienne.
+    if est_materiel(src)
+        for (i, serie) in enumerate(r.series)
+            any(c -> c.pret && c.serie == serie, cartes) ||
+                push!(problemes, "canal $i : carte n° $serie introuvable ou pas prête (vues : $(join([c.serie for c in cartes if c.pret], ", ")))")
+        end
     end
 
     # CFD : des coups, laser allumé, sinon les détecteurs sont éteints.
@@ -603,6 +739,8 @@ mutable struct AcqModule
     trames::Int
     mots::Int
     debut::Float64
+    mots_gardes::Union{Nothing,Vector{UInt16}}   # flux rangé dans l'image (Imagerie(...; garder_mots))
+    serie::Union{Nothing,String}
 end
 
 # Au-delà, les mots gardés pour mesurer la géométrie sont jetés (scanner arrêté).
@@ -635,7 +773,8 @@ function _imagerie!(m::Moteur, src::Source, ctx::Contexte, c::Imagerie)
             fenetre = fenetre_tac(src, k, lus)
             ecrivain = r.flux_brut ? ouvrir_spc(prefixe * ".spc", info.entete) : nothing
             push!(acqs, AcqModule(k, prefixe, info.horloge_macro_s, fenetre, fenetre / 4096, ecrivain,
-                                  Etalonnage(), false, nothing, nothing, nothing, false, 0, 0, 0.0))
+                                  Etalonnage(), false, nothing, nothing, nothing, false, 0, 0, 0.0,
+                                  c.garder_mots ? UInt16[] : nothing, get(ctx.series, k, nothing)))
             effacer_taux!(src, k)
         end
         _etat!(m, :imagerie)
@@ -652,6 +791,10 @@ function _imagerie!(m::Moteur, src::Source, ctx::Contexte, c::Imagerie)
             cmd === nothing || _refuser!(m, cmd, "imagerie en cours")
             if isfinite(c.duree) && time() - debut >= c.duree
                 raison = "durée écoulée"
+                break
+            end
+            if c.trames > 0 && all(a -> a.rangeur !== nothing && a.rangeur.trames_completes >= c.trames, acqs)
+                raison = "$(c.trames) trames"
                 break
             end
             for a in acqs
@@ -711,6 +854,7 @@ function _traiter_mots!(m::Moteur, a::AcqModule, tampon::Vector{UInt16}, n::Inte
     a.mots += n
     publier(r, complete) = _publier_trame!(m, a, r, complete)
     if a.rangeur !== nothing
+        a.mots_gardes === nothing || append!(a.mots_gardes, view(tampon, 1:n))
         ranger!(publier, a.rangeur, tampon, n)
         return nothing
     end
@@ -730,6 +874,7 @@ function _traiter_mots!(m::Moteur, a::AcqModule, tampon::Vector{UInt16}, n::Inte
     a.pool = _nouveau_pool!(m, a.carte, geo.ny, geo.nx, a.dt_ns)
     mots = a.etalonnage.mots
     a.etalonnage = Etalonnage()
+    a.mots_gardes === nothing || append!(a.mots_gardes, mots)
     ranger!(publier, a.rangeur, mots, length(mots))
     return nothing
 end
@@ -773,6 +918,11 @@ function _finir_acquisition!(m::Moteur, a::AcqModule, r::Reglages, g::Geometrie,
            photons = rg.decodeur.photons, dans_image = rg.dans_image, pertes = rg.decodeur.pertes,
            trames = rg.trames_completes, lignes_trame = a.geo.lignes_trame, pixels_ligne = a.geo.pixels_ligne,
            periode_ligne_s = a.geo.periode * a.tic_s, nx = rg.nx, ny = rg.ny)
+    resolue = Geometrie(g.temps_pixel_ns, rg.nx, g.decalage_pixels, rg.ny, g.decalage_lignes,
+                        g.ligne_front_montant, g.trame_front_montant)
+    serie = something(a.serie, "")
+    publier!(m, ImageSomme(a.carte, serie, canal_serie(r, serie), res.intensite, res.somme_t, res.declin, a.dt_ns,
+                           a.tic_s, res.trames, resolue, something(a.mots_gardes, UInt16[])))
     ecrire_resultats_img(a.prefixe, res, a.dt_ns, a.carte, g, r.binning_temps, r.photons_min)
     append!(fichiers, a.prefixe .* ["_intensite.bmp", "_temps_moyen.bmp", "_declin.svg", ".jls"])
     _verifier_peigne!(m, a.carte, res.declin)
@@ -816,7 +966,7 @@ function _single!(m::Moteur, src::Source, ctx::Contexte, c::Single)
             _signaler_tableau!(m, k, parametres, lus[k])
             s = lire_sync(src, k)
             s == 1 || publier!(m, Alerte(:avertissement, k, "module $k : $(get(MESSAGES_SYNC, s, "SYNC état $s")) ; sans SYNC, aucun photon n'est compté"))
-            canaux[k] = preparer_memoire!(src, k, r.resolution_adc)
+            canaux[k] = preparer_memoire!(src, k, r.resolution_adc).canaux
             fenetre[k] = fenetre_tac(src, k, lus[k])
             serie[k] = identifier(src, k).serie
             H[k] = zeros(UInt16, canaux[k], c.n)
@@ -915,6 +1065,284 @@ function _fichiers_single(prefixe, k, H, fenetre, canaux, serie, lus, parametres
     ecrire_csv_single(prefixe * ".csv", H, dt_ns, entete)
     svg_histo_single(prefixe * ".svg", dt_ns, H, "Module $k : $N × $(c.temps_s) s, $(sum(Int, H)) coups au total")
     return [prefixe * ".csv", prefixe * ".svg", prefixe * "_parametres.ini"]
+end
+
+# ---------------------------------------------------------------------
+# Realtime (clamp) : FIFO, routage, passes marquées par les cartes
+# ---------------------------------------------------------------------
+
+"""
+Publie un `HistoClamp` pour l'analyse. Sur les cartes, jamais d'attente :
+jeté et compté si l'analyse ne suit pas. En rejeu, attend la place — rien
+ne presse, et une passe sautée fausserait la relecture.
+"""
+function _publier_histo!(m::Moteur, h::HistoClamp; attendre::Bool = false)
+    while Base.n_avail(m.histogrammes) >= m.histogrammes.sz_max
+        if !attendre || m.arret[]
+            Threads.atomic_add!(m.histos_perdus, 1)
+            return false
+        end
+        sleep(0.002)
+    end
+    put!(m.histogrammes, h)
+    return true
+end
+
+"""Ce qui empêche une commande `Clamp` de démarrer ("" : rien)."""
+function _refus_clamp(c::Clamp, cartes)
+    isempty(cartes) && return "Realtime : aucune carte prête"
+    length(c.rois) > ROI_MAX && return "Realtime : $(length(c.rois)) ROI, le routage en distingue $ROI_MAX (le code 0 est réservé)"
+    all(i -> 1 <= i <= ROI_MAX, c.rois) || return "Realtime : n° de ROI hors de 1 à $ROI_MAX : $(c.rois)"
+    return ""
+end
+
+"""Une passe terminée d'une carte, en attente des autres cartes."""
+struct PasseCarte
+    t_debut_s::Float64
+    t_fin_s::Float64
+    histo::Matrix{UInt32}
+    pertes::Int
+    motifs::Vector{String}
+end
+
+"""
+Une carte pendant une mesure Realtime. SPC_FOVFL : quand il apparaît, les
+passes terminées à cette lecture et à la suivante, et celles commencées
+avant la fin de la suivante (`fovfl_jusqua`, tics), ne nourrissent pas le
+PI — la perte a pu se produire entre la lecture et le contrôle de l'état.
+`decalage` : début de passe de cette carte moins celui de la première carte
+(les horloges des cartes partent à des instants voisins et dérivent),
+suivi d'une passe appariée à l'autre.
+"""
+mutable struct ClampCarte
+    carte::Int
+    serie::String
+    nom::String
+    tic_s::Float64
+    passes::Passes
+    file::Vector{PasseCarte}
+    ecrivain::Union{Nothing,EcrivainSpc}
+    deborde::Bool
+    fovfl_vu::Bool
+    fovfl_jusqua::Int64
+    fovfl_etendre::Bool
+    decalage::Float64
+    sans_partenaire::Int
+    hors_duree::Int
+end
+
+ClampCarte(carte, serie, nom, tic_s, passes, ecrivain) =
+    ClampCarte(carte, serie, nom, tic_s, passes, PasseCarte[], ecrivain, false, false, typemin(Int64), false, NaN, 0, 0)
+
+function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
+    r = _reglages_courants!(m, ctx)
+    modules = _cartes_par_canal(ctx, r)
+    refus = _refus_clamp(c, modules)
+    if !isempty(refus)
+        publier!(m, Alerte(:erreur, -1, refus))
+        publier!(m, Fin(:clamp, refus, true, String[], time()))
+        return nothing
+    end
+    parametres, _ = parametres_clamp(r)
+    enregistrer = !isempty(c.dossier)
+    dossier = enregistrer ? c.dossier : joinpath(dossier_spc(r), "moteur")
+    mkpath(dossier)
+    codes = isempty(c.rois) ? [CODE_SANS_ROI] : [code_routage(i) for i in c.ordre]
+    tampon = zeros(UInt16, 1 << 20)
+    cartes = ClampCarte[]
+    fichiers = String[]
+    raison, erreur = "arrêtée", false
+    passes = 0
+    dt_ns = NaN
+    debut = time()
+    attendre = !est_materiel(src)
+    try
+        preparer_passes!(src, modules, codes, c.scan_s, c.pause_s)
+        for (canal, k) in enumerate(modules)
+            serie = get(ctx.series, k, "")
+            nom = isempty(serie) ? "module$k" : serie
+            lus = configurer!(src, k, parametres, joinpath(dossier, "$(nom)_parametres.ini"))
+            _signaler_tableau!(m, k, parametres, lus)
+            info = infos_fifo(src, k)
+            fenetre = fenetre_tac(src, k, lus)
+            isnan(dt_ns) && (dt_ns = fenetre / r.canaux_clamp)
+            ecrivain = nothing
+            if enregistrer
+                ecrivain = ouvrir_spc(joinpath(dossier, nom * ".spc"), info.entete)
+                push!(fichiers, joinpath(dossier, "$(nom)_parametres.ini"))
+            end
+            push!(cartes, ClampCarte(k, serie, nom, info.horloge_macro_s, Passes(canaux = r.canaux_clamp), ecrivain))
+            effacer_taux!(src, k)
+        end
+        _etat!(m, :clamp)
+        debut = time()
+        foreach(a -> lancer!(src, a.carte), cartes)
+        prochain_taux = debut + PERIODE_TAUX
+        while true
+            m.arret[] && break
+            cmd = _prochaine_commande(m)
+            cmd isa Arret && break
+            cmd === nothing || _refuser!(m, cmd, "Realtime en cours")
+            for a in cartes
+                avant = length(a.file)
+                _lire_passes!(src, a, tampon, c)
+                _surveiller_fovfl!(m, a, (lire_etat(src, a.carte) & SPC_FOVFL) != 0, avant)
+            end
+            passes += _publier_passes!(m, cartes, dt_ns, attendre)
+            if all(a -> epuisee(src, a.carte), cartes)
+                raison = "fin du rejeu"
+                break
+            end
+            if time() >= prochain_taux
+                _taux!(m, src, ctx, modules, true)
+                prochain_taux += PERIODE_TAUX
+            end
+            sleep(0.002)
+        end
+    catch e
+        raison, erreur = _texte_erreur(e), true
+        publier!(m, Alerte(:erreur, -1, "Realtime interrompu : " * raison))
+    finally
+        for a in cartes
+            try
+                erreur || _lire_passes!(src, a, tampon, c)    # avant l'arrêt, qui vide le FIFO
+            catch
+            end
+            try
+                stopper!(src, a.carte)
+            catch e
+                publier!(m, Alerte(:erreur, a.carte, "arrêt de la mesure : " * _texte_erreur(e)))
+            end
+        end
+    end
+    try
+        # Les événements du dernier tic attendaient la lecture suivante : il n'y en aura plus.
+        for a in cartes
+            terminer_passes!((p, t0, t1, pertes) -> _ranger_passe!(a, p, t0, t1, pertes, c), a.passes)
+        end
+        passes += _publier_passes!(m, cartes, dt_ns, attendre)
+        for (canal, a) in enumerate(cartes)
+            a.passes.passes_abandonnees > 0 &&
+                publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.passes.passes_abandonnees) passe(s) sans marqueur de fin, ignorées"))
+            a.hors_duree > 0 &&
+                publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.hors_duree) passe(s) de durée M3 − M0 hors tolérance (marqueur perdu ou en trop), hors du PI"))
+            a.sans_partenaire > 0 &&
+                publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.sans_partenaire) passe(s) sans passe correspondante sur l'autre carte, ignorées"))
+            a.passes.hors_passe > 0 &&
+                publier!(m, Alerte(:info, a.carte, "module $(a.carte) : $(a.passes.hors_passe) photons d'une ROI hors des passes (décalage entre le code et le signal de passe ?)"))
+            a.ecrivain === nothing && continue
+            push!(fichiers, fermer_spc!(a.ecrivain))
+            push!(fichiers, ecrire_acquisition_ini(joinpath(dossier, a.nom * "_acquisition.ini"), a.carte, a.tic_s,
+                                                   dt_ns * r.canaux_clamp, time() - debut, a.deborde;
+                                                   dcc = r.dcc,
+                                                   clamp = Dict{String,Any}("serie" => a.serie, "canal" => canal,
+                                                                            "inverser_routage" => Int(r.inverser_routage),
+                                                                            "canaux" => r.canaux_clamp,
+                                                                            "passes" => a.passes.numero,
+                                                                            "photons_hors_roi" => a.passes.hors_roi,
+                                                                            "passes_hors_duree" => a.hors_duree,
+                                                                            "passes_sans_partenaire" => a.sans_partenaire)))
+        end
+    catch e
+        erreur = true
+        publier!(m, Alerte(:erreur, -1, "fichiers du Realtime : " * _texte_erreur(e)))
+    end
+    publier!(m, Fin(:clamp, "$raison après $passes passe(s)", erreur, fichiers, time()))
+    _etat!(m, :pret)
+    return nothing
+end
+
+"""Lit le FIFO d'une carte, l'enregistre et range ses photons dans les passes."""
+function _lire_passes!(src::Source, a::ClampCarte, tampon::Vector{UInt16}, c::Clamp)
+    n = lire_mots!(src, a.carte, tampon)
+    n > 0 || return nothing
+    a.ecrivain === nothing || ajouter_spc!(a.ecrivain, tampon, n)
+    passes!((p, t0, t1, pertes) -> _ranger_passe!(a, p, t0, t1, pertes, c), a.passes, tampon, n)
+    return nothing
+end
+
+"""Une passe terminée de la carte `a` (temps en tics), avec ce qui l'exclut du PI."""
+function _ranger_passe!(a::ClampCarte, p::Passes, t0::Int64, t1::Int64, pertes::Int, c::Clamp)
+    motifs = String[]
+    pertes > 0 && push!(motifs, "module $(a.carte) : GAP, $pertes enregistrement(s) perdus")
+    t0 <= a.fovfl_jusqua && push!(motifs, "module $(a.carte) : FIFO débordé (SPC_FOVFL) pendant la passe")
+    duree = (t1 - t0) * a.tic_s
+    if isfinite(c.echantillon_s) && abs(duree - c.scan_s) > tolerance_passe(c)
+        a.hors_duree += 1
+        push!(motifs, "module $(a.carte) : M3 − M0 = $(round(duree * 1e3; digits = 4)) ms au lieu de $(round(c.scan_s * 1e3; digits = 4)) ms")
+    end
+    push!(a.file, PasseCarte(t0 * a.tic_s, t1 * a.tic_s, copy(p.histo), pertes, motifs))
+    return nothing
+end
+
+"""
+SPC_FOVFL après une lecture (`fovfl` : le bit, `avant` : les passes en file
+avant cette lecture). Quand il apparaît : les passes terminées à cette
+lecture sont exclues du PI, puis, après la lecture suivante, toutes celles
+commencées jusque-là (la perte a pu se produire entre la lecture et le
+contrôle de l'état). Les GAP marquent ensuite chaque perte à sa place.
+"""
+function _surveiller_fovfl!(m::Moteur, a::ClampCarte, fovfl::Bool, avant::Int)
+    if a.fovfl_etendre
+        a.fovfl_etendre = false
+        _exclure_fovfl!(a, avant)
+    end
+    if fovfl && !a.fovfl_vu
+        a.fovfl_etendre = true
+        _exclure_fovfl!(a, avant)
+        if !a.deborde
+            a.deborde = true
+            publier!(m, Alerte(:erreur, a.carte, "module $(a.carte) : FIFO débordé, des photons sont perdus : les passes touchées ne nourrissent pas le PI"))
+        end
+    end
+    a.fovfl_vu = fovfl
+    return nothing
+end
+
+function _exclure_fovfl!(a::ClampCarte, avant::Int)
+    a.fovfl_jusqua = max(a.fovfl_jusqua, a.passes.dernier)
+    motif = "module $(a.carte) : FIFO débordé (SPC_FOVFL) pendant la passe"
+    for k in avant + 1:length(a.file)
+        motif in a.file[k].motifs || push!(a.file[k].motifs, motif)
+    end
+    return nothing
+end
+
+"""
+Publie les passes que toutes les cartes ont terminées. Le même signal de
+passe arrive sur toutes ; chaque carte date ses passes avec sa propre
+horloge, partie à un instant voisin. Les débuts de passe se correspondent
+à une demi-durée de passe près, une fois retiré le décalage de chaque carte
+(mesuré sur la première passe, puis suivi d'une passe à l'autre pour la
+dérive des horloges). Une passe sans correspondante (marqueur perdu sur une
+seule carte) est écartée. Rend le nombre de passes publiées.
+"""
+function _publier_passes!(m::Moteur, cartes::Vector{ClampCarte}, dt_ns::Float64, attendre::Bool)
+    n = 0
+    while !isempty(cartes) && all(a -> !isempty(a.file), cartes)
+        tetes = [first(a.file) for a in cartes]
+        ref = tetes[1].t_debut_s
+        if isnan(cartes[1].decalage)
+            foreach((a, t) -> a.decalage = t.t_debut_s - ref, cartes, tetes)
+        end
+        ecarts = [t.t_debut_s - ref - a.decalage for (a, t) in zip(cartes, tetes)]
+        tolerance = minimum(t -> t.t_fin_s - t.t_debut_s, tetes) / 2
+        if maximum(ecarts) - minimum(ecarts) > tolerance
+            k = argmin(ecarts)                          # la plus ancienne n'a pas de correspondante
+            popfirst!(cartes[k].file)
+            cartes[k].sans_partenaire += 1
+            cartes[k].sans_partenaire == 1 &&
+                publier!(m, Alerte(:avertissement, cartes[k].carte, "module $(cartes[k].carte) : une passe sans correspondante sur l'autre carte (marqueur perdu ?), écartée"))
+            continue
+        end
+        foreach((a, t) -> (popfirst!(a.file); a.decalage = t.t_debut_s - ref), cartes, tetes)
+        n += 1
+        numero = cartes[1].passes.numero - length(cartes[1].file)
+        _publier_histo!(m, HistoClamp(numero, tetes[1].t_debut_s, tetes[1].t_fin_s, [a.carte for a in cartes],
+                                      [a.serie for a in cartes], [t.histo for t in tetes], sum(t.pertes for t in tetes),
+                                      dt_ns, reduce(vcat, (t.motifs for t in tetes))); attendre = attendre)
+    end
+    return n
 end
 
 # ---------------------------------------------------------------------

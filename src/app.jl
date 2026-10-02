@@ -4,7 +4,8 @@ app.jl
 Application start-up and shutdown (plan §2, §5, §6, §7):
 
 - `run_app` loads config/bench.toml, spawns the DAQ loop and journal
-  threads, starts the SPC engine (FLIMCore, if config/spc.toml asks for it),
+  threads, tries to connect the NI cards, starts the SPC engine (FLIMCore,
+  if config/spc.toml asks for it),
   builds and shows the window, warms up the GUI code paths, and starts the
   30 Hz refresh tick;
 - closing the window stops everything the way STOP does (the loop sees the
@@ -49,6 +50,25 @@ function check_threads()
 end
 
 """
+    offline_reason(cfg, spc)::String
+
+Why this computer can't run the Realtime acquisition, "" if it can: the NI
+backend without the NI-DAQmx driver (nicaiu), or the SPC-150N cards as SPC
+source without their DLL — a laptop, typically. The app then starts
+offline: no connection attempt and no fault, a banner says so, START
+refuses the Realtime mode, and Playback stays available. (On the bench PC,
+a failed connection is not this: the DAQ label says so and RECONNECT
+retries, see `connect_button_label`.)
+"""
+function offline_reason(cfg::BenchConfig, spc::FLIMCore.Reglages)::String
+    missing_parts = String[]
+    cfg.backend == :ni && isempty(Libdl.find_library(DAQmx.LIB)) && push!(missing_parts, "NI-DAQmx driver")
+    spc.source == "cartes" && !FLIMCore.SPCLite.dll_disponible() && push!(missing_parts, "SPC-150N DLL")
+    isempty(missing_parts) && return ""
+    return "OFFLINE (no $(join(missing_parts, ", no ")) on this computer): acquisition disabled, Playback available"
+end
+
+"""
     start_background_threads!(app_run)
 
 Spawn the DAQ loop and journal threads for the session.
@@ -63,13 +83,13 @@ end
 """
     dummy_frame_record()::FrameRecord
 
-A plausible analyzed file for the GUI warm-up.
+A plausible analyzed histogram for the GUI warm-up.
 """
 function dummy_frame_record()::FrameRecord
     n = DEFAULT_HISTOGRAM_RESOLUTION
     histogram = [exp(-(i - 20) / 40) * (i > 20) for i in 1:n]
     frame = ChannelFrame(histogram, copy(histogram), sum(histogram), 3.0, 1.0)
-    sample = AcquisitionSample(frame, ChannelFrame(), 10.0, NaN, 1.0, NaN, UInt32(1), "warmup_0001.sdt", 1, time())
+    sample = AcquisitionSample(frame, ChannelFrame(), 10.0, NaN, 1.0, NaN, UInt32(1), 1, 0.0, 1.0, true, time())
     return FrameRecord(sample, 1)
 end
 
@@ -120,6 +140,8 @@ function shutdown_app!(app_run::AppRun)
     send_command!(ex, QuitCommand())
     journal_event!(ex.journal, :info, "window closed")
     spc_stopping = stop_spc!(app_run.spc)
+    replay = app_run.playback.engine
+    replay === nothing || errormonitor(Threads.@spawn FLIMCore.arreter_moteur(replay))
 
     loop = app_run.loop_task
     Threads.@spawn begin
@@ -135,8 +157,9 @@ end
 
 Main application entry point: load the bench config and the saved
 `AppState`, load the IRF and warm up the fit, spawn the DAQ loop and journal
-threads, build the window, attach the handlers, show it, warm up the GUI,
-and start the refresh tick. Returns the `Figure`.
+threads, try to connect the NI cards, start the SPC engine, build the
+window, attach the handlers, show it, warm up the GUI, and start the
+refresh tick. Returns the `Figure`.
 """
 function run_app(config_path::AbstractString = default_bench_config_path())
     @info "="^60
@@ -152,7 +175,7 @@ function run_app(config_path::AbstractString = default_bench_config_path())
     app_run = AppRun(cfg)
     LAST_APP_RUN[] = app_run
 
-    init_irf_runtime!()
+    init_irf_runtime!(app_run.spc.settings)
 
     # One-time JIT warmup of the fitting code path, done before the GUI
     # appears rather than left to the user's first START — see
@@ -164,10 +187,24 @@ function run_app(config_path::AbstractString = default_bench_config_path())
 
     start_background_threads!(app_run)
     journal_event!(app_run.exchange.journal, :info, "app started (config $(cfg.source), backend $(cfg.backend))")
+    code_versions()                  # git, once: every session's run.toml records them
+
+    # Offline (no NI-DAQmx driver or no SPC DLL, e.g. a laptop): nothing to
+    # connect, no fault; the banner says so and Playback stays available.
+    app_run.offline = offline_reason(cfg, app_run.spc.settings)
+    app_run.spc.banner = app_run.offline
+    isempty(app_run.offline) || @info "Starting offline" reason=app_run.offline
+    app_run.playback.dir = cached_path(session_folder_cache())
+
+    # Try to connect the NI cards right away (the DAQ loop does it on its
+    # own thread; the DAQ label shows the outcome, RECONNECT retries a
+    # failed connection, RESET acknowledges a fault).
+    (cfg.backend != :ni || !isempty(Libdl.find_library(DAQmx.LIB))) && send_command!(app_run.exchange, ConnectCommand())
 
     # Plan.pdf, start-up step 3: the GUI starts the SPC engine, which
     # initializes and checks the SPC-150N on its own thread.
-    app_run.spc.settings.connexion_au_demarrage && spc_connect!(app_run.spc)
+    spc_cards_missing = app_run.spc.settings.source == "cartes" && !FLIMCore.SPCLite.dll_disponible()
+    app_run.spc.settings.connexion_au_demarrage && !spc_cards_missing && spc_connect!(app_run.spc)
 
     @info "Creating GUI..."
     fig, blocks = make_gui(app_state, app_run)
@@ -175,6 +212,7 @@ function run_app(config_path::AbstractString = default_bench_config_path())
     display(fig)
 
     warm_up_gui!(app_state, app_run, blocks)
+    show_recording_space!(app_run, blocks)       # the raw streams: about 4 bytes per photon per card
     start_refresh_task!(app_state, app_run, blocks, fig)
     on(events(fig).window_open) do is_open
         is_open || shutdown_app!(app_run)

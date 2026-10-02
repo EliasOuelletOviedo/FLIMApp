@@ -5,7 +5,7 @@ Core data structures for the FLIM application.
 
 This file defines the structures shared across threads:
 - AppState and its settings groups: persistent configuration serialized to disk
-- ChannelFrame / AcquisitionSample: one analyzed file's results, per channel,
+- ChannelFrame / AcquisitionSample: one analyzed histogram's results, per channel,
   so per-channel logic is written once and instantiated per channel instead
   of duplicated `_ch1`/`_ch2` copies
 - KalmanState, RoiCoordinates
@@ -25,11 +25,13 @@ using Base.Threads
     ChannelFrame
 
 One TCSPC channel's slice of a single acquisition frame: the binned
-histogram, its fitted decay curve, and the scalar fit results. Two of these
-(one per channel) make up an `AcquisitionSample`. The "absent channel"
-convention (a file with only one TCSPC channel) uses the same sentinels as
-everywhere else: `NaN` for scalars, `Float64[]` for vectors — see
-`ChannelFrame()` below and `process_frame!` in acquisition.jl.
+histogram, its fitted decay curve, and the scalar fit results —
+`lifetime_kalman` is the observer's estimate the PI acted on (`NaN` when
+the pass was kept out of the PI). Two of these (one per channel) make up an
+`AcquisitionSample`. The "absent channel" convention (a single SPC-150N in
+`[verification] series`) uses the same sentinels as everywhere else: `NaN`
+for scalars, `Float64[]` for vectors — see `ChannelFrame()` below and
+`start_realtime` in acquisition.jl.
 """
 struct ChannelFrame
     histogram::Vector{Float64}
@@ -37,54 +39,37 @@ struct ChannelFrame
     photons::Float64
     lifetime::Float64
     concentration::Float64
+    lifetime_kalman::Float64
 end
+
+ChannelFrame(histogram, fit, photons, lifetime, concentration) =
+    ChannelFrame(histogram, fit, photons, lifetime, concentration, NaN)
 
 """
     ChannelFrame()
 
 The "absent channel" frame: empty vectors and `NaN` scalars, emitted for
-channel 2 when the source file has only one TCSPC channel.
+channel 2 when only one SPC-150N measures.
 """
 ChannelFrame() = ChannelFrame(Float64[], Float64[], NaN, NaN, NaN)
 
 """
     AcquisitionSample
 
-One frame's worth of acquisition results, produced by
-`run_acquisition_loop!` (analysis/acquisition.jl) and published by
-`emit_frame!` into the exchanges. A struct rather than a positional tuple —
-too many fields to destructure positionally without risking a
-silently-mismatched order.
+One analyzed pass's results, produced by the analysis worker
+(`start_realtime`, analysis/acquisition.jl) and published by `emit_frame!`
+into the exchanges. A struct rather than a positional tuple — too many
+fields to destructure positionally without risking a silently-mismatched
+order.
 
-Three fields together identify *which* ROI scan produced this file — the
-whole point being that none of them is reliable alone:
-
-`frame_index` is this app's own count of files it has read so far this run
-— it advances by exactly 1 per file regardless of what the source acquisition
-actually produced, so a file the upstream hardware/software never wrote
-(e.g. a lag spike at the source) is invisible to it and it silently drifts
-out of sync with the real physical sequence from that point on.
-
-`file_sequence_number` (parsed from `source_file`'s name, see
-`parse_file_sequence_number` in acquisition.jl) is this file's own
-embedded position in that sequence instead, so a file that exists on disk
-but never reaches this app just leaves a gap rather than shifting everything
-after it. `nothing` when the filename has no parseable trailing number. It
-does *not* catch the more common failure, though: the source numbers its
-files consecutively as they are **written**, so a scan that produced no file
-at all never consumes a number and the numbering stays perfectly consecutive
-across the hole (ROI 1 -> 1, ROI 2 -> 2, ROI 1 -> 3, ROI 2 -> *nothing*,
-ROI 1 -> 4) — every later file then lands on the wrong ROI, permanently.
-
-`file_time` is `source_file`'s modification time (unix seconds, `NaN` if it
-couldn't be stat'ed) — when the source actually wrote it, not when this app
-got around to reading it, so it stays meaningful even when the reader is
-backlogged. It's what makes the hole above detectable: consecutive ROI scans
-are `scan_time + shift_time` ms apart by construction (the DAQ loop's slots
-are built from exactly those numbers, loop/scan_pattern.jl), so a gap of
-~2x that period means one scan produced no file. See `RoiSlotTracker`/
-`next_roi_slot!` (analysis/acquisition.jl), which `assign_roi!` drives to
-keep round-robin ROI assignment aligned through such holes.
+`frame_index` counts the passes analyzed this run; `pass` is the pass number
+the cards counted (from 1, `FLIMCore.HistoClamp`), `pass_start_s`/
+`pass_end_s` its markers in card time (seconds from the start of the
+measurement); `timestamps` the end of the pass in seconds from the start of
+the run's first pass; `complete` false when the pass was kept out of the
+PI, `excluded_because` saying why (the engine's `HistoClamp.motifs`: lost
+records, FIFO overflow, a pass of the wrong length); `acquired_at` when the
+worker took it (unix seconds).
 """
 struct AcquisitionSample
     ch1::ChannelFrame
@@ -94,10 +79,18 @@ struct AcquisitionSample
     timestamps::Float64
     protocol_setpoint::Float64
     frame_index::UInt32
-    source_file::String
-    file_sequence_number::Union{Int, Nothing}
-    file_time::Float64
+    pass::Int
+    pass_start_s::Float64
+    pass_end_s::Float64
+    complete::Bool
+    excluded_because::String
+    acquired_at::Float64
 end
+
+AcquisitionSample(ch1, ch2, command1, command2, timestamps, protocol_setpoint, frame_index, pass,
+                  pass_start_s, pass_end_s, complete, acquired_at) =
+    AcquisitionSample(ch1, ch2, command1, command2, timestamps, protocol_setpoint, frame_index, pass,
+                      pass_start_s, pass_end_s, complete, "", acquired_at)
 
 # =============================================================================
 # APPLICATION STATE SETTINGS GROUPS
@@ -256,8 +249,8 @@ raw (unfiltered) measurement seen, needed to compute `r_est`'s update.
 `typical_dt` is an EMA of the elapsed time between updates — needed because
 the process-noise growth `kalman_update!` applies over an interval `dt`
 scales as `dt^3`, so a `q` intensity calibrated for one acquisition's
-cadence would over- or under-smooth badly at another's (real files here
-have ranged from ~20ms to ~118s between frames); `q` is derived from
+cadence would over- or under-smooth badly at another's (frames here
+have ranged from ~20ms to ~118s apart); `q` is derived from
 `typical_dt`, not a fixed absolute constant, so "level 10" means the same
 relative amount of smoothing regardless of how fast frames actually arrive.
 
@@ -298,4 +291,11 @@ struct RoiCoordinates
     name::String
     xs::Vector{Float64}
     ys::Vector{Float64}
+    fit_channel::Int
 end
+
+RoiCoordinates(name, xs, ys) = RoiCoordinates(name, xs, ys, -1)
+
+"""How a ROI's lifetime was fitted in the ROI popup, for the session: "channel 1", "channel 2", "sum" or ""."""
+fit_channel_name(roi::RoiCoordinates) =
+    roi.fit_channel == 1 ? "channel 1" : roi.fit_channel == 2 ? "channel 2" : roi.fit_channel == 0 ? "sum" : ""

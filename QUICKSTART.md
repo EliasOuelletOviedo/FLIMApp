@@ -27,11 +27,11 @@
 - [src/handlers_layout.jl](src/handlers_layout.jl), [handlers_controller.jl](src/handlers_controller.jl), [handlers_protocol.jl](src/handlers_protocol.jl), [handlers_console.jl](src/handlers_console.jl) - One file per panel's own controls
 
 #### Analysis & Processing
-- [src/lifetime_analysis.jl](src/lifetime_analysis.jl) - MLE fitting algorithms, IRF/.sdt loading
-- [src/acquisition.jl](src/acquisition.jl) - Playback/Realtime/Save worker tasks
+- [src/analysis/lifetime_analysis.jl](src/analysis/lifetime_analysis.jl) - MLE fitting algorithms, IRF import (.sdt of a Single), one fit context per channel
+- [src/analysis/acquisition.jl](src/analysis/acquisition.jl) - Realtime/Playback analysis worker (one pass per scan)
+- [src/analysis/session.jl](src/analysis/session.jl) - Sessions: run.toml, Playback, simulated sessions
 - [src/daq.jl](src/daq.jl) - NI-DAQmx outputs: ROI galvo scan, sync lines, PI commands
 - [src/protocol.jl](src/protocol.jl) - Protocol schedule math
-- [src/session_save.jl](src/session_save.jl) - Realtime-capture session saving
 
 #### Background Tasks
 - [src/runtime.jl](src/runtime.jl) - Task lifecycle (consumer_loop, infos_loop, start/pause/stop)
@@ -57,10 +57,10 @@
 ### "How do I modify the data flow?"
 → Check [src/runtime.jl](src/runtime.jl) consumer_loop() and Channel usage
 
-### "How do I modify acquisition behavior for one mode only?"
-→ Check the thin `start_playback`/`start_realtime`/`start_save` wrappers in
-[src/acquisition.jl](src/acquisition.jl); shared binning/fit/PID logic lives
-in `run_acquisition_loop!` in the same file
+### "How do I modify the Realtime analysis?"
+→ Check `start_realtime` in [src/analysis/acquisition.jl](src/analysis/acquisition.jl)
+(one pass per scan, its ROI from the routing code by `pass_roi`); the per-ROI,
+per-channel binning/fit/Kalman/PI logic is `process_frame!` in the same file
 
 ### "Why is something not working?"
 → Check [DEVELOPMENT.md](DEVELOPMENT.md#common-bugs) debugging section
@@ -78,7 +78,7 @@ in `run_acquisition_loop!` in the same file
 
 ### For Hardware Integration
 1. [src/daq.jl](src/daq.jl) - Hardware map, DAQ session, scan and command outputs
-2. [src/lifetime_analysis.jl](src/lifetime_analysis.jl) read_sdt_frame() - File reading
+2. [src/spc/moteur.jl](src/spc/moteur.jl) `_clamp!` - the SPC-150N histograms of the Realtime mode
 
 ## Testing
 

@@ -47,42 +47,14 @@ trying to detect and migrate it.
 """
 state_file_path()::String = joinpath(user_data_dir(), "AppState.jls")
 
-# Cache files remembering the last-selected IRF file / data folder.
+# Cache file remembering the last-selected IRF file.
 irf_filepath_cache()::String = joinpath(user_data_dir(), "irf_filepath.txt")
-folderpath_cache()::String = joinpath(user_data_dir(), "folderpath.txt")
 
-"""
-    default_data_root_path()::String
+# The IRF imported from that file, one column per channel (`write_irf_csv`).
+irf_csv_path()::String = joinpath(user_data_dir(), "irf.csv")
 
-Fallback root directory for `.sdt` data files when no folder has been picked
-in the GUI yet: the `FLIM_DATA_PATH` environment variable when set, otherwise
-`~/FLIMApp_data`.
-"""
-function default_data_root_path()::String
-    return get(ENV, "FLIM_DATA_PATH", joinpath(homedir(), "FLIMApp_data"))
-end
-
-"""
-    get_data_root_path()::String
-
-Return the active data root path from cache when available,
-otherwise fall back to `default_data_root_path()`.
-"""
-function get_data_root_path()::String
-    if isfile(folderpath_cache())
-        cached = try
-            strip(open(f -> read(f, String), folderpath_cache()))
-        catch
-            ""
-        end
-
-        if !isempty(cached)
-            return cached
-        end
-    end
-
-    return default_data_root_path()
-end
+# Cache file remembering the session folder Playback replays.
+session_folder_cache()::String = joinpath(user_data_dir(), "session_folder.txt")
 
 # =============================================================================
 # PHYSICS CONSTANTS
@@ -95,16 +67,6 @@ const TCSPC_LOW_CUT_INDEX = 13             # TCSPC window lower-bound index
 const TCSPC_HIGH_CUT_INDEX = 12            # TCSPC window upper-bound index
 const PROTOCOL_STEP_COUNT = 10             # steps per protocol (times/setpoints length)
 
-"""
-    DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ::Float64
-
-Default target frame rate for Playback-mode acquisition (`start_playback`,
-acquisition.jl) before the user edits the target-frequency textbox
-(GUI.jl/handlers.jl). Only Playback paces itself against a fixed target —
-Realtime waits for new files, Save runs its fixed file list as fast as
-possible — so this has no effect on those two modes.
-"""
-const DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ = 1000.0
 
 # =============================================================================
 # UI THEME DEFINITIONS
@@ -181,9 +143,9 @@ end
 """
     initialize_directories()
 
-Create the required data directories at startup (idempotent).
+Create the per-user state directory at startup (idempotent). The SPC data
+folder is created by FLIMCore when it first writes there.
 """
 function initialize_directories()
     mkpath(user_data_dir())
-    mkpath(get_data_root_path())
 end

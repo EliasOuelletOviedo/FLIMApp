@@ -5,16 +5,30 @@ The journal thread: the only code that writes to disk continuously. It
 empties `Exchange.journal` about once a second (`journal_flush_s`) and
 writes the batch, so no other thread ever waits on a file.
 
-Layout under `journal_root(cfg)`:
+`journal_root(cfg)` holds app.log, the events outside any run. Each run is
+a session folder under the recording folder (`sessions_root`,
+analysis/session.jl; `[enregistrement] dossier` in config/spc.toml):
 
-    app.log                       events outside any run
-    2026-09-28_101500/            one folder per START
-        run.toml                  mode, config, settings at START
+    <recording folder>/sessions/
+      2026-09-28_101500/          one folder per START (`new_run_dir`)
+        run.toml                  mode, versions, ROIs (routing codes, fitted channel)
+                                  and their calibration, SPC and DAQ settings,
+                                  layout/controller/protocol settings at START
+        irf.csv, irf.toml         the IRF of each channel the fit used, and the
+                                  settings it was taken with
         log.txt                   events during the run
-        files.csv                 one line per analyzed .sdt file
+        frames.csv                one line per analyzed pass (one scan of one ROI):
+                                  pass times, setpoint, Kalman, PI outputs (simulated
+                                  in Playback), why a pass was kept out of the PI
         visits.csv                one line per slot played by the DAQ loop
         readback.bin              every readback sample, Float32, sample-major
         readback.txt              what readback.bin holds (signals, rate, layout)
+        spc/                      written by the SPC engine (Realtime): for each
+                                  card, its FIFO stream <serial>.spc,
+                                  <serial>_acquisition.ini and the parameters
+                                  read back from it, <serial>_parametres.ini
+
+A session folder is what Playback replays (`FLIMCore.source_session`).
 
 Entries for a run that isn't open (e.g. a readback slot arriving after the
 run was closed) are counted and discarded, never written to the wrong run.
@@ -28,7 +42,7 @@ mutable struct JournalWriter
     run_dir::Union{Nothing, String}
     app_log::Union{Nothing, IOStream}
     run_log::Union{Nothing, IOStream}
-    files_csv::Union{Nothing, IOStream}
+    frames_csv::Union{Nothing, IOStream}
     visits_csv::Union{Nothing, IOStream}
     readback_bin::Union{Nothing, IOStream}
     readback_samples::Int
@@ -40,7 +54,7 @@ end
 
 JournalWriter(root::AbstractString) = JournalWriter(String(root), nothing, nothing, nothing, nothing, nothing, nothing, 0, String[], NaN, 0, 0)
 
-const FILES_CSV_HEADER = "frame_index,source_file,file_sequence_number,roi_index,timestamp_s,file_time_unix_s,protocol_setpoint_ns,command1,command2,photons_ch1,lifetime_ch1_ns,concentration_ch1,photons_ch2,lifetime_ch2_ns,concentration_ch2"
+const FRAMES_CSV_HEADER = "frame_index,pass,roi_index,pass_start_s,pass_end_s,timestamp_s,complete,excluded_because,acquired_unix_s,protocol_setpoint_ns,command1,command2,photons_ch1,lifetime_ch1_ns,lifetime_kalman_ch1_ns,concentration_ch1,photons_ch2,lifetime_ch2_ns,lifetime_kalman_ch2_ns,concentration_ch2"
 const VISITS_CSV_HEADER = "slot,roi,visit,first_sample,command1_v,command2_v,iteration_ms,margin_ms"
 
 """
@@ -113,26 +127,43 @@ function write_entry!(writer::JournalWriter, entry::JournalEvent)
     return nothing
 end
 
-function write_entry!(writer::JournalWriter, entry::JournalRunStart)
-    close_run!(writer, entry.time)
+"""
+    new_run_dir(root, t)::String
 
-    name = Dates.format(local_datetime(entry.time), dateformat"yyyy-mm-dd_HHMMSS")
-    dir = joinpath(writer.root, name)
+Create the folder of a run started at `t` (unix seconds) under `root`:
+`yyyy-mm-dd_HHMMSS` plus `suffix` (e.g. "_playback"), then `_2`, `_3`… if
+that name is taken. START calls it (the SPC engine records the cards'
+streams under its spc/ before the journal thread opens the run,
+`JournalRunStart`).
+"""
+function new_run_dir(root::AbstractString, t::Float64; suffix::AbstractString = "")::String
+    name = Dates.format(local_datetime(t), dateformat"yyyy-mm-dd_HHMMSS") * suffix
+    dir = joinpath(root, name)
     suffix = 1
     while isdir(dir)
         suffix += 1
-        dir = joinpath(writer.root, "$(name)_$(suffix)")
+        dir = joinpath(root, "$(name)_$(suffix)")
     end
+    mkpath(dir)
+    return dir
+end
+
+function write_entry!(writer::JournalWriter, entry::JournalRunStart)
+    close_run!(writer, entry.time)
+
+    dir = entry.dir
     mkpath(dir)
 
     open(joinpath(dir, "run.toml"), "w") do io
         TOML.print(io, entry.info; sorted=true)
     end
+    isempty(entry.irfs) || write_irf_csv(joinpath(dir, "irf.csv"), entry.irfs)
+    isempty(entry.irf_info) || write_irf_info(joinpath(dir, "irf.toml"), entry.irf_info)
 
     writer.run_dir = dir
     writer.run_log = open(joinpath(dir, "log.txt"), "a")
-    writer.files_csv = open(joinpath(dir, "files.csv"), "w")
-    println(writer.files_csv, FILES_CSV_HEADER)
+    writer.frames_csv = open(joinpath(dir, "frames.csv"), "w")
+    println(writer.frames_csv, FRAMES_CSV_HEADER)
     writer.readback_samples = 0
 
     println(app_log!(writer), timestamp_string(entry.time), " INFO run started: ", dir)
@@ -146,17 +177,18 @@ function write_entry!(writer::JournalWriter, entry::JournalRunEnd)
 end
 
 function write_entry!(writer::JournalWriter, entry::JournalFrame)
-    io = writer.files_csv
+    io = writer.frames_csv
     if io === nothing
         writer.orphans += 1
         return nothing
     end
     s = entry.record.sample
     println(io, csv_line(
-        Int(s.frame_index), s.source_file, s.file_sequence_number, entry.record.roi_index,
-        s.timestamps, s.file_time, s.protocol_setpoint, s.command1, s.command2,
-        s.ch1.photons, s.ch1.lifetime, s.ch1.concentration,
-        s.ch2.photons, s.ch2.lifetime, s.ch2.concentration
+        Int(s.frame_index), s.pass, entry.record.roi_index,
+        s.pass_start_s, s.pass_end_s, s.timestamps, Int(s.complete), s.excluded_because, s.acquired_at,
+        s.protocol_setpoint, s.command1, s.command2,
+        s.ch1.photons, s.ch1.lifetime, s.ch1.lifetime_kalman, s.ch1.concentration,
+        s.ch2.photons, s.ch2.lifetime, s.ch2.lifetime_kalman, s.ch2.concentration
     ))
     return nothing
 end
@@ -223,7 +255,7 @@ function write_entry!(writer::JournalWriter, entry::JournalReadback)
 end
 
 function flush_journal!(writer::JournalWriter)
-    for io in (writer.app_log, writer.run_log, writer.files_csv, writer.visits_csv, writer.readback_bin)
+    for io in (writer.app_log, writer.run_log, writer.frames_csv, writer.visits_csv, writer.readback_bin)
         io === nothing || flush(io)
     end
     return nothing
@@ -236,12 +268,12 @@ function close_run!(writer::JournalWriter, t::Float64)
         writer.orphans > 0 && println(writer.run_log, timestamp_string(t), " WARN ", writer.orphans, " journal entries arrived outside a run and were discarded")
         println(writer.run_log, timestamp_string(t), " INFO run closed; readback samples written: ", writer.readback_samples)
     end
-    for io in (writer.run_log, writer.files_csv, writer.visits_csv, writer.readback_bin)
+    for io in (writer.run_log, writer.frames_csv, writer.visits_csv, writer.readback_bin)
         io === nothing || close(io)
     end
 
     writer.run_log = nothing
-    writer.files_csv = nothing
+    writer.frames_csv = nothing
     writer.visits_csv = nothing
     writer.readback_bin = nothing
     writer.run_dir = nothing

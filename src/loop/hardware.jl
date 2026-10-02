@@ -17,7 +17,7 @@ thread only: nothing else in the app creates, reads or writes a DAQmx task.
 Life cycle, driven by loop/daq_loop.jl:
 
     hw_connect!      INIT: devices present, reset, everything at zero
-    hw_prepare!      create one scan's tasks (not started)
+    hw_prepare!      create one scan's tasks (not started), the pass counter included
     hw_write!        append a slot (or the entry) to the output buffers
     hw_go!           shutter open, watchdog, slaves, then the clock
     hw_read!         blocking read of one readback block (paces the loop)
@@ -80,10 +80,11 @@ mutable struct NIHardware <: Hardware
     clock::DAQmx.TaskHandle
     watchdog::DAQmx.TaskHandle
     shutter::DAQmx.TaskHandle
+    passes::DAQmx.TaskHandle
     n_readback::Int
 end
 
-NIHardware(cfg::BenchConfig) = NIHardware(cfg, C_NULL, C_NULL, C_NULL, C_NULL, C_NULL, C_NULL, C_NULL, length(cfg.readback_signals))
+NIHardware(cfg::BenchConfig) = NIHardware(cfg, C_NULL, C_NULL, C_NULL, C_NULL, C_NULL, C_NULL, C_NULL, C_NULL, length(cfg.readback_signals))
 
 describe_hardware(hw::NIHardware) = "NI-DAQmx: " * join(bench_devices(hw.cfg), " + ")
 
@@ -105,7 +106,15 @@ function configure_output!(th, cfg::BenchConfig, buffer_samples::Integer)
     return nothing
 end
 
-function hw_prepare!(hw::NIHardware, buffer_samples::Integer)
+"""
+    hw_prepare!(hw, buffer_samples; pass_ticks=nothing)
+
+Create one scan's tasks. `pass_ticks = (entry, scan, shift)` (samples) also
+creates the pass signal on `cfg.pass_counter`: counted on the shared sample
+clock, low during the entry, then high for each scan and low for each
+pause — wired to the SPC-150N's markers M0 and M3.
+"""
+function hw_prepare!(hw::NIHardware, buffer_samples::Integer; pass_ticks = nothing)
     cfg = hw.cfg
     try
         hw.galvos = DAQmx.create_task("flimapp_galvos")
@@ -134,6 +143,15 @@ function hw_prepare!(hw::NIHardware, buffer_samples::Integer)
         hw.clock = DAQmx.create_task("flimapp_clock")
         DAQmx.add_co_pulse_freq(hw.clock, cfg.counter, cfg.sample_rate_hz; duty = 0.5)
         DAQmx.cfg_implicit_timing(hw.clock, DAQmx.Val_ContSamps, 1000)
+
+        if pass_ticks !== nothing && !isempty(cfg.pass_counter)
+            entry, scan, shift = pass_ticks
+            hw.passes = DAQmx.create_task("flimapp_passes")
+            DAQmx.add_co_pulse_ticks(hw.passes, cfg.pass_counter, cfg.clock_source;
+                                     initial_delay = max(entry, 2), high_ticks = scan, low_ticks = shift)
+            isempty(cfg.pass_terminal) || DAQmx.set_co_pulse_term(hw.passes, cfg.pass_terminal)
+            DAQmx.cfg_implicit_timing(hw.passes, DAQmx.Val_ContSamps, 1000)
+        end
 
         if !isempty(cfg.shutter_line)
             hw.shutter = DAQmx.create_task("flimapp_shutter")
@@ -169,6 +187,7 @@ function hw_go!(hw::NIHardware)
     DAQmx.start_task(hw.lines)
     DAQmx.start_task(hw.commands)
     DAQmx.start_task(hw.readback)
+    hw.passes == C_NULL || DAQmx.start_task(hw.passes)
     DAQmx.start_task(hw.clock)        # the clock starts them all
     return nothing
 end
@@ -194,7 +213,7 @@ end
 
 function clear_scan_tasks!(hw::NIHardware)
     # Clock first: every slaved output freezes on the same sample.
-    for field in (:clock, :readback, :commands, :lines, :galvos, :watchdog, :shutter)
+    for field in (:clock, :passes, :readback, :commands, :lines, :galvos, :watchdog, :shutter)
         clear_task_field!(hw, field)
     end
     return nothing
@@ -300,7 +319,7 @@ simulated_error(code::Integer, message::AbstractString) = DAQmx.DAQmxError(Int32
 
 hw_connect!(hw::SimulatedHardware) = (hw.connected = true; hw_zero!(hw); nothing)
 
-function hw_prepare!(hw::SimulatedHardware, buffer_samples::Integer)
+function hw_prepare!(hw::SimulatedHardware, buffer_samples::Integer; pass_ticks = nothing)
     hw.capacity = Int(buffer_samples)
     hw.galvos = zeros(2, hw.capacity)
     hw.lines = zeros(UInt8, hw.capacity)

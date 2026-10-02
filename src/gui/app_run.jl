@@ -205,6 +205,34 @@ function reset_diagnostics!(d::DisplayState)
 end
 
 # =============================================================================
+# PLAYBACK
+# =============================================================================
+
+"""
+    PlaybackRun
+
+A Playback run's replay: its own SPC engine (`FLIMCore.source_session`,
+never the cards' engine), the session it replays (`read_session`,
+analysis/session.jl), the engine's end (`Fin` of its Realtime pass
+cutting), and `source_done`, raised then, which lets the analysis worker
+end once it has taken every pass. `session_settings`: the worker uses the
+session's layout, gains and protocol, and the GUI's edits don't reach it.
+`dir` is the session folder picked with the folder button (kept in
+`session_folder_cache()`).
+"""
+mutable struct PlaybackRun
+    dir::String
+    engine::Union{Nothing, FLIMCore.Moteur}
+    session::Union{Nothing, Session}
+    fin::Union{Nothing, FLIMCore.Fin}
+    stop_sent::Bool
+    source_done::Threads.Atomic{Bool}
+    session_settings::Bool
+end
+
+PlaybackRun(dir::AbstractString = "") = PlaybackRun(String(dir), nothing, nothing, nothing, false, Threads.Atomic{Bool}(false), true)
+
+# =============================================================================
 # APP RUN
 # =============================================================================
 
@@ -216,24 +244,23 @@ Runtime state of the GUI thread. NOT serialized.
 # Fields
 - `config::BenchConfig`, `exchange::Exchange`: the bench config and the
   exchanges shared with the other threads
-- `running`/`paused::Threads.Atomic{Bool}`, `target_frequency::Threads.Atomic{Float64}`:
-  GUI -> analysis worker flags, atomics read by the worker every file
+- `running`/`paused::Threads.Atomic{Bool}`: GUI -> analysis worker flags,
+  atomics read by the worker every histogram
 - `worker_task`, `loop_task`, `journal_task`, `refresh_task`: the analysis
   worker (one per START), the DAQ loop and journal threads (whole session),
   and the 30 Hz refresh tick
-- `worker_output`: what the last finished worker returned (`AnalysisOutput`),
-  kept for the end-of-run save
+- `worker_output`: what the last finished worker returned (`AnalysisOutput`)
 - `run_open::Bool`: a START's run is still being finalized (journal run
-  open, worker or scan still winding down)
-- `run_mode::String`: acquisition mode of the current/last run
+  open, worker, scan or SPC measurement still winding down)
+- `run_started_ns::UInt64`: when the current run's commands were sent
+- `irf_reload_pending::Bool`: an IRF was picked during a run; START loads it
 - `ch1`/`ch2::ChannelSeries`: latest-frame snapshot (Histogram plot only)
 - `ch1_rois`/`ch2_rois::Vector{RoiChannelSeries}`: per-channel, per-ROI
   histories, one entry per drawn ROI in ROI mode (a single entry otherwise)
 - `timestamps`, `protocol_setpoint`, `command1`, `command2::Vector{Float64}`:
-  global per-frame histories — command1/command2 are NOT split per ROI: they
-  drive real hardware output, not just the Command plot
+  global per-frame histories — each frame's commands are its ROI's (one PI
+  per ROI): with several ROIs the Command plot interleaves them
 - `i::Int`: latest frame index
-- `save_progress::Observable{Float64}`: Save-mode progress bar (percent, `NaN` when idle)
 - `hist_time::Observable{Vector{Int64}}`: histogram time axis
 - `protocol::Observable{ProtocolSettings}`: normalized protocol (protocol popup preview)
 - `rois::Observable{Vector{RoiCoordinates}}`: currently-drawn ROIs (roi_popup.jl)
@@ -244,20 +271,27 @@ Runtime state of the GUI thread. NOT serialized.
 - `display::DisplayState`: refresh-tick bookkeeping and diagnostics
 - `spc::SpcView`: the SPC-150N engine handle, its settings (config/spc.toml)
   and what the SPC window shows (gui/spc_view.jl)
+- `offline::String`: why this computer can't acquire (`offline_reason`,
+  app.jl), "" when it can: the Realtime mode is then refused and Playback
+  stays available
+- `playback::PlaybackRun`: the Playback mode's session and replay engine
+- `run_mode::String`: the mode of the current (or last) run, "Realtime" or "Playback"
+- `run_rois::Vector{RoiCoordinates}`: the ROIs of the current (or last) run —
+  the drawn ones in Realtime, the session's in Playback (index k = drawn ROI k)
 """
 mutable struct AppRun
     config::BenchConfig
     exchange::Exchange
     running::Threads.Atomic{Bool}
     paused::Threads.Atomic{Bool}
-    target_frequency::Threads.Atomic{Float64}
     worker_task::Union{Task, Nothing}
     loop_task::Union{Task, Nothing}
     journal_task::Union{Task, Nothing}
     refresh_task::Union{Task, Nothing}
     worker_output::Any
     run_open::Bool
-    run_mode::String
+    run_started_ns::UInt64
+    irf_reload_pending::Bool
     ch1::ChannelSeries
     ch2::ChannelSeries
     ch1_rois::Vector{RoiChannelSeries}
@@ -267,7 +301,6 @@ mutable struct AppRun
     command1::Vector{Float64}
     command2::Vector{Float64}
     i::Int
-    save_progress::Observable{Float64}
     hist_time::Observable{Vector{Int64}}
     protocol::Observable{ProtocolSettings}
     rois::Observable{Vector{RoiCoordinates}}
@@ -275,6 +308,10 @@ mutable struct AppRun
     imported_image_size::Tuple{Int,Int}
     display::DisplayState
     spc::SpcView
+    offline::String
+    playback::PlaybackRun
+    run_mode::String
+    run_rois::Vector{RoiCoordinates}
 end
 
 function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); source = "defaults"),
@@ -283,19 +320,21 @@ function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); s
         cfg, exchange,
         Threads.Atomic{Bool}(false),
         Threads.Atomic{Bool}(false),
-        Threads.Atomic{Float64}(DEFAULT_PLAYBACK_TARGET_FREQUENCY_HZ),
         nothing, nothing, nothing, nothing, nothing,
-        false, "Playback",
+        false, UInt64(0), false,
         ChannelSeries(), ChannelSeries(),
         [RoiChannelSeries()], [RoiChannelSeries()],
         Float64[], Float64[], Float64[], Float64[], 0,
-        Observable(NaN),
         Observable(collect(1:DEFAULT_HISTOGRAM_RESOLUTION)),
         Observable(ProtocolSettings()),
         Observable(RoiCoordinates[]),
         Int[],
         (1024, 1024),
         DisplayState(),
-        SpcView(spc_settings_path(cfg), exchange.journal)
+        SpcView(spc_settings_path(cfg), exchange.journal),
+        "",
+        PlaybackRun(),
+        "Realtime",
+        RoiCoordinates[]
     )
 end

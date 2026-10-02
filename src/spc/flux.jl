@@ -75,7 +75,8 @@ réglages DCC déclarés : la trace de l'acquisition.
 """
 function ecrire_acquisition_ini(chemin, m, tic_s, fenetre_ns, duree_s, deborde;
                                 geometrie::Union{Nothing,Geometrie} = nothing,
-                                dcc::AbstractDict = Dict{String,Any}())
+                                dcc::AbstractDict = Dict{String,Any}(),
+                                clamp::AbstractDict = Dict{String,Any}())
     open(chemin, "w") do io
         println(io, "; écrit par FLIMCore, relu par retraiter")
         println(io, "[acquisition]")
@@ -92,6 +93,13 @@ function ecrire_acquisition_ini(chemin, m, tic_s, fenetre_ns, duree_s, deborde;
                 println(io, f, " = ", v isa Bool ? Int(v) : v)
             end
         end
+        if !isempty(clamp)
+            println(io)
+            println(io, "[clamp]")
+            for k in sort!(collect(keys(clamp)))
+                println(io, k, " = ", clamp[k])
+            end
+        end
         if !isempty(dcc)
             println(io)
             println(io, "[dcc]")
@@ -102,6 +110,29 @@ function ecrire_acquisition_ini(chemin, m, tic_s, fenetre_ns, duree_s, deborde;
         end
     end
     return chemin
+end
+
+"""
+    lire_ini_textes(chemin; section) -> Dict{String,String}
+
+Les valeurs d'une section telles qu'écrites (`lire_ini` ne garde que les
+nombres) : le n° de série d'une carte, par exemple.
+"""
+function lire_ini_textes(chemin::AbstractString; section::AbstractString)
+    d = Dict{String,String}()
+    dedans = false
+    for ligne in eachline(chemin)
+        t = strip(first(split(ligne, ';'; limit = 2)))
+        isempty(t) && continue
+        if startswith(t, "[")
+            dedans = lowercase(strip(t, ['[', ']', ' '])) == lowercase(section)
+            continue
+        end
+        dedans || continue
+        m = match(r"^([A-Za-z_0-9]+)\s*=\s*(.*)$", t)
+        m === nothing || (d[lowercase(m.captures[1])] = String(strip(m.captures[2])))
+    end
+    return d
 end
 
 """Préfixe d'une acquisition (sans extension) à partir d'un nom ou d'un chemin .spc."""
