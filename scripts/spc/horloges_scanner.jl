@@ -15,9 +15,13 @@
 #
 #     julia -t 4 scripts/spc/horloges_scanner.jl chemin/vers/module0.spc
 #
-# Mesure en imagerie, géométrie automatique (toute la ligne, toutes les
-# lignes de chaque trame) : le flux brut de chaque carte est gardé, quelle
-# que soit la géométrie. Réglages : config/spc.toml ([imagerie] modules,
+# Mesure en imagerie, sur la trame complète (toute la ligne, toutes les
+# lignes de chaque trame, retours du balayage compris) : le flux brut de
+# chaque carte est gardé, et son image complète (*_intensite.bmp) montre où
+# tombent les lignes et les pixels de retour. Avec un échantillon sous le
+# microscope, le profil des photons par ligne et par pixel de la trame dit
+# où commence l'image utile : de quoi vérifier les lignes ignorées en haut
+# de [imagerie] reglages_scanner et decalage_pixels. Réglages : config/spc.toml ([imagerie] modules,
 # temps_pixel_ns, fronts des horloges) ; SPC_REGLAGES=<fichier> pour un autre
 # (une copie avec [source] type = "simulation" pour l'essayer sans les cartes).
 #
@@ -39,7 +43,8 @@ hz(f) = isfinite(f) ? @sprintf("%.4f", f) : "?"
 """Le compte rendu d'une carte : lignes de texte, et la ligne du tableau CSV."""
 function compte_rendu(h, etiquette, module_no, serie, fichier, r::Reglages)
     l, t, n = h.ligne, h.trame, h.lignes_par_trame
-    lignes_image = n.mediane - r.decalage_lignes
+    reglage = reglage_scanner(geometrie(r), n.mediane)
+    lignes_image = reglage === nothing ? n.mediane - r.decalage_lignes : reglage[2]
     pixels_image = h.pixels_par_periode_ligne - r.decalage_pixels
     texte = String[
         "réglage du scanner : $etiquette",
@@ -58,7 +63,11 @@ function compte_rendu(h, etiquette, module_no, serie, fichier, r::Reglages)
         "avec les réglages actuels (config/spc.toml) :",
         "  pixels de $(reglages.temps_pixel_ns) ns par période de ligne : $(h.pixels_par_periode_ligne)" *
             " − decalage_pixels $(r.decalage_pixels) = $pixels_image (pixels_par_ligne = $(r.pixels_par_ligne))",
-        "  lignes de l'image si lignes_par_image = 0 : $(n.mediane) − decalage_lignes $(r.decalage_lignes) = $lignes_image",
+        reglage === nothing ?
+            "  ⚠ $(n.mediane) lignes par trame : absent de [imagerie] reglages_scanner ; avec lignes_par_image = 0, " *
+            "image de $(n.mediane) − decalage_lignes $(r.decalage_lignes) = $lignes_image lignes. Ajoute [$(n.mediane), lignes de l'image, lignes ignorées en haut]." :
+            "  réglage reconnu dans reglages_scanner : $(reglage[2]) lignes d'image, $(reglage[3]) ignorées en haut, " *
+            "$(n.mediane - reglage[2] - reglage[3]) en bas (retour)",
         "  fronts M0/M3 (signal de passe, normalement absent en imagerie) : $(h.fronts_m0) / $(h.fronts_m3)",
     ]
     l.fronts < 2 && push!(texte, "  ⚠ pas d'horloge de ligne sur M1 : scanner arrêté, câble, ou front (ligne_front_montant) ?")
@@ -77,6 +86,29 @@ const ENTETE_CSV = "date,reglage_scanner,module,serie,duree_s,photons,fronts_M1,
                    "periode_trame_min_ms,periode_trame_max_ms,lignes_par_trame_min,lignes_par_trame_mediane," *
                    "lignes_par_trame_max,pixels_par_periode_ligne,temps_pixel_ns,decalage_lignes,lignes_image_auto," *
                    "fronts_M0,fronts_M3,flux"
+
+"""
+Le profil des photons dans la trame complète (`profil_trame`), en texte :
+par tranches de lignes et de pixels, en % de la tranche la plus chargée, et
+les lignes et pixels au-dessus de la moitié de la médiane.
+"""
+function profil_texte(mots, tic, r::Reglages)
+    par_ligne, par_colonne = profil_trame(mots, tic; temps_pixel_ns = r.temps_pixel_ns)
+    sum(par_ligne) == 0 && return ["profil : aucun photon (normal sans laser ; avec un échantillon, il montre les lignes et pixels utiles)"]
+    texte = String["profil des photons dans la trame complète ($(sum(par_ligne)) photons) :"]
+    for (nom, v, unite) in (("lignes", par_ligne, "ligne"), ("pixels", par_colonne, "pixel"))
+        tranches = min(36, length(v))
+        bornes = round.(Int, range(0, length(v); length = tranches + 1))
+        sommes = [sum(v[bornes[k] + 1:bornes[k + 1]]) / max(1, bornes[k + 1] - bornes[k]) for k in 1:tranches]
+        haut = maximum(sommes)
+        push!(texte, "  $nom par tranches de ~$(round(Int, length(v) / tranches)) (% du maximum) :")
+        push!(texte, "    " * join([@sprintf("%d-%d:%.0f", bornes[k], bornes[k + 1] - 1, 100 * sommes[k] / max(haut, 1)) for k in 1:tranches], " "))
+        seuil = 0.5 * FLIMCore.mediane_img(v)
+        actives = findall(>(seuil), v)
+        isempty(actives) || push!(texte, "  $nom au-dessus de la moitié de la médiane : $(unite) $(first(actives) - 1) à $(last(actives) - 1) (sur $(length(v)))")
+    end
+    return texte
+end
 
 """Le tic et le n° de série d'un flux enregistré (son _acquisition.ini)."""
 function infos_flux(fichier)
@@ -101,6 +133,10 @@ function analyser(fichiers, etiquette, dossier)
                 _, mots = lire_spc(fichier)
                 h = mesurer_horloges(mots, tic; temps_pixel_ns = reglages.temps_pixel_ns)
                 texte, ligne = compte_rendu(h, etiquette, module_no, serie, fichier, reglages)
+                push!(texte, "")
+                append!(texte, profil_texte(mots, tic, reglages))
+                image = replace(fichier, r"\.spc$" => "_intensite.bmp")
+                isfile(image) && push!(texte, "image complète, retours compris (lignes × pixels de la trame) : $image")
                 foreach(println, texte); println()
                 foreach(l -> println(io, l), texte); println(io)
                 println(io_csv, ligne)
@@ -121,9 +157,11 @@ else
     # La copie en mémoire : le moteur ne relit pas le fichier, le flux brut est gardé.
     reglages.fichier = ""
     reglages.flux_brut = true
+    # La trame complète : sans marges ni table des réglages du scanner.
     g = Geometrie(temps_pixel_ns = reglages.temps_pixel_ns, pixels_par_ligne = 0, decalage_pixels = 0,
                   lignes_par_image = 0, decalage_lignes = 0,
-                  ligne_front_montant = reglages.ligne_front_montant, trame_front_montant = reglages.trame_front_montant)
+                  ligne_front_montant = reglages.ligne_front_montant, trame_front_montant = reglages.trame_front_montant,
+                  reglages_scanner = NTuple{3,Int}[])
     m = demarrer_moteur(reglages)
     try
         afficher_etat(verifier(m))

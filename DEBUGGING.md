@@ -83,6 +83,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 | Code | Problem | What to check |
 |---|---|---|
 | IMG-01 | Imaging: no line or frame clock, no image | Scanner running? Its line clock on M1 and frame clock on M2 of the cards; ligne_/trame_front_montant in [imagerie]. |
+| IMG-02 | Scanner setting not in the table: image lines guessed | Measure this setting with scripts/spc/horloges_scanner.jl and add [lines per frame, image lines, top lines] to reglages_scanner in config/spc.toml ([imagerie]). |
 
 ### Pass signal (counter → markers M0/M3)
 

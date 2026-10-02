@@ -6,24 +6,48 @@
 # reprend ses clés, celles du manuel de la DLL SPCM.
 
 """
-    Geometrie(; temps_pixel_ns=50.0, pixels_par_ligne=0, decalage_pixels=0,
-              lignes_par_image=0, decalage_lignes=0,
-              ligne_front_montant=true, trame_front_montant=true)
+Les réglages du scanner du banc, reconnus à leur nombre de lignes par trame
+(fronts M1 entre deux M2 ; la ligne dure 55,55 µs dans tous) :
+`(lignes par trame, lignes de l'image, lignes ignorées en haut)`. Mesurés
+le 2026-10-02 avec scripts/spc/horloges_scanner.jl pour les réglages 1024,
+512, 256, 128, 60, 24 et 8 lignes (trames à 16,67, 33,33, 66,67, 125, 250,
+500 et 900 Hz). Les lignes ignorées en haut : 32 pour 1024 (scan_borders de
+SPCM) ; les autres, proportionnelles aux lignes en trop, sont à vérifier sur
+une image complète (horloges_scanner.jl, avec un échantillon).
+"""
+const REGLAGES_SCANNER = NTuple{3,Int}[(1080, 1024, 32), (540, 512, 16), (270, 256, 8), (144, 128, 9),
+                                       (72, 60, 7), (36, 24, 7), (20, 8, 7)]
+
+"""
+    Geometrie(; temps_pixel_ns=50.0, pixels_par_ligne=1024, decalage_pixels=21,
+              lignes_par_image=0, decalage_lignes=32,
+              ligne_front_montant=true, trame_front_montant=true,
+              reglages_scanner=REGLAGES_SCANNER)
 
 Rangement des photons en image, comme imagerie_photons.jl : horloge de
 pixel interne (`temps_pixel_ns`), horloge de ligne sur M1, de trame sur M2.
-`pixels_par_ligne = 0` : toute la période de ligne ; `lignes_par_image = 0` :
-le nombre de lignes mesuré entre deux trames. Les décalages ignorent les
-premiers pixels de chaque ligne et les premières lignes de chaque trame.
+`pixels_par_ligne = 0` : toute la période de ligne. `lignes_par_image = 0` :
+selon l'horloge de trame — le réglage du scanner de `reglages_scanner` qui a
+autant de lignes par trame que mesuré donne les lignes de l'image et celles
+ignorées en haut ; un nombre de lignes absent de la table donne les lignes
+mesurées moins `decalage_lignes`. Les décalages ignorent les premiers
+pixels de chaque ligne et les premières lignes de chaque trame.
 """
 Base.@kwdef struct Geometrie
     temps_pixel_ns::Float64 = 50.0
     pixels_par_ligne::Int = 1024
     decalage_pixels::Int = 21
-    lignes_par_image::Int = 512
+    lignes_par_image::Int = 0
     decalage_lignes::Int = 32
     ligne_front_montant::Bool = true
     trame_front_montant::Bool = true
+    reglages_scanner::Vector{NTuple{3,Int}} = copy(REGLAGES_SCANNER)
+end
+
+"""Le réglage du scanner de `g` qui a `lignes_trame` lignes par trame, ou `nothing`."""
+function reglage_scanner(g::Geometrie, lignes_trame::Integer)
+    k = findfirst(e -> e[1] == lignes_trame, g.reglages_scanner)
+    return k === nothing ? nothing : g.reglages_scanner[k]
 end
 
 """Réglages du détecteur et du TAC par défaut (reglages_spc.jl, plus rate_count_time)."""
@@ -91,10 +115,11 @@ Base.@kwdef mutable struct Reglages
     temps_pixel_ns::Float64 = 50.0
     pixels_par_ligne::Int = 1024
     decalage_pixels::Int = 21
-    lignes_par_image::Int = 512
+    lignes_par_image::Int = 0
     decalage_lignes::Int = 32
     ligne_front_montant::Bool = true
     trame_front_montant::Bool = true
+    reglages_scanner::Vector{NTuple{3,Int}} = copy(REGLAGES_SCANNER)
     # [affichage]
     binning_temps::Int = 4
     photons_min::Int = 20
@@ -132,10 +157,11 @@ const CLES_REGLAGES = [
     ("imagerie", "temps_pixel_ns", :temps_pixel_ns, "pixel_time de SPCM : horloge de pixel interne"),
     ("imagerie", "pixels_par_ligne", :pixels_par_ligne, "scan_size_x de SPCM : 1024"),
     ("imagerie", "decalage_pixels", :decalage_pixels, "scan_borders (gauche) de SPCM : pixels ignorés après chaque début de ligne (retour du balayage)"),
-    ("imagerie", "lignes_par_image", :lignes_par_image, "scan_size_y de SPCM ; 0 : les lignes comptées entre deux marqueurs de trame (M2), moins decalage_lignes (scripts/spc/horloges_scanner.jl les mesure)"),
-    ("imagerie", "decalage_lignes", :decalage_lignes, "scan_borders (haut) de SPCM : lignes ignorées après chaque début de trame"),
+    ("imagerie", "lignes_par_image", :lignes_par_image, "scan_size_y de SPCM ; 0 : selon l'horloge de trame (réglage du scanner reconnu dans reglages_scanner)"),
+    ("imagerie", "decalage_lignes", :decalage_lignes, "scan_borders (haut) de SPCM : lignes ignorées après chaque début de trame (lignes_par_image > 0, ou réglage absent de reglages_scanner)"),
     ("imagerie", "ligne_front_montant", :ligne_front_montant, "front actif de l'horloge de ligne (M1)"),
     ("imagerie", "trame_front_montant", :trame_front_montant, "front actif de l'horloge de trame (M2)"),
+    ("imagerie", "reglages_scanner", :reglages_scanner, "réglages du scanner : [lignes par trame, lignes de l'image, lignes ignorées en haut], pour lignes_par_image = 0 (mesurés avec scripts/spc/horloges_scanner.jl ; lignes du haut à vérifier sauf pour 1024)"),
     ("affichage", "binning_temps", :binning_temps, "pixels regroupés (n × n) pour le temps moyen"),
     ("affichage", "photons_min", :photons_min, "sous ce nombre de photons, pas de temps moyen"),
     ("affichage", "trames_par_image", :trames_par_image, "trames additionnées par image affichée ; 0 : tout depuis le début"),
@@ -166,7 +192,7 @@ const EN_TETE_REGLAGES = """
 """Géométrie d'image des réglages (section [imagerie])."""
 geometrie(r::Reglages) = Geometrie(r.temps_pixel_ns, r.pixels_par_ligne, r.decalage_pixels,
                                    r.lignes_par_image, r.decalage_lignes,
-                                   r.ligne_front_montant, r.trame_front_montant)
+                                   r.ligne_front_montant, r.trame_front_montant, copy(r.reglages_scanner))
 
 """Remplace les champs de géométrie de `r` par ceux de `g`."""
 function geometrie!(r::Reglages, g::Geometrie)
@@ -180,6 +206,7 @@ end
 dossier_spc(r::Reglages) = isempty(r.dossier) ? joinpath(homedir(), "FLIMApp_spc") : expanduser(r.dossier)
 
 _valeur_champ(::Type{T}, v) where {T} = convert(T, v)
+_valeur_champ(::Type{Vector{NTuple{3,Int}}}, v) = NTuple{3,Int}[(Int(x[1]), Int(x[2]), Int(x[3])) for x in v if length(x) == 3 || error("3 nombres")]
 _valeur_champ(::Type{Vector{String}}, v::AbstractVector) = String[String(x) for x in v]
 _valeur_champ(::Type{Vector{Int}}, v::AbstractVector) = Int[Int(x) for x in v]
 _valeur_champ(::Type{Float64}, v::Real) = Float64(v)
@@ -245,6 +272,12 @@ function valider_reglages(r::Reglages)
     r.pixels_par_ligne == 1024 || error("réglages SPC : [imagerie] pixels_par_ligne (scan_size_x) : 1024")
     r.lignes_par_image >= 0 ||
         error("réglages SPC : [imagerie] lignes_par_image (scan_size_y) : un nombre de lignes, ou 0 pour celui de l'horloge de trame")
+    for (trame, image, haut) in r.reglages_scanner
+        (image > 0 && haut >= 0 && image + haut <= trame) ||
+            error("réglages SPC : [imagerie] reglages_scanner : [$trame, $image, $haut] — lignes par trame, lignes de l'image, lignes ignorées en haut (image + haut ≤ trame)")
+    end
+    allunique(first.(r.reglages_scanner)) ||
+        error("réglages SPC : [imagerie] reglages_scanner : deux réglages ont le même nombre de lignes par trame")
     r.binning_temps >= 1 || error("réglages SPC : [affichage] binning_temps d'au moins 1")
     r.photons_min >= 0 || error("réglages SPC : [affichage] photons_min positif ou nul")
     r.trames_par_image >= 0 || error("réglages SPC : [affichage] trames_par_image positif ou nul")
@@ -261,6 +294,7 @@ _toml_valeur(v::Integer) = string(Int(v))
 _toml_valeur(v::AbstractFloat) = isinteger(v) && abs(v) < 1e15 ? @sprintf("%.1f", v) : repr(Float64(v))
 _toml_valeur(v::AbstractString) = "\"" * replace(v, "\\" => "\\\\", "\"" => "\\\"") * "\""
 _toml_valeur(v::AbstractVector) = "[" * join((_toml_valeur(x) for x in v), ", ") * "]"
+_toml_valeur(v::Tuple) = _toml_valeur(collect(v))
 _toml_valeur(v) = _toml_valeur(string(v))
 
 function _ligne_toml(io, cle, valeur, commentaire)

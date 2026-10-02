@@ -1413,7 +1413,9 @@ include("test_flimcore.jl")
 
     FLIMApp.spc_toggle_imaging!(view)
     @test await(() -> FLIMApp.spc_state(view) == :imagerie)
-    @test await(() -> all(c -> size(c.intensity[]) == (1024, 512), values(view.cards)))   # x = pixel, y = line
+    # x = pixel, y = line. lignes_par_image = 0: the simulated scanner's 576 lines per frame aren't
+    # one of the bench's settings (reglages_scanner), so 576 − decalage_lignes (32) lines.
+    @test await(() -> all(c -> size(c.intensity[]) == (1024, 544), values(view.cards)))
     card = view.cards[0]
     @test await(() -> count(isfinite, card.mean_time[]) > 100)      # running sum: enough photons per block
     @test card.intensity_range[][2] >= 1 && 0 < card.time_range[][1] < card.time_range[][2] < 12.5
@@ -1444,7 +1446,7 @@ include("test_flimcore.jl")
     # [verification] series, the sum both.
     @test only(FLIMApp.roi_image_parts(parts, "Channel 1")).canal == 1 && only(FLIMApp.roi_image_parts(parts, "Channel 2")).canal == 2
     image = FLIMApp.RoiImage(FLIMApp.roi_image_parts(parts, "Channel 1"), 1)
-    @test image.frames >= FLIMApp.ROI_IMAGE_FRAMES && size(image.intensity) == (1024, 512) && !isempty(image.streams[1].mots)
+    @test image.frames >= FLIMApp.ROI_IMAGE_FRAMES && size(image.intensity) == (1024, 544) && !isempty(image.streams[1].mots)
     disk = [(x, y) for x in 480:540 for y in 230:280]                 # inside the simulated disk
     h = only(FLIMApp.roi_histograms(image, [disk]))
     @test length(h) == 256 && sum(h) == sum(image.intensity[x, y] for (x, y) in disk) > 0

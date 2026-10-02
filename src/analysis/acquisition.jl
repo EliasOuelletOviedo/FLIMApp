@@ -319,6 +319,33 @@ end
 # =============================================================================
 
 """
+    warm_up_channels!(initial_guess, layout)
+
+Run the exact path of a pass's fit once per channel — `process_frame!`
+inside `with_fit_context` of that channel's IRF, with a throwaway state, on
+a synthetic decay — before the first pass: its compilation would otherwise
+eat the first fit's time budget (`fit_optim_options`, 60 ms) and that pass
+would come back at the initial guess. Passes wait in the engine's channel
+meanwhile.
+"""
+function warm_up_channels!(initial_guess::Vector{Float64}, layout::LayoutSettings)
+    decay = [max(0.0, 1000.0 * exp(-i * 0.02) + 5.0) for i in 0:(DEFAULT_HISTOGRAM_RESOLUTION - 1)]
+    for c in 1:2
+        ctx = channel_fit_context(c)
+        ctx.irf === nothing && continue
+        try
+            with_fit_context(ctx) do
+                process_frame!(ChannelFitState(initial_guess), decay, length(decay), layout, ctx,
+                               false, 10, 4.0, 1.0, 0.0, 0.0, false, false)
+            end
+        catch e
+            @warn "Fit warm-up failed for channel $c; the first pass may come back at the initial guess" exception = (e, catch_backtrace())
+        end
+    end
+    return nothing
+end
+
+"""
     start_realtime(out, running, histograms; initial_guess, paused, source_done, poll_s=0.002)
 
 Worker task for the Realtime and Playback modes: until `running` drops,
@@ -354,6 +381,7 @@ function start_realtime(
         end
 
         ensure_fit_warm!()
+        warm_up_channels!(initial_guess, current_settings(out.exchange).layout)
 
         # PID setpoint fallback used when no protocol is active.
         fallback_setpoint_ns = 4.0

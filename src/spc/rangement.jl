@@ -27,6 +27,11 @@ Taille de l'image et horloges mesurées à partir des temps des marqueurs
 (en tics) : période de ligne (médiane), lignes par trame (médiane des
 lignes entre deux trames), pixels dans une période de ligne. Mêmes calculs
 et mêmes erreurs que la première passe d'imagerie_photons.jl.
+
+Avec `lignes_par_image = 0`, le réglage du scanner qui a ce nombre de
+lignes par trame (`reglage_scanner`, `nothing` s'il n'y en a pas) donne les
+lignes de l'image et celles ignorées en haut : `decalage_lignes` du
+résultat est celui qui s'applique au rangement.
 """
 function geometrie_resolue(lignes::AbstractVector{Int64}, trames::AbstractVector{Int64}, tic_s, g::Geometrie)
     nl, nt = length(lignes), length(trames)
@@ -43,11 +48,14 @@ function geometrie_resolue(lignes::AbstractVector{Int64}, trames::AbstractVector
     (tic_01 > 0 && pix_01 > 0) || error("tic ($tic_s s) ou temps de pixel ($(g.temps_pixel_ns) ns) nul")
     pixels_ligne = fld(round(Int, periode) * tic_01, pix_01)   # pixels dans une période de ligne
     nx = g.pixels_par_ligne > 0 ? g.pixels_par_ligne : pixels_ligne - g.decalage_pixels
-    ny = g.lignes_par_image > 0 ? g.lignes_par_image : lignes_trame - g.decalage_lignes
-    (nx > 0 && ny > 0) || error("image vide ($nx × $ny) : vérifie decalage_pixels et decalage_lignes")
+    reglage = g.lignes_par_image > 0 ? nothing : reglage_scanner(g, lignes_trame)
+    decalage_lignes = reglage === nothing ? g.decalage_lignes : reglage[3]
+    ny = g.lignes_par_image > 0 ? g.lignes_par_image : reglage === nothing ? lignes_trame - g.decalage_lignes : reglage[2]
+    (nx > 0 && ny > 0) || error("image vide ($nx × $ny, $lignes_trame lignes par trame) : vérifie decalage_pixels et decalage_lignes")
     nx * ny <= 1 << 26 || error("image de $nx × $ny pixels : trop grande, vérifie les réglages")
     return (nx = nx, ny = ny, periode = periode, lignes_trame = lignes_trame,
-            pixels_ligne = pixels_ligne, tic_01 = tic_01, pix_01 = pix_01)
+            pixels_ligne = pixels_ligne, tic_01 = tic_01, pix_01 = pix_01,
+            decalage_lignes = decalage_lignes, reglage = reglage)
 end
 
 """
@@ -92,6 +100,41 @@ function mesurer_horloges(mots::AbstractVector{UInt16}, tic_s::Real; temps_pixel
             fronts_m0 = length(m0), fronts_m3 = length(m3), photons = d.photons, pertes = d.pertes, duree_s = duree)
 end
 
+"""
+    profil_trame(mots, tic_s; temps_pixel_ns=50.0) -> (lignes, colonnes)
+
+Où tombent les photons dans la trame complète, retours du balayage
+compris : `lignes[k]` photons sur la ligne k − 1 de la trame (comptée depuis
+le marqueur M2), `colonnes[x]` sur le pixel x − 1 de la ligne (depuis le
+marqueur M1, pixels de `temps_pixel_ns`), sur toutes les trames complètes. Avec
+un échantillon, de quoi voir où commencent et finissent les lignes et les
+pixels utiles (scripts/spc/horloges_scanner.jl).
+"""
+function profil_trame(mots::AbstractVector{UInt16}, tic_s::Real; temps_pixel_ns::Real = 50.0)
+    d = decoder!(Decodeur(garder_photons = true), mots, length(mots))
+    lignes, trames = d.marqueurs[2], d.marqueurs[3]
+    (length(lignes) >= 2 && length(trames) >= 2) || return Int[], Int[]
+    rang = fill(-1, length(lignes))                         # rang de chaque ligne dans sa trame
+    debuts = [searchsortedfirst(lignes, t) for t in trames]
+    for j in 1:length(debuts) - 1                           # trames complètes seulement
+        for k in debuts[j]:debuts[j + 1] - 1
+            rang[k] = k - debuts[j]
+        end
+    end
+    n_lignes = maximum(rang) + 1
+    periode = mediane_img(diff(lignes))
+    n_colonnes = max(1, floor(Int, periode * tic_s * 1e9 / temps_pixel_ns + 1e-9))
+    par_ligne, par_colonne = zeros(Int, n_lignes), zeros(Int, n_colonnes)
+    for t in d.t_photons
+        k = searchsortedlast(lignes, t)
+        (k >= 1 && rang[k] >= 0) || continue
+        x = floor(Int, (t - lignes[k]) * tic_s * 1e9 / temps_pixel_ns + 1e-9)
+        par_ligne[rang[k] + 1] += 1
+        0 <= x < n_colonnes && (par_colonne[x + 1] += 1)
+    end
+    return par_ligne, par_colonne
+end
+
 """Première passe : les temps (tics) des marqueurs de ligne (M1) et de trame (M2)."""
 function marqueurs_flux(brut::Vector{UInt16})
     d1 = decoder!(Decodeur(), brut, length(brut))
@@ -129,7 +172,7 @@ function parcourir_photons(f, brut::Vector{UInt16}, lignes::Vector{Int64}, trame
                 t_ligne = lignes[k]
             end
             k == 0 && continue
-            y = y_cour - g.decalage_lignes
+            y = y_cour - geo.decalage_lignes
             (0 <= y < ny) || continue
             x = fld((tp - t_ligne) * tic_01, pix_01) - g.decalage_pixels
             (0 <= x < nx) || continue
@@ -302,7 +345,7 @@ end
 function Rangeur(geo, tic_s, dt_ns, g::Geometrie)
     nx, ny = geo.nx, geo.ny
     return Rangeur(nx, ny, round(Int, tic_s * 1e10), round(Int, g.temps_pixel_ns * 10),
-                   g.decalage_pixels, g.decalage_lignes, Float64(dt_ns),
+                   g.decalage_pixels, geo.decalage_lignes, Float64(dt_ns),
                    Decodeur(garder_photons = true),
                    Int64[], Int64[], Int64[], UInt16[],
                    0, -1, -1, Int64(0), false, 0, Int64(0),

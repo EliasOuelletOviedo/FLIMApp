@@ -216,7 +216,9 @@ at 31.25 frames/s) or `"rejeu"` (replays recorded `.spc` files listed in
 imagerie_photons.jl and histogrammes_single.jl (same outputs);
 `julia -t 4 scripts/spc/horloges_scanner.jl "<scanner setting>" [s]` measures
 what the cards see of the scanner's clocks for one scanner setting — line
-(M1) and frame (M2) frequencies, lines per frame — and appends it to
+(M1) and frame (M2) frequencies, lines per frame, the setting recognized in
+`reglages_scanner` — and, with a sample, where the photons fall in the whole
+frame (to check the skipped lines and pixels); it appends to
 `<recording folder>/horloges/horloges_scanner.csv`;
 `julia -t auto scripts/spc/imagerie.jl <name>` reprocesses a recorded
 acquisition without the cards. `SPC_REGLAGES=<file>` points them to another
@@ -274,10 +276,13 @@ code its photons carry.
 
 **ROI popup**: the **Image ×100** button acquires 100 frames with the
 scanner's line and frame clocks (as imagerie_photons.jl did), at the fixed
-geometry of `[imagerie]` (1024 pixels per line; `lignes_par_image` lines,
-or 0 for the lines counted between two frame clocks minus
-`decalage_lignes`; `temps_pixel_ns`, `decalage_pixels`/`decalage_lignes` =
-scan_borders). A menu picks **Channel 1** (default, the FLIM channel),
+geometry of `[imagerie]`: 1024 pixels per line, and with `lignes_par_image
+= 0` (the default) the lines of the scanner setting recognized from the
+frame clock — `reglages_scanner` maps each setting's lines per frame (1080,
+540, 270, 144, 72, 36, 20, measured on the bench; the line lasts 55.55 µs
+in all) to its image lines (1024, 512, 256, 128, 60, 24, 8) and the lines
+skipped at the top; a setting not in the table gives the lines per frame
+minus `decalage_lignes` (IMG-02). `lignes_par_image > 0` fixes the height. A menu picks **Channel 1** (default, the FLIM channel),
 **Channel 2** or **Sum**. The lifetime overlay is a **preview** (each
 pixel's mean arrival time minus the IRF's center, pixels under *Min
 photons* masked), meant to place ROIs; each ROI drawn, imported or

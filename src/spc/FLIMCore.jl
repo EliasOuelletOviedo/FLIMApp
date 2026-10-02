@@ -42,7 +42,7 @@ using .SPCLite: Decodeur, decoder!, ecrire_ini, lire_ini, comparer_parametres, e
                 SPC_TIME_OVER, SPC_COLTIM_OVER, SPC_CMD_STOP
 
 """Version de FLIMCore : à augmenter à chaque changement, pour `garde_version`."""
-const VERSION_CORE = 6
+const VERSION_CORE = 7
 
 include("reglages.jl")
 include("flux.jl")
@@ -53,11 +53,11 @@ include("sources.jl")
 include("moteur.jl")
 
 export SPCLite
-export Geometrie, Reglages, lire_reglages, ecrire_reglages, reglages_depuis_dict, geometrie, geometrie!,
+export Geometrie, REGLAGES_SCANNER, reglage_scanner, Reglages, lire_reglages, ecrire_reglages, reglages_depuis_dict, geometrie, geometrie!,
        dossier_spc, parametres_imagerie, parametres_single, parametres_clamp, code_routage, code_ecrit, CODE_HORS_ROI, CODE_SANS_ROI, ROI_MAX, canal_serie
 export ecrire_spc, lire_spc, flux_synthetique, EncodeurFifo, photon!, marqueur!
 export Passes, passes!, terminer_passes!, flux_passes_synthetique
-export ranger_photons, histogrammes_pixels, Rangeur, ranger!, terminer!, declin_total, temps_moyen, traiter, retraiter, mesurer_horloges
+export ranger_photons, histogrammes_pixels, Rangeur, ranger!, terminer!, declin_total, temps_moyen, traiter, retraiter, mesurer_horloges, profil_trame
 export Source, SourceCartes, SourceRejeu, source_rejeu, source_simulation, source_session, source_depuis
 export Moteur, demarrer_moteur, arreter_moteur, verifier, commander!, rendre!, recevoir, etat_moteur,
        attendre_fin, afficher_etat

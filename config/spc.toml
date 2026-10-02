@@ -37,10 +37,11 @@ duree_s = 0.0                    # 0 : en continu jusqu'à « Arrêter »
 temps_pixel_ns = 50.0            # pixel_time de SPCM : horloge de pixel interne
 pixels_par_ligne = 1024          # scan_size_x de SPCM : 1024
 decalage_pixels = 21             # scan_borders (gauche) de SPCM : pixels ignorés après chaque début de ligne (retour du balayage)
-lignes_par_image = 512           # scan_size_y de SPCM ; 0 : les lignes comptées entre deux marqueurs de trame (M2), moins decalage_lignes (scripts/spc/horloges_scanner.jl les mesure)
-decalage_lignes = 32             # scan_borders (haut) de SPCM : lignes ignorées après chaque début de trame
+lignes_par_image = 0             # scan_size_y de SPCM ; 0 : selon l'horloge de trame (réglage du scanner reconnu dans reglages_scanner)
+decalage_lignes = 32             # scan_borders (haut) de SPCM : lignes ignorées après chaque début de trame (lignes_par_image > 0, ou réglage absent de reglages_scanner)
 ligne_front_montant = true       # front actif de l'horloge de ligne (M1)
 trame_front_montant = true       # front actif de l'horloge de trame (M2)
+reglages_scanner = [[1080, 1024, 32], [540, 512, 16], [270, 256, 8], [144, 128, 9], [72, 60, 7], [36, 24, 7], [20, 8, 7]] # réglages du scanner : [lignes par trame, lignes de l'image, lignes ignorées en haut], pour lignes_par_image = 0 (mesurés avec scripts/spc/horloges_scanner.jl ; lignes du haut à vérifier sauf pour 1024)
 
 [affichage]
 binning_temps = 4                # pixels regroupés (n × n) pour le temps moyen

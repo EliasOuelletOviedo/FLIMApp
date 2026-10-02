@@ -931,6 +931,14 @@ function _traiter_mots!(m::Moteur, a::AcqModule, tampon::Vector{UInt16}, n::Inte
         return nothing
     end
     a.geo = geo
+    if g.lignes_par_image == 0
+        publier!(m, geo.reglage === nothing ?
+            Alerte(:avertissement, a.carte, "module $(a.carte) : $(geo.lignes_trame) lignes par trame, réglage du scanner absent de " *
+                   "[imagerie] reglages_scanner : image de $(geo.ny) lignes ($(geo.lignes_trame) − decalage_lignes " *
+                   "$(g.decalage_lignes)) ; mesure ce réglage avec scripts/spc/horloges_scanner.jl") :
+            Alerte(:info, a.carte, "module $(a.carte) : réglage du scanner de $(geo.reglage[2]) lignes ($(geo.lignes_trame) lignes " *
+                   "par trame, $(geo.reglage[3]) ignorées en haut)"))
+    end
     a.rangeur = Rangeur(geo, a.tic_s, a.dt_ns, g)
     a.pool = _nouveau_pool!(m, a.carte, geo.ny, geo.nx, a.dt_ns)
     mots = a.etalonnage.mots
@@ -979,8 +987,9 @@ function _finir_acquisition!(m::Moteur, a::AcqModule, r::Reglages, g::Geometrie,
            photons = rg.decodeur.photons, dans_image = rg.dans_image, pertes = rg.decodeur.pertes,
            trames = rg.trames_completes, lignes_trame = a.geo.lignes_trame, pixels_ligne = a.geo.pixels_ligne,
            periode_ligne_s = a.geo.periode * a.tic_s, nx = rg.nx, ny = rg.ny)
-    resolue = Geometrie(g.temps_pixel_ns, rg.nx, g.decalage_pixels, rg.ny, g.decalage_lignes,
-                        g.ligne_front_montant, g.trame_front_montant)
+    # La géométrie appliquée (lignes et marge du haut du réglage du scanner reconnu) : de quoi refaire le rangement.
+    resolue = Geometrie(g.temps_pixel_ns, rg.nx, g.decalage_pixels, rg.ny, rg.decalage_lignes,
+                        g.ligne_front_montant, g.trame_front_montant, copy(g.reglages_scanner))
     serie = something(a.serie, "")
     publier!(m, ImageSomme(a.carte, serie, canal_serie(r, serie), res.intensite, res.somme_t, res.declin, a.dt_ns,
                            a.tic_s, res.trames, resolue, something(a.mots_gardes, UInt16[])))

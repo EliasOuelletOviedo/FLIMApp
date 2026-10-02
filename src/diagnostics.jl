@@ -92,6 +92,8 @@ const PROBLEM_LIST = Problem[
             "Differential nonlinearity of the card's ADC: check the decay in the SPC window; if strong, the card's ADC settings or the card itself."),
     Problem("IMG-01", "Imaging: no line or frame clock, no image",
             "Scanner running? Its line clock on M1 and frame clock on M2 of the cards; ligne_/trame_front_montant in [imagerie]."),
+    Problem("IMG-02", "Scanner setting not in the table: image lines guessed",
+            "Measure this setting with scripts/spc/horloges_scanner.jl and add [lines per frame, image lines, top lines] to reglages_scanner in config/spc.toml ([imagerie])."),
     # --- Pass signal (counter → markers M0/M3) ---
     Problem("PASS-01", "No photon on a card during the Realtime measurement",
             "Laser and detectors on, CFD rate in the top bar, CFD/SYNC thresholds; the 850 nm gate (P0.0) high during scans."),
@@ -389,6 +391,7 @@ function alert_problem_id(text::AbstractString)::String
     (has("introuvable") || has("série")) && return "SPC-02"
     (has("verrouill") || has("aucune carte spc") || has("pas prêt") || has("non détecté")) && return "SPC-01"
     (has("horloge de ligne") || has("aucune image")) && return "IMG-01"
+    has("reglages_scanner") && return "IMG-02"
     has("m3 − m0") && return "PASS-05"
     has("sans correspondante") && return "PASS-06"
     has("sans marqueur de fin") && return "PASS-04"

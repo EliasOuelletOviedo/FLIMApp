@@ -29,7 +29,7 @@ l'image 100 × 48 de `flux_test`, quels que soient les défauts de `Geometrie`
 (ceux du banc : 1024 × 512, marges de 21 pixels et 32 lignes).
 """
 geometrie_auto(; kw...) = FLIMCore.Geometrie(; pixels_par_ligne = 0, decalage_pixels = 0, lignes_par_image = 0,
-                                             decalage_lignes = 0, kw...)
+                                             decalage_lignes = 0, reglages_scanner = NTuple{3,Int}[], kw...)
 
 """Lit les résultats jusqu'au `Fin` de `mesure` ; rend les trames au moteur."""
 function jusqu_a_fin(m, mesure; delai = 60.0, garder = x -> nothing)
@@ -141,6 +141,48 @@ end
     @test FLIMCore.ranger_photons(autre, TIC_TEST, DT_TEST, geometrie_auto(decalage_lignes = 2)).intensite |> size == (18, 80)
     vide = FLIMCore.mesurer_horloges(UInt16[], TIC_TEST)
     @test vide.ligne.fronts == 0 && isnan(vide.ligne.frequence_hz) && vide.lignes_par_trame.mediane == 0
+
+    # Le profil des photons dans la trame complète : 48 lignes, 100 pixels, le disque au centre.
+    par_ligne, par_colonne = FLIMCore.profil_trame(flux_test(), TIC_TEST)
+    @test length(par_ligne) == 48 && length(par_colonne) == 100 && sum(par_ligne) > 0
+    @test sum(par_colonne[40:60]) > 1.4 * sum(par_colonne[1:21])                 # le disque, plus lumineux
+    @test FLIMCore.profil_trame(UInt16[], TIC_TEST) == (Int[], Int[])
+end
+
+@testset "réglages du scanner : lignes de l'image selon l'horloge de trame" begin
+    # Les réglages mesurés au banc (lignes par trame → lignes de l'image, lignes ignorées en haut).
+    g = FLIMCore.Geometrie()
+    @test g.lignes_par_image == 0 && FLIMCore.reglage_scanner(g, 540) == (540, 512, 16) && FLIMCore.reglage_scanner(g, 541) === nothing
+    @test [FLIMCore.reglage_scanner(g, n)[2] for n in (1080, 540, 270, 144, 72, 36, 20)] == [1024, 512, 256, 128, 60, 24, 8]
+    # Le flux de test (48 lignes par trame) comme un réglage connu : 40 lignes, 4 ignorées en haut.
+    mots = flux_test()
+    connu = geometrie_auto(reglages_scanner = [(48, 40, 4)])
+    lignes, trames = FLIMCore.marqueurs_flux(mots)
+    geo = FLIMCore.geometrie_resolue(lignes, trames, TIC_TEST, connu)
+    @test (geo.ny, geo.decalage_lignes, geo.reglage) == (40, 4, (48, 40, 4))
+    complet = FLIMCore.ranger_photons(mots, TIC_TEST, DT_TEST, geometrie_auto())
+    @test FLIMCore.ranger_photons(mots, TIC_TEST, DT_TEST, connu).intensite == complet.intensite[5:44, :]
+    # Absent de la table : les lignes mesurées moins decalage_lignes ; une image fixée ignore la table.
+    @test FLIMCore.geometrie_resolue(lignes, trames, TIC_TEST, geometrie_auto(decalage_lignes = 3, reglages_scanner = [(50, 40, 4)])).ny == 45
+    @test FLIMCore.geometrie_resolue(lignes, trames, TIC_TEST, geometrie_auto(lignes_par_image = 10, reglages_scanner = [(48, 40, 4)])).ny == 10
+    # Le rangement trame par trame suit la même table.
+    etalonnage = FLIMCore.Etalonnage()
+    FLIMCore.ajouter_etalonnage!(etalonnage, mots, length(mots))
+    ge = FLIMCore.geometrie_etalonnee(etalonnage, TIC_TEST, connu)
+    r = FLIMCore.Rangeur(ge, TIC_TEST, DT_TEST, connu)
+    FLIMCore.ranger!((x, c) -> nothing, r, mots, length(mots))
+    FLIMCore.terminer!((x, c) -> nothing, r)
+    @test r.intensite_tot == FLIMCore.ranger_photons(mots, TIC_TEST, DT_TEST, connu).intensite
+
+    # Dans config/spc.toml, relus tels quels ; une entrée incohérente est refusée.
+    chemin = joinpath(mktempdir(), "spc.toml")
+    FLIMCore.ecrire_reglages(chemin, FLIMCore.Reglages(reglages_scanner = [(48, 40, 4), (1080, 1024, 32)]))
+    @test FLIMCore.lire_reglages(chemin).reglages_scanner == [(48, 40, 4), (1080, 1024, 32)]
+    @test occursin("reglages_scanner = [[48, 40, 4], [1080, 1024, 32]]", read(chemin, String))
+    @test FLIMCore.geometrie(FLIMCore.lire_reglages(chemin)).reglages_scanner == [(48, 40, 4), (1080, 1024, 32)]
+    @test_throws ErrorException FLIMCore.reglages_depuis_dict(Dict("imagerie" => Dict("reglages_scanner" => [[48, 45, 4]])))
+    @test_throws ErrorException FLIMCore.reglages_depuis_dict(Dict("imagerie" => Dict("reglages_scanner" => [[48, 40]])))
+    @test_throws ErrorException FLIMCore.reglages_depuis_dict(Dict("imagerie" => Dict("reglages_scanner" => [[48, 40, 4], [48, 30, 2]])))
 end
 
 @testset "rangement trame par trame == traitement en bloc (étape 2)" begin
@@ -560,8 +602,13 @@ end
         p = open(`$(Base.julia_cmd()) -t 2 --startup-file=no -e $code $trace`; read = true)
         @test readline(p) == "imagerie"
         sleep(0.3)
-        kill(p, Base.SIGINT)
-        @test timedwait(() -> process_exited(p), 60.0) === :ok
+        # Julia diffère parfois un SIGINT reçu à un mauvais moment : on refait
+        # Ctrl+C, comme au clavier, jusqu'à trois fois.
+        for _ in 1:3
+            kill(p, Base.SIGINT)
+            timedwait(() -> process_exited(p), 20.0) === :ok && break
+        end
+        @test process_exited(p)
         @test readlines(trace) == ["ouvrir", "fermer"]
     end
 end
