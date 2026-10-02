@@ -132,7 +132,7 @@ const CLES_REGLAGES = [
     ("imagerie", "temps_pixel_ns", :temps_pixel_ns, "pixel_time de SPCM : horloge de pixel interne"),
     ("imagerie", "pixels_par_ligne", :pixels_par_ligne, "scan_size_x de SPCM : 1024"),
     ("imagerie", "decalage_pixels", :decalage_pixels, "scan_borders (gauche) de SPCM : pixels ignorés après chaque début de ligne (retour du balayage)"),
-    ("imagerie", "lignes_par_image", :lignes_par_image, "scan_size_y de SPCM : 1024, 512, 256 ou 128"),
+    ("imagerie", "lignes_par_image", :lignes_par_image, "scan_size_y de SPCM ; 0 : les lignes comptées entre deux marqueurs de trame (M2), moins decalage_lignes (scripts/spc/horloges_scanner.jl les mesure)"),
     ("imagerie", "decalage_lignes", :decalage_lignes, "scan_borders (haut) de SPCM : lignes ignorées après chaque début de trame"),
     ("imagerie", "ligne_front_montant", :ligne_front_montant, "front actif de l'horloge de ligne (M1)"),
     ("imagerie", "trame_front_montant", :trame_front_montant, "front actif de l'horloge de trame (M2)"),
@@ -231,8 +231,6 @@ function lire_reglages(chemin::AbstractString)
     return reglages_depuis_dict(TOML.parsefile(chemin); fichier = abspath(chemin))
 end
 
-"""Hauteurs d'image possibles (scan_size_y) ; la largeur est toujours 1024 pixels."""
-const TAILLES_Y = (1024, 512, 256, 128)
 
 """Lève une erreur lisible pour une valeur hors plage."""
 function valider_reglages(r::Reglages)
@@ -245,7 +243,8 @@ function valider_reglages(r::Reglages)
     r.temps_pixel_ns > 0 || error("réglages SPC : [imagerie] temps_pixel_ns doit être positif")
     min(r.decalage_pixels, r.decalage_lignes) >= 0 || error("réglages SPC : [imagerie] décalages positifs ou nuls")
     r.pixels_par_ligne == 1024 || error("réglages SPC : [imagerie] pixels_par_ligne (scan_size_x) : 1024")
-    r.lignes_par_image in TAILLES_Y || error("réglages SPC : [imagerie] lignes_par_image (scan_size_y) : 1024, 512, 256 ou 128")
+    r.lignes_par_image >= 0 ||
+        error("réglages SPC : [imagerie] lignes_par_image (scan_size_y) : un nombre de lignes, ou 0 pour celui de l'horloge de trame")
     r.binning_temps >= 1 || error("réglages SPC : [affichage] binning_temps d'au moins 1")
     r.photons_min >= 0 || error("réglages SPC : [affichage] photons_min positif ou nul")
     r.trames_par_image >= 0 || error("réglages SPC : [affichage] trames_par_image positif ou nul")

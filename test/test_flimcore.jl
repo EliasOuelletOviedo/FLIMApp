@@ -76,9 +76,11 @@ end
     @test all(f -> f == :fichier || getfield(relu, f) == getfield(r, f), fieldnames(FLIMCore.Reglages))
     @test relu.fichier == abspath(chemin) && relu.spc["sync_freq_div"] isa Int
     @test FLIMCore.geometrie(relu).lignes_par_image == 256
-    # Image fixée comme dans SPCM : 1024 pixels par ligne, 1024/512/256/128 lignes.
+    # 1024 pixels par ligne comme dans SPCM ; le nombre de lignes est libre (0 : celui de l'horloge de trame).
     @test_throws ErrorException FLIMCore.reglages_depuis_dict(Dict("imagerie" => Dict("pixels_par_ligne" => 0)))
-    @test_throws ErrorException FLIMCore.reglages_depuis_dict(Dict("imagerie" => Dict("lignes_par_image" => 576)))
+    @test FLIMCore.reglages_depuis_dict(Dict("imagerie" => Dict("lignes_par_image" => 576))).lignes_par_image == 576   # modulable
+    @test FLIMCore.reglages_depuis_dict(Dict("imagerie" => Dict("lignes_par_image" => 0))).lignes_par_image == 0       # horloge de trame
+    @test_throws ErrorException FLIMCore.reglages_depuis_dict(Dict("imagerie" => Dict("lignes_par_image" => -1)))
 
     # Une faute de frappe ou une valeur hors plage ne passe pas.
     @test_throws ErrorException FLIMCore.reglages_depuis_dict(Dict("imagerie" => Dict("pixel_par_ligne" => 3)))
@@ -124,6 +126,21 @@ end
     # Le macrotemps déborde (12 bits) : un seul tour par MTOV, plusieurs par un enregistrement dédié.
     d = FLIMCore.SPCLite.decoder!(FLIMCore.SPCLite.Decodeur(garder_photons = true), e.mots)
     @test d.marqueurs[3] == [1_000, 20_000, 40_000] && d.t_photons == [101, 1_407, 20_200]
+end
+
+@testset "horloges du scanner : lignes par trame, fréquences" begin
+    # flux_test : lignes de 200 tics (5 µs), 48 lignes par trame, 8 trames.
+    h = FLIMCore.mesurer_horloges(flux_test(), TIC_TEST; temps_pixel_ns = 50.0)
+    @test h.ligne.periode_s ≈ 200 * TIC_TEST && h.ligne.frequence_hz ≈ 1 / (200 * TIC_TEST) && h.ligne.periode_min_s ≈ h.ligne.periode_max_s
+    @test h.trame.fronts == 8 && h.trame.periode_s ≈ 48 * 200 * TIC_TEST && h.trame.frequence_hz ≈ 1 / (48 * 200 * TIC_TEST)
+    @test h.lignes_par_trame == (min = 48, mediane = 48, max = 48) && h.repartition == [48 => 7]
+    @test h.pixels_par_periode_ligne == 100 && h.fronts_m0 == 0 && h.fronts_m3 == 0 && h.photons > 0
+    # Les lignes par trame suivent l'horloge de trame : la géométrie automatique (lignes_par_image = 0) en tient compte.
+    autre = FLIMCore.flux_synthetique(trames = 5, lignes_par_trame = 20, periode_ligne = 160, photons_par_ligne = 5)
+    @test FLIMCore.mesurer_horloges(autre, TIC_TEST).lignes_par_trame.mediane == 20
+    @test FLIMCore.ranger_photons(autre, TIC_TEST, DT_TEST, geometrie_auto(decalage_lignes = 2)).intensite |> size == (18, 80)
+    vide = FLIMCore.mesurer_horloges(UInt16[], TIC_TEST)
+    @test vide.ligne.fronts == 0 && isnan(vide.ligne.frequence_hz) && vide.lignes_par_trame.mediane == 0
 end
 
 @testset "rangement trame par trame == traitement en bloc (étape 2)" begin

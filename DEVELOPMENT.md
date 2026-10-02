@@ -115,6 +115,13 @@ Plan.pdf:
   `source_done` ending it once the replay is over; the session's settings
   (`session_analysis_settings`) unless "Playback: current".
   `simulate_session` writes a session through the engine itself.
+- **Diagnostics** (diagnostics.jl, gui/debug_report.jl, DEBUGGING.md): a
+  bench problem is reported with `report_problem!(code, detail)` — add the
+  code to `PROBLEM_LIST` and regenerate DEBUGGING.md's table (a test checks
+  every code is there). Wrap hardware steps in `with_context` so errors say
+  which step failed. `on` in FLIMApp is the guarded version (GUI-01). The
+  SPC engine publishes `EtatClamp` every second of a Realtime measurement;
+  `diagnose_passes` turns it into PASS-/ROUTE- problems.
 - **IRF**: imported from a Single .sdt with the settings it was taken with
   (`read_sdt_irf`, irf.toml); `irf_mismatches` refuses it at import and at
   START against the cards' read-back settings and the declared `[dcc]`.

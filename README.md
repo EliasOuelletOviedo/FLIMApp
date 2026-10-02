@@ -62,6 +62,7 @@ FLIMApp/
 │   └── spc.toml                # SPC-150N settings (replaces reglages_spc.jl)
 ├── scripts/spc/                # imagerie.jl, single.jl: FLIMCore launchers (replace the bench scripts)
 ├── scripts/simulate_session.jl # a simulated session for Playback
+├── DEBUGGING.md                # problem codes, debug log and report: what to check
 ├── test/
 │   ├── runtests.jl             # Test suite (run with `Pkg.test()`)
 │   └── test_flimcore.jl        # FLIMCore tests (also runnable alone: julia -t 4 test/test_flimcore.jl)
@@ -213,6 +214,10 @@ at 31.25 frames/s) or `"rejeu"` (replays recorded `.spc` files listed in
 
 **Scripts**: `scripts/spc/imagerie.jl` and `scripts/spc/single.jl` replace
 imagerie_photons.jl and histogrammes_single.jl (same outputs);
+`julia -t 4 scripts/spc/horloges_scanner.jl "<scanner setting>" [s]` measures
+what the cards see of the scanner's clocks for one scanner setting — line
+(M1) and frame (M2) frequencies, lines per frame — and appends it to
+`<recording folder>/horloges/horloges_scanner.csv`;
 `julia -t auto scripts/spc/imagerie.jl <name>` reprocesses a recorded
 acquisition without the cards. `SPC_REGLAGES=<file>` points them to another
 settings file.
@@ -269,8 +274,9 @@ code its photons carry.
 
 **ROI popup**: the **Image ×100** button acquires 100 frames with the
 scanner's line and frame clocks (as imagerie_photons.jl did), at the fixed
-geometry of `[imagerie]` (1024 pixels per line × 1024, 512, 256 or 128
-lines; `temps_pixel_ns`, `decalage_pixels`/`decalage_lignes` =
+geometry of `[imagerie]` (1024 pixels per line; `lignes_par_image` lines,
+or 0 for the lines counted between two frame clocks minus
+`decalage_lignes`; `temps_pixel_ns`, `decalage_pixels`/`decalage_lignes` =
 scan_borders). A menu picks **Channel 1** (default, the FLIM channel),
 **Channel 2** or **Sum**. The lifetime overlay is a **preview** (each
 pixel's mean arrival time minus the IRF's center, pixels under *Min
@@ -314,6 +320,20 @@ SPC DLL, the app starts offline — no connection attempt, no fault —, a
 banner in the top bar says so, START refuses the Realtime mode and Playback
 stays available. On the bench PC, a failed DAQ connection shows "DAQ:
 connection failed" and the button becomes **RECONNECT**.
+
+## Debugging at the bench
+
+Every problem the app identifies carries a code (`DAQ-04`, `PASS-02`,
+`ROUTE-01`…): the latest one in the top bar, the last ones in the Console
+panel, all of them in the **debug log** (`<journal>/debug/<date>_debug.log`:
+every message of every thread with its source line and stack trace) and in
+the **debug report** (written at the end of every run in its folder, when
+the app closes, and with the Console panel's **Debug report** button).
+During Realtime and Playback, the app diagnoses every second what the cards
+received — photons, M0–M3 markers, pass lengths, routing codes — so a
+missing or swapped pass signal, or an unplugged, inverted or stuck routing
+line, is named before any lifetime goes wrong. **DEBUGGING.md** lists every
+code with what to check.
 
 ## Files written
 

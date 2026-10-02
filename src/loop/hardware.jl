@@ -89,12 +89,30 @@ NIHardware(cfg::BenchConfig) = NIHardware(cfg, C_NULL, C_NULL, C_NULL, C_NULL, C
 describe_hardware(hw::NIHardware) = "NI-DAQmx: " * join(bench_devices(hw.cfg), " + ")
 
 function hw_connect!(hw::NIHardware)
-    present = DAQmx.device_names()
+    present = with_context("listing the NI devices (DAQmxGetSysDevNames)") do
+        DAQmx.device_names()
+    end
+    product(d) = try
+        DAQmx.product_type(d)
+    catch
+        "?"
+    end
+    driver = try
+        join(DAQmx.driver_version(), ".")
+    catch
+        "?"
+    end
+    seen = isempty(present) ? "none" : join(["$d ($(product(d)))" for d in present], ", ")
+    @info "NI-DAQmx $driver; devices: $seen; config needs $(join(bench_devices(hw.cfg), ", "))"
     missing_devices = setdiff(bench_devices(hw.cfg), present)
     isempty(missing_devices) ||
-        error("NI device(s) not found: $(join(missing_devices, ", ")) (seen: $(isempty(present) ? "none" : join(present, ", ")))")
+        error("NI device(s) not found: $(join(missing_devices, ", ")) (seen: $seen)")
     # Also releases tasks a previous session in this process may have left.
-    foreach(DAQmx.reset_device, bench_devices(hw.cfg))
+    for d in bench_devices(hw.cfg)
+        with_context("resetting NI device $d (DAQmxResetDevice)") do
+            DAQmx.reset_device(d)
+        end
+    end
     hw_zero!(hw)
     return nothing
 end
@@ -116,53 +134,72 @@ pause — wired to the SPC-150N's markers M0 and M3.
 """
 function hw_prepare!(hw::NIHardware, buffer_samples::Integer; pass_ticks = nothing)
     cfg = hw.cfg
+    # Each step says what it creates (`with_context`): an error names the task and its channels.
     try
-        hw.galvos = DAQmx.create_task("flimapp_galvos")
-        DAQmx.add_ao_voltage(hw.galvos, cfg.galvo_channels; minv = -cfg.galvo_limit_v, maxv = cfg.galvo_limit_v)
-        configure_output!(hw.galvos, cfg, buffer_samples)
+        with_context("creating the galvo AO task ($(cfg.galvo_channels), clock $(cfg.clock_source))") do
+            hw.galvos = DAQmx.create_task("flimapp_galvos")
+            DAQmx.add_ao_voltage(hw.galvos, cfg.galvo_channels; minv = -cfg.galvo_limit_v, maxv = cfg.galvo_limit_v)
+            configure_output!(hw.galvos, cfg, buffer_samples)
+        end
 
-        hw.lines = DAQmx.create_task("flimapp_lines")
-        DAQmx.add_do(hw.lines, cfg.line_channels)
-        configure_output!(hw.lines, cfg, buffer_samples)
+        with_context("creating the port-0 DO task ($(cfg.line_channels): gates, sync pulses, routing code)") do
+            hw.lines = DAQmx.create_task("flimapp_lines")
+            DAQmx.add_do(hw.lines, cfg.line_channels)
+            configure_output!(hw.lines, cfg, buffer_samples)
+        end
 
         # Declared 0…command_max_v: NI-DAQmx itself refuses any write outside
         # that range (-200561), a second layer behind command_volts/check_slot.
-        hw.commands = DAQmx.create_task("flimapp_commands")
-        DAQmx.add_ao_voltage(hw.commands, cfg.command_channels; minv = 0.0, maxv = cfg.command_max_v)
-        configure_output!(hw.commands, cfg, buffer_samples)
+        with_context("creating the command AO task ($(cfg.command_channels), 0…$(cfg.command_max_v) V)") do
+            hw.commands = DAQmx.create_task("flimapp_commands")
+            DAQmx.add_ao_voltage(hw.commands, cfg.command_channels; minv = 0.0, maxv = cfg.command_max_v)
+            configure_output!(hw.commands, cfg, buffer_samples)
+        end
 
-        hw.readback = DAQmx.create_task("flimapp_readback")
-        DAQmx.add_ai_voltage(hw.readback, cfg.readback_channels; termcfg = TERMINAL_CONFIGS[cfg.readback_terminal])
-        n = DAQmx.num_chans(hw.readback)
-        n == hw.n_readback ||
-            error("readback: $(cfg.readback_channels) has $n channel(s) but readback_signals lists $(hw.n_readback)")
-        input_buffer = max(Int(buffer_samples), round(Int, 10 * cfg.sample_rate_hz))
-        DAQmx.cfg_sample_clock(hw.readback, cfg.sample_rate_hz; source = cfg.clock_source, mode = DAQmx.Val_ContSamps, nsamp = input_buffer)
-        DAQmx.cfg_input_buffer(hw.readback, input_buffer)
+        with_context("creating the readback AI task ($(cfg.readback_channels), $(cfg.readback_terminal))") do
+            hw.readback = DAQmx.create_task("flimapp_readback")
+            DAQmx.add_ai_voltage(hw.readback, cfg.readback_channels; termcfg = TERMINAL_CONFIGS[cfg.readback_terminal])
+            n = DAQmx.num_chans(hw.readback)
+            n == hw.n_readback ||
+                error("readback: $(cfg.readback_channels) has $n channel(s) but readback_signals lists $(hw.n_readback)")
+            input_buffer = max(Int(buffer_samples), round(Int, 10 * cfg.sample_rate_hz))
+            DAQmx.cfg_sample_clock(hw.readback, cfg.sample_rate_hz; source = cfg.clock_source, mode = DAQmx.Val_ContSamps, nsamp = input_buffer)
+            DAQmx.cfg_input_buffer(hw.readback, input_buffer)
+        end
 
-        hw.clock = DAQmx.create_task("flimapp_clock")
-        DAQmx.add_co_pulse_freq(hw.clock, cfg.counter, cfg.sample_rate_hz; duty = 0.5)
-        DAQmx.cfg_implicit_timing(hw.clock, DAQmx.Val_ContSamps, 1000)
+        with_context("creating the sample clock task ($(cfg.counter) at $(cfg.sample_rate_hz) Hz)") do
+            hw.clock = DAQmx.create_task("flimapp_clock")
+            DAQmx.add_co_pulse_freq(hw.clock, cfg.counter, cfg.sample_rate_hz; duty = 0.5)
+            DAQmx.cfg_implicit_timing(hw.clock, DAQmx.Val_ContSamps, 1000)
+        end
 
         if pass_ticks !== nothing && !isempty(cfg.pass_counter)
             entry, scan, shift = pass_ticks
-            hw.passes = DAQmx.create_task("flimapp_passes")
-            DAQmx.add_co_pulse_ticks(hw.passes, cfg.pass_counter, cfg.clock_source;
-                                     initial_delay = max(entry, 2), high_ticks = scan, low_ticks = shift)
-            isempty(cfg.pass_terminal) || DAQmx.set_co_pulse_term(hw.passes, cfg.pass_terminal)
-            DAQmx.cfg_implicit_timing(hw.passes, DAQmx.Val_ContSamps, 1000)
+            terminal = isempty(cfg.pass_terminal) ? "default terminal (PFI13 for ctr1)" : cfg.pass_terminal
+            with_context("creating the pass counter task ($(cfg.pass_counter) → $terminal, ticks of $(cfg.clock_source): " *
+                         "delay $(max(entry, 2)), high $scan, low $shift)") do
+                hw.passes = DAQmx.create_task("flimapp_passes")
+                DAQmx.add_co_pulse_ticks(hw.passes, cfg.pass_counter, cfg.clock_source;
+                                         initial_delay = max(entry, 2), high_ticks = scan, low_ticks = shift)
+                isempty(cfg.pass_terminal) || DAQmx.set_co_pulse_term(hw.passes, cfg.pass_terminal)
+                DAQmx.cfg_implicit_timing(hw.passes, DAQmx.Val_ContSamps, 1000)
+            end
         end
 
         if !isempty(cfg.shutter_line)
-            hw.shutter = DAQmx.create_task("flimapp_shutter")
-            DAQmx.add_do(hw.shutter, cfg.shutter_line)
+            with_context("creating the shutter DO task ($(cfg.shutter_line))") do
+                hw.shutter = DAQmx.create_task("flimapp_shutter")
+                DAQmx.add_do(hw.shutter, cfg.shutter_line)
+            end
         end
 
         if cfg.watchdog_enabled
             lines = vcat(expand_lines(cfg.watchdog_lines), expand_lines(cfg.shutter_line))
             device = String(first(split(lstrip(first(lines), '/'), '/')))
-            hw.watchdog = DAQmx.create_watchdog(device, cfg.watchdog_timeout_s; nom = "flimapp_watchdog")
-            DAQmx.cfg_watchdog_do_expir_states(hw.watchdog, join(lines, ","), fill(DAQmx.Val_Low, length(lines)))
+            with_context("creating the watchdog task ($device, $(cfg.watchdog_timeout_s) s, lines $(join(lines, ",")))") do
+                hw.watchdog = DAQmx.create_watchdog(device, cfg.watchdog_timeout_s; nom = "flimapp_watchdog")
+                DAQmx.cfg_watchdog_do_expir_states(hw.watchdog, join(lines, ","), fill(DAQmx.Val_Low, length(lines)))
+            end
         end
     catch
         clear_scan_tasks!(hw)
@@ -181,14 +218,15 @@ function hw_write!(hw::NIHardware, buffers::SlotBuffers)
 end
 
 function hw_go!(hw::NIHardware)
-    hw.shutter == C_NULL || DAQmx.write_do(hw.shutter, UInt8[1])
-    hw.watchdog == C_NULL || DAQmx.start_task(hw.watchdog)
-    DAQmx.start_task(hw.galvos)       # slaves first: they wait for the first clock edge
-    DAQmx.start_task(hw.lines)
-    DAQmx.start_task(hw.commands)
-    DAQmx.start_task(hw.readback)
-    hw.passes == C_NULL || DAQmx.start_task(hw.passes)
-    DAQmx.start_task(hw.clock)        # the clock starts them all
+    start(label, th) = th == C_NULL || with_context(() -> DAQmx.start_task(th), "starting the $label task")
+    hw.shutter == C_NULL || with_context(() -> DAQmx.write_do(hw.shutter, UInt8[1]), "opening the shutter")
+    start("watchdog", hw.watchdog)
+    start("galvo AO", hw.galvos)       # slaves first: they wait for the first clock edge
+    start("port-0 DO", hw.lines)
+    start("command AO", hw.commands)
+    start("readback AI", hw.readback)
+    start("pass counter", hw.passes)
+    start("sample clock", hw.clock)    # the clock starts them all
     return nothing
 end
 
@@ -237,7 +275,9 @@ function hw_zero!(hw::NIHardware)
     attempt(label, f) = try
         f()
     catch e
-        @warn "Failed to zero the $label" error=string(e)
+        # An output that may not be at zero: an error, with its code.
+        report_problem!("DAQ-02", "zeroing the $label: " * describe_loop_error(e); level = :error,
+                        key = "DAQ-02/zero $label", exception = (e, catch_backtrace()))
     end
 
     attempt("galvo outputs", () -> DAQmx.withtask("flimapp_zero_galvos") do th

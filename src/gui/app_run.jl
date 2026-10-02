@@ -278,6 +278,11 @@ Runtime state of the GUI thread. NOT serialized.
 - `run_mode::String`: the mode of the current (or last) run, "Realtime" or "Playback"
 - `run_rois::Vector{RoiCoordinates}`: the ROIs of the current (or last) run —
   the drawn ones in Realtime, the session's in Playback (index k = drawn ROI k)
+- `run_dir::String`: the current (or last) run's folder ("" if none), where
+  its debug report goes at the end
+- `worker_stats::WorkerStats`: the analysis worker's counters of the current
+  run, diagnosed once a second (diagnostics.jl)
+- `diagnosed_t::Float64`: the time of the last `EtatClamp` diagnosed
 """
 mutable struct AppRun
     config::BenchConfig
@@ -312,6 +317,9 @@ mutable struct AppRun
     playback::PlaybackRun
     run_mode::String
     run_rois::Vector{RoiCoordinates}
+    run_dir::String
+    worker_stats::WorkerStats
+    diagnosed_t::Float64
 end
 
 function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); source = "defaults"),
@@ -335,6 +343,9 @@ function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); s
         "",
         PlaybackRun(),
         "Realtime",
-        RoiCoordinates[]
+        RoiCoordinates[],
+        "",
+        WorkerStats(),
+        0.0
     )
 end

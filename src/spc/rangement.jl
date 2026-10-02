@@ -50,6 +50,48 @@ function geometrie_resolue(lignes::AbstractVector{Int64}, trames::AbstractVector
             pixels_ligne = pixels_ligne, tic_01 = tic_01, pix_01 = pix_01)
 end
 
+"""
+    mesurer_horloges(mots, tic_s; temps_pixel_ns=50.0) -> NamedTuple
+
+Les horloges du scanner telles que la carte les a vues dans un flux FIFO,
+pour relier un réglage du scanner à un nombre de lignes
+(scripts/spc/horloges_scanner.jl) :
+
+- `ligne`, `trame` : pour M1 et M2, le nombre de fronts, la fréquence (Hz,
+  d'après la période médiane) et la période médiane, minimale et maximale (s) ;
+- `lignes_par_trame` : fronts M1 entre deux M2 successifs (la ligne qui
+  tombe sur le tic d'un M2 compte dans la trame qui commence, comme au
+  rangement) — minimum, médiane, maximum — et `repartition`, combien de
+  trames ont chaque nombre de lignes ;
+- `pixels_par_periode_ligne` : les pixels de `temps_pixel_ns` dans une
+  période de ligne (ce que `pixels_par_ligne` et `decalage_pixels` doivent
+  tenir) ;
+- `fronts_m0`, `fronts_m3`, `photons`, `pertes` (enregistrements GAP),
+  `duree_s` (du premier au dernier marqueur M1/M2).
+"""
+function mesurer_horloges(mots::AbstractVector{UInt16}, tic_s::Real; temps_pixel_ns::Real = 50.0)
+    d = decoder!(Decodeur(), mots, length(mots))
+    m0, lignes, trames, m3 = d.marqueurs
+    function horloge(v)
+        p = length(v) >= 2 ? diff(v) .* Float64(tic_s) : Float64[]
+        isempty(p) && return (fronts = length(v), frequence_hz = NaN, periode_s = NaN, periode_min_s = NaN, periode_max_s = NaN)
+        med = mediane_img(p)
+        return (fronts = length(v), frequence_hz = 1 / med, periode_s = med, periode_min_s = minimum(p), periode_max_s = maximum(p))
+    end
+    par_trame = [searchsortedfirst(lignes, trames[k + 1]) - searchsortedfirst(lignes, trames[k]) for k in 1:length(trames) - 1]
+    repartition = Dict{Int,Int}()
+    foreach(n -> repartition[n] = get(repartition, n, 0) + 1, par_trame)
+    ligne = horloge(lignes)
+    marques = vcat(lignes, trames)
+    duree = isempty(marques) ? 0.0 : (maximum(marques) - minimum(marques)) * Float64(tic_s)
+    return (ligne = ligne, trame = horloge(trames),
+            lignes_par_trame = isempty(par_trame) ? (min = 0, mediane = 0, max = 0) :
+                               (min = minimum(par_trame), mediane = round(Int, mediane_img(par_trame)), max = maximum(par_trame)),
+            repartition = sort!(collect(repartition)),
+            pixels_par_periode_ligne = isnan(ligne.periode_s) ? 0 : floor(Int, ligne.periode_s * 1e9 / temps_pixel_ns + 1e-9),
+            fronts_m0 = length(m0), fronts_m3 = length(m3), photons = d.photons, pertes = d.pertes, duree_s = duree)
+end
+
 """Première passe : les temps (tics) des marqueurs de ligne (M1) et de trame (M2)."""
 function marqueurs_flux(brut::Vector{UInt16})
     d1 = decoder!(Decodeur(), brut, length(brut))

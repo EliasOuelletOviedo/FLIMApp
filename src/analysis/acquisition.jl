@@ -39,7 +39,9 @@ simulated (the recorded stimulation doesn't change). Nothing is kept here:
 the journal writes every pass to the session as it comes.
 `excluded_passes`: passes kept out of the PI (shown);
 `unmatched_passes`: passes whose routing code is none of this run's ROIs
-(or that hold no photon under a ROI code), not analyzed.
+(or that hold no photon under a ROI code), not analyzed. `stats`: the
+counters the GUI reads live for its diagnosis (`WorkerStats`,
+diagnostics.jl).
 """
 mutable struct AnalysisOutput
     exchange::Exchange
@@ -47,10 +49,12 @@ mutable struct AnalysisOutput
     drive_outputs::Bool
     excluded_passes::Int
     unmatched_passes::Int
+    stats::WorkerStats
 end
 
-AnalysisOutput(exchange::Exchange; roi_order::Vector{Int} = Int[], drive_outputs::Bool = true) =
-    AnalysisOutput(exchange, copy(roi_order), drive_outputs, 0, 0)
+AnalysisOutput(exchange::Exchange; roi_order::Vector{Int} = Int[], drive_outputs::Bool = true,
+               stats::WorkerStats = WorkerStats()) =
+    AnalysisOutput(exchange, copy(roi_order), drive_outputs, 0, 0, stats)
 
 """
     pass_roi(h, roi_order) -> (roi_index, code)
@@ -369,15 +373,21 @@ function start_realtime(
             end
             h = take!(histograms)
             (paused !== nothing && paused[]) && continue
+            started_ns = time_ns()
+            stats = out.stats
+            backlog = Base.n_avail(histograms)
+            backlog > stats.backlog_max[] && (stats.backlog_max[] = backlog)
             isnan(t0) && (t0 = h.t_debut_s)
 
             roi, code = pass_roi(h, out.roi_order)
             if roi == 0
                 out.unmatched_passes += 1
+                Threads.atomic_add!(stats.unmatched, 1)
+                Threads.atomic_or!(stats.unmatched_codes, 1 << clamp(code, 0, 15))
                 continue
             end
             complete = isempty(h.motifs)
-            complete || (out.excluded_passes += 1)
+            complete || (out.excluded_passes += 1; count_exclusion!(stats, h.motifs))
             timestamp = h.t_fin_s - t0
 
             settings = current_settings(out.exchange)
@@ -419,6 +429,13 @@ function start_realtime(
                                                                 controller.I2, controller.ch2_inv, controller.ch2_on))
             end
 
+            for c in 1:channels
+                isnan(frames[c].lifetime) && Threads.atomic_add!(stats.fits_failed[c], 1)
+            end
+            Threads.atomic_add!(stats.passes, 1)
+            elapsed_ns = Int(time_ns() - started_ns)
+            elapsed_ns > stats.pass_max_ns[] && (stats.pass_max_ns[] = elapsed_ns)
+
             n += UInt32(1)
             running[] || break
 
@@ -427,7 +444,8 @@ function start_realtime(
             emit_frame!(out, sample, roi)
         end
     catch e
-        @error "Real-time worker error" exception=e
+        report_problem!("FIT-05", first(split(sprint(showerror, e), '\n')); level = :error, quiet_s = 0,
+                        exception = (e, catch_backtrace()))
         rethrow()
     finally
         running[] = false

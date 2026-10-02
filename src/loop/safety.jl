@@ -64,24 +64,52 @@ function check_slot(buffers::SlotBuffers, cfg::BenchConfig)
     return nothing
 end
 
-missed_deadline(e) = e isa DAQmx.DAQmxError && e.code in DAQmx.CODES_ECHEANCE_MANQUEE
-read_fell_behind(e) = e isa DAQmx.DAQmxError && e.code in DAQmx.CODES_LECTURE_EN_RETARD
+missed_deadline(e) = (e = root_cause(e); e isa DAQmx.DAQmxError && e.code in DAQmx.CODES_ECHEANCE_MANQUEE)
+read_fell_behind(e) = (e = root_cause(e); e isa DAQmx.DAQmxError && e.code in DAQmx.CODES_LECTURE_EN_RETARD)
 
 """
     describe_loop_error(e)::String
 
-One line for the GUI and the journal: a missed deadline (the card ran out
-of written samples, plan §7: the sequence is no longer reliable) is named
-as such, other errors are shown as they are.
+One line for the GUI and the journal: the steps that were running
+(`with_context`, outermost first), then the cause — a missed deadline (the
+card ran out of written samples, plan §7: the sequence is no longer
+reliable) named as such, a DAQmx error with its code and first line (the
+debug log has the whole extended message: task, channel, property), other
+errors as they are.
 """
 function describe_loop_error(e)::String
-    if missed_deadline(e)
-        return "missed deadline: the card ran out of written samples (DAQmx $(e.code))"
-    elseif read_fell_behind(e)
-        return "readback overrun: the loop fell behind the card (DAQmx $(e.code))"
-    elseif e isa DAQmx.DAQmxError
-        return "DAQmx $(e.code): $(first(split(e.msg, '\n')))"
+    cause = root_cause(e)
+    text = if missed_deadline(cause)
+        "missed deadline: the card ran out of written samples (DAQmx $(cause.code))"
+    elseif read_fell_behind(cause)
+        "readback overrun: the loop fell behind the card (DAQmx $(cause.code))"
+    elseif cause isa DAQmx.DAQmxError
+        "DAQmx $(cause.code): $(first(split(cause.msg, '\n')))"
     else
-        return sprint(showerror, e)
+        first(split(sprint(showerror, cause), '\n'))
     end
+    contexts = error_contexts(e)
+    return isempty(contexts) ? text : join(contexts, ": ") * ": " * text
+end
+
+"""
+    loop_problem_id(e, phase)::String
+
+The problem code of a DAQ loop error (`phase`: `:connect` or `:scan`):
+refused by the safety checks (DAQ-07), a missed deadline (DAQ-05), the
+readback behind (DAQ-06), a device missing (DAQ-01), the pass counter
+(DAQ-04), a reset or zeroing (DAQ-02), a task being created (DAQ-03), or
+else a connection failure (DAQ-09) or a fault during the scan (DAQ-08).
+"""
+function loop_problem_id(e, phase::Symbol)::String
+    cause = root_cause(e)
+    contexts = join(error_contexts(e), " | ")
+    cause isa SafetyError && return "DAQ-07"
+    missed_deadline(cause) && return "DAQ-05"
+    read_fell_behind(cause) && return "DAQ-06"
+    occursin("NI device(s) not found", sprint(showerror, cause)) && return "DAQ-01"
+    occursin("pass counter", contexts) && return "DAQ-04"
+    (occursin("resetting", contexts) || occursin("zeroing", contexts)) && return "DAQ-02"
+    occursin("creating", contexts) && return "DAQ-03"
+    return phase == :connect ? "DAQ-09" : "DAQ-08"
 end

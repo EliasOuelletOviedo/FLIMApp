@@ -1,7 +1,7 @@
 name = "FLIMApp"
 uuid = "e2a055c7-f2b1-477a-abf0-9a11aa0882c8"
-authors = ["Elias Ouellet-Oviedo"]
 version = "0.1.0"
+authors = ["Elias Ouellet-Oviedo"]
 
 [deps]
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
@@ -14,6 +14,7 @@ GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 LineSearches = "d3d80556-e9d4-5f37-9878-2ab0fcc64255"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
 NativeFileDialog = "e1fe445b-aa65-4df4-81c1-2041507f0fd4"
 Observables = "510215fc-4207-5dde-b226-833fc4488ee2"
@@ -35,6 +36,7 @@ GLMakie = "0.13.5"
 Libdl = "1.11.0"
 LineSearches = "7.6.0"
 LinearAlgebra = "1.11.0"
+Logging = "1.11.0"
 Makie = "0.24.5"
 NativeFileDialog = "0.2.1"
 Observables = "0.5.5"

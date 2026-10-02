@@ -2,7 +2,7 @@
 
 julia_version = "1.13.1"
 manifest_format = "2.1"
-project_hash = "8d05e3fea5c79f28ee077489c6dfdec605dee75d"
+project_hash = "01f36f43bd20d9291ea2ac77d73e939ac780ea71"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -604,7 +604,7 @@ uuid = "f5851436-0d7a-5f13-b9de-f02708fd171a"
 version = "3.3.12+0"
 
 [[deps.FLIMApp]]
-deps = ["AbstractFFTs", "CSV", "Colors", "DataFrames", "Dates", "FFTW", "GLMakie", "Libdl", "LineSearches", "LinearAlgebra", "Makie", "NativeFileDialog", "Observables", "Optim", "Printf", "Serialization", "Statistics", "TOML", "ZipFile"]
+deps = ["AbstractFFTs", "CSV", "Colors", "DataFrames", "Dates", "FFTW", "GLMakie", "Libdl", "LineSearches", "LinearAlgebra", "Logging", "Makie", "NativeFileDialog", "Observables", "Optim", "Printf", "Serialization", "Statistics", "TOML", "ZipFile"]
 path = "."
 uuid = "e2a055c7-f2b1-477a-abf0-9a11aa0882c8"
 version = "0.1.0"

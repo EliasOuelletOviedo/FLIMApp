@@ -4,8 +4,10 @@ handlers_console.jl
 Console panel: the live measurements of plan §9 — DAQ loop iteration time
 and deadline margin, display tick interval, garbage-collector pauses,
 journal backlog and dropped entries, memory — refreshed once a second by
-the refresh tick (`diagnostics_text`, refresh.jl), plus a button that
-restarts them.
+the refresh tick (`diagnostics_text`, refresh.jl), with the problems seen
+(their codes: DEBUGGING.md) and what the cards received during Realtime —
+plus a button that restarts the measurements and one that writes the debug
+report (gui/debug_report.jl).
 """
 
 """
@@ -27,11 +29,18 @@ function console_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::
         Label(panel_grid[2, 1:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(
             :text => app_run.display.diagnostics, :fontsize => 10, :justification => :left,
             :halign => :left, :valign => :top, :word_wrap => true, :tellwidth => false))...)
-        reset_button = Button(panel_grid[3, 1:6]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Reset measurements", :width => nothing))...)
+        reset_button = Button(panel_grid[3, 1:3]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Reset measurements", :width => nothing))...)
+        report_button = Button(panel_grid[3, 4:6]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Debug report", :width => nothing))...)
 
         on(reset_button.clicks) do _
             reset_diagnostics!(app_run.display)
             app_run.display.diagnostics[] = diagnostics_text(app_run)
+        end
+
+        # Everything needed to find a bench problem, in one file to read or send.
+        on(report_button.clicks) do _
+            path = write_debug_report(app_run, debug_report_path(app_run); app)
+            show_status!(blocks, isempty(path) ? "Debug report not written: see the log" : "Debug report: $path")
         end
 
         app_run.display.diagnostics[] = diagnostics_text(app_run)

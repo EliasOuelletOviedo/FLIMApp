@@ -62,7 +62,9 @@ function daq_loop(cfg::BenchConfig, ex::Exchange; hardware::Hardware = make_hard
             end
         end
     catch e
-        e isa InvalidStateException || @error "DAQ loop crashed" exception=(e, catch_backtrace())
+        e isa InvalidStateException ||
+            report_problem!("DAQ-08", "the DAQ loop thread crashed: " * describe_loop_error(e); level = :error,
+                            exception = (e, catch_backtrace()))
     finally
         if connected
             try
@@ -93,11 +95,12 @@ function initialize_hardware!(hw::Hardware, cfg::BenchConfig, ex::Exchange)::Boo
         journal_event!(ex.journal, :info, "DAQ connected: $(describe_hardware(hw)) (config $(cfg.source))")
         return true
     catch e
-        message = describe_loop_error(e)
-        # Not a fault: nothing ran. The GUI offers RECONNECT.
+        # Not a fault: nothing ran. The GUI offers RECONNECT. The message
+        # carries the problem code and the step that failed.
+        message = report_problem!(loop_problem_id(e, :connect), describe_loop_error(e); level = :error,
+                                  key = "DAQ connection", quiet_s = 0, exception = (e, catch_backtrace()))
         set_loop_status!(ex, LOOP_DISCONNECTED, "connection failed: $message")
         journal_event!(ex.journal, :error, "DAQ connection failed: $message")
-        @warn "DAQ connection failed" error=message
         return false
     end
 end
@@ -236,10 +239,11 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
     pattern = try
         build_scan_pattern(request, cfg)
     catch e
-        message = describe_loop_error(e)
+        message = report_problem!(loop_problem_id(e, :scan) == "DAQ-07" ? "DAQ-07" : "DAQ-08", describe_loop_error(e);
+                                  level = :error, key = "DAQ scan refused", quiet_s = 0,
+                                  exception = root_cause(e) isa SafetyError ? nothing : (e, catch_backtrace()))
         set_loop_status!(ex, LOOP_READY, "scan refused: $message")
         journal_event!(ex.journal, :error, "scan refused: $message")
-        @warn "Scan refused" error=message
         return nothing
     end
 
@@ -277,25 +281,33 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
     end
 
     fault = nothing
+    fault_backtrace = nothing
+    # What the loop was doing, for the fault message (literals: no allocation in the loop).
+    step = Ref("preparing the tasks")
+    s = 0
     set_loop_status!(ex, LOOP_RUNNING, description)
     try
         hw_prepare!(hw, n_entry + (lead + 2) * n; pass_ticks = (n_entry, pattern.scan_samples, pattern.shift_samples))
+        step[] = "writing the entry and the first slots"
         n_entry > 0 && hw_write!(hw, entry_buffers(pattern))
         for s in 0:lead-1
             write_slot!(hw, buffers, pattern, s, cfg, ex, written_commands)
         end
         written = n_entry + lead * n
+        step[] = "starting the tasks"
         hw_go!(hw)
 
+        step[] = "reading the readback of the entry"
         running = n_entry == 0 || read_span!(hw, readback, n_entry, cfg, ex, n_read)
         running && journal_readback!(ex, pool, readback, n_entry)
 
-        s = 0
         while running
+            step[] = "reading the readback"
             running = read_span!(hw, readback, n, cfg, ex, n_read)
             running || break
 
             # End of slot s: the one iteration that has a deadline.
+            step[] = "writing the next slot"
             t0 = time_ns()
             margin_s = (written - hw_generated(hw)) / cfg.sample_rate_hz
             write_slot!(hw, buffers, pattern, s + lead, cfg, ex, written_commands)
@@ -313,13 +325,17 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
             s += 1
         end
     catch e
-        fault = e
+        fault = ContextError("scan, slot $s, $(step[])", e, catch_backtrace())
+        fault_backtrace = catch_backtrace()
     finally
         set_loop_status!(ex, LOOP_STOPPING)
         try
             hw_stop!(hw)
         catch e
-            fault === nothing && (fault = e)
+            if fault === nothing
+                fault = ContextError("stopping the tasks", e, catch_backtrace())
+                fault_backtrace = catch_backtrace()
+            end
         end
     end
 
@@ -327,10 +343,10 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
         set_loop_status!(ex, LOOP_READY, "stopped")
         journal_event!(ex.journal, :info, "scan stopped")
     else
-        message = describe_loop_error(fault)
+        message = report_problem!(loop_problem_id(fault, :scan), describe_loop_error(fault); level = :error,
+                                  key = "DAQ fault", quiet_s = 0, exception = (fault, fault_backtrace))
         set_loop_status!(ex, LOOP_FAULT, message)
         journal_event!(ex.journal, :error, "scan fault: $message")
-        @error "DAQ loop fault; outputs zeroed" error=message
     end
     return nothing
 end

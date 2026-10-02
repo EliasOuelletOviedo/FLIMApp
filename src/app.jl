@@ -36,17 +36,54 @@ function check_threads()
     n_interactive = Threads.nthreads(:interactive)
     n_default = Threads.nthreads(:default)
     if n_interactive == 0 || n_default < 4
-        @warn """
-        Julia is running with $n_default worker thread(s) and $n_interactive interactive thread(s).
-        The GUI needs the interactive thread to itself, and the DAQ loop, the
-        journal, the analysis and the SPC engine each need a worker thread;
-        otherwise a card read or a lifetime fit can freeze the window (plan.md §2).
-        Start with:
-            julia --project -t 4,1 scripts/app.jl config/bench.toml
-        (scripts/launch.bat does this at high priority on Windows).
-        """
+        report_problem!("ENV-01", "Julia runs with $n_default worker thread(s) and $n_interactive interactive thread(s); " *
+                                  "start with julia --project -t 4,1 scripts/app.jl config/bench.toml")
     end
     return nothing
+end
+
+"""
+    startup_checks!(app_run)
+
+Log what the app runs on — versions, threads, configuration files, drivers
+and where they were found, folders — and report what is missing with its
+code: offline parts (ENV-02, ENV-03), the recording folder (ENV-05), the
+IRF (FIT-01). The first things to read in the debug log.
+"""
+function startup_checks!(app_run)
+    cfg, spc = app_run.config, app_run.spc.settings
+    ni = isempty(Libdl.find_library(DAQmx.LIB)) ? "not found" : (try Libdl.dlpath(DAQmx.LIB) catch; "found" end)
+    spc_dll = try
+        FLIMCore.SPCLite.chemin_dll()
+    catch e
+        "not found ($(first(split(sprint(showerror, e), '\n'))))"
+    end
+    @info "Start-up" versions = code_versions() threads = "$(Threads.nthreads(:interactive)) interactive + $(Threads.nthreads(:default)) default" os = "$(Sys.KERNEL) $(Sys.MACHINE)" bench_config = "$(cfg.source) (backend $(cfg.backend))" spc_settings = "$(app_run.spc.settings_path) (source $(spc.source))" nidaqmx = ni spc_dll = spc_dll journal = journal_root(cfg) recording_folder = FLIMCore.dossier_spc(spc) debug_log = debug_log_path()
+    cfg.backend == :ni && ni == "not found" && report_problem!("ENV-02", "nicaiu not found on this computer"; level = :info)
+    spc.source == "cartes" && !FLIMCore.SPCLite.dll_disponible() && report_problem!("ENV-03", spc_dll; level = :info)
+    if !irf_loaded()
+        report_problem!("FIT-01", "no IRF loaded"; level = :info)
+    else
+        differences = irf_mismatches(loaded_irf_info(), spc)
+        isempty(differences) || report_problem!("FIT-01", join(differences, "; "))
+    end
+    return nothing
+end
+
+"""
+    guarded_step(f, what)
+
+A start-up step that must not keep the app from opening: an error is
+reported (ENV-06, with its stack trace in the debug log) and the app goes on.
+"""
+function guarded_step(f, what::AbstractString)
+    try
+        return f()
+    catch e
+        report_problem!("ENV-06", "$what: " * first(split(sprint(showerror, e), '\n')); level = :error,
+                        key = "ENV-06/$what", exception = (e, catch_backtrace()))
+        return nothing
+    end
 end
 
 """
@@ -139,6 +176,9 @@ function shutdown_app!(app_run::AppRun)
     send_command!(ex, DisconnectCommand())
     send_command!(ex, QuitCommand())
     journal_event!(ex.journal, :info, "window closed")
+    # The session's debug report, before anything stops (see gui/debug_report.jl).
+    path = write_debug_report(app_run, debug_report_path(app_run))
+    isempty(path) || @info "Debug report written" path=path
     spc_stopping = stop_spc!(app_run.spc)
     replay = app_run.playback.engine
     replay === nothing || errormonitor(Threads.@spawn FLIMCore.arreter_moteur(replay))
@@ -162,6 +202,17 @@ window, attach the handlers, show it, warm up the GUI, and start the
 refresh tick. Returns the `Figure`.
 """
 function run_app(config_path::AbstractString = default_bench_config_path())
+    # The bench config first (it says where the journal goes), then the debug
+    # log: from here on, every record of every thread is in one file.
+    cfg = try
+        load_bench_config(config_path)
+    catch e
+        install_debug_logger!(joinpath(homedir(), "FLIMApp_journal", "debug"))
+        report_problem!("ENV-04", "$(config_path): " * sprint(showerror, e); level = :error, exception = (e, catch_backtrace()))
+        rethrow()
+    end
+    install_debug_logger!(joinpath(journal_root(cfg), "debug"))
+
     @info "="^60
     @info "FLIM Application Starting"
     @info "="^60
@@ -169,20 +220,19 @@ function run_app(config_path::AbstractString = default_bench_config_path())
     check_threads()
     initialize_directories()
 
-    cfg = load_bench_config(config_path)
     @info "Bench config loaded" source=cfg.source backend=cfg.backend
     app_state = load_or_create_state()
     app_run = AppRun(cfg)
     LAST_APP_RUN[] = app_run
 
-    init_irf_runtime!(app_run.spc.settings)
+    guarded_step(() -> init_irf_runtime!(app_run.spc.settings), "loading the IRF")
 
     # One-time JIT warmup of the fitting code path, done before the GUI
     # appears rather than left to the user's first START — see
     # warmup_lifetime_fitting!'s docstring.
     @info "Warming up lifetime-fitting code paths (one-time JIT compilation)..."
     t_warmup = time()
-    warmup_lifetime_fitting!()
+    guarded_step(warmup_lifetime_fitting!, "warming up the lifetime fit")
     @info "Warmup complete" seconds = round(time() - t_warmup, digits=1)
 
     start_background_threads!(app_run)
@@ -195,6 +245,7 @@ function run_app(config_path::AbstractString = default_bench_config_path())
     app_run.spc.banner = app_run.offline
     isempty(app_run.offline) || @info "Starting offline" reason=app_run.offline
     app_run.playback.dir = cached_path(session_folder_cache())
+    guarded_step(() -> startup_checks!(app_run), "start-up checks")
 
     # Try to connect the NI cards right away (the DAQ loop does it on its
     # own thread; the DAQ label shows the outcome, RECONNECT retries a
@@ -204,15 +255,17 @@ function run_app(config_path::AbstractString = default_bench_config_path())
     # Plan.pdf, start-up step 3: the GUI starts the SPC engine, which
     # initializes and checks the SPC-150N on its own thread.
     spc_cards_missing = app_run.spc.settings.source == "cartes" && !FLIMCore.SPCLite.dll_disponible()
-    app_run.spc.settings.connexion_au_demarrage && !spc_cards_missing && spc_connect!(app_run.spc)
+    app_run.spc.settings.connexion_au_demarrage && !spc_cards_missing &&
+        guarded_step(() -> spc_connect!(app_run.spc), "starting the SPC engine")
 
     @info "Creating GUI..."
     fig, blocks = make_gui(app_state, app_run)
     make_handlers(app_state, app_run, blocks)
     display(fig)
 
-    warm_up_gui!(app_state, app_run, blocks)
-    show_recording_space!(app_run, blocks)       # the raw streams: about 4 bytes per photon per card
+    guarded_step(() -> warm_up_gui!(app_state, app_run, blocks), "warming up the GUI")
+    guarded_step(() -> show_recording_space!(app_run, blocks), "checking the recording folder")   # about 4 bytes per photon per card
+    isempty(debug_log_path()) || @info "Debug log: $(debug_log_path())"
     start_refresh_task!(app_state, app_run, blocks, fig)
     on(events(fig).window_open) do is_open
         is_open || shutdown_app!(app_run)

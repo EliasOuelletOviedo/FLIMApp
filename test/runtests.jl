@@ -1,4 +1,5 @@
 using Test
+using Logging
 using FLIMApp
 using FLIMApp: ChannelFrame, ChannelSeries, AcquisitionSample, ProtocolSettings,
                LayoutSettings, ControllerSettings, RoiSettings, ConsoleSettings
@@ -519,6 +520,8 @@ end
         FLIMApp.send_command!(ex, FLIMApp.ConnectCommand())
         @test timedwait(() -> startswith(FLIMApp.loop_status(ex).message, "connection failed"), 10.0) === :ok
         @test FLIMApp.loop_status(ex).state == FLIMApp.LOOP_DISCONNECTED
+        # The message says which problem and which step: no driver to list the devices with.
+        @test occursin("[DAQ-09]", FLIMApp.loop_status(ex).message) && occursin("listing the NI devices", FLIMApp.loop_status(ex).message)
         FLIMApp.send_command!(ex, FLIMApp.QuitCommand())
         @test timedwait(() -> istaskdone(loop), 10.0) === :ok
 
@@ -527,6 +530,176 @@ end
         @test occursin("OFFLINE", reason) && occursin("NI-DAQmx", reason)
         @test FLIMApp.offline_reason(test_bench_config(), FLIMCore.Reglages(source = "simulation")) == ""
     end
+end
+
+@testset "Diagnostics: problem codes, error context, debug log, GUI handlers" begin
+    # A catalog of unique codes, each documented in DEBUGGING.md.
+    ids = [p.id for p in FLIMApp.PROBLEM_LIST]
+    @test allunique(ids) && all(id -> occursin(r"^[A-Z]+-\d\d$", id), ids)
+    doc = read(joinpath(@__DIR__, "..", "DEBUGGING.md"), String)
+    @test all(id -> occursin("| $id |", doc), ids)
+    @test FLIMApp.problem_text("PASS-02", "card 0") == "[PASS-02] Photons but no M0 marker (start of pass): card 0"
+    @test occursin("PFI13", FLIMApp.problem_check("PASS-02"))
+
+    # Reported problems are counted by key, logged once, cleared per run.
+    FLIMApp.clear_problems!(("TEST-",))
+    logs = Test.TestLogger()
+    Logging.with_logger(logs) do
+        FLIMApp.report_problem!("PASS-03", "card 7"; key = "PASS-03/card 7")
+        FLIMApp.report_problem!("PASS-03", "card 7"; key = "PASS-03/card 7")
+    end
+    @test count(r -> get(Dict(r.kwargs), :problem, "") == "PASS-03", logs.logs) == 1
+    record = only(filter(r -> r.key == "PASS-03/card 7", FLIMApp.problem_records()))
+    @test record.count == 2 && occursin("card 7", first(FLIMApp.problem_lines()))
+    FLIMApp.clear_problems!(("PASS-",))
+    @test !any(r -> r.key == "PASS-03/card 7", FLIMApp.problem_records())
+
+    # An error says which step failed, then the cause.
+    err = try
+        FLIMApp.with_context("creating the pass counter task (X6321/ctr1)") do
+            FLIMApp.with_context("DAQmxCreateCOPulseChanTicks") do
+                throw(FLIMApp.DAQmx.DAQmxError(Int32(-200431), "Selected physical channel does not support this operation.\nTask Name: flimapp_passes"))
+            end
+        end
+    catch e
+        e
+    end
+    @test sprint(showerror, err) == "creating the pass counter task (X6321/ctr1): DAQmxCreateCOPulseChanTicks: DAQmx -200431 : " *
+                                    "Selected physical channel does not support this operation.\nTask Name: flimapp_passes"
+    @test FLIMApp.root_cause(err) isa FLIMApp.DAQmx.DAQmxError && length(FLIMApp.error_contexts(err)) == 2
+    @test FLIMApp.loop_problem_id(err, :scan) == "DAQ-04"
+    @test FLIMApp.describe_loop_error(err) == "creating the pass counter task (X6321/ctr1): DAQmxCreateCOPulseChanTicks: " *
+                                              "DAQmx -200431: Selected physical channel does not support this operation."
+    deadline = FLIMApp.ContextError("scan, slot 12, reading the readback", FLIMApp.DAQmx.DAQmxError(FLIMApp.DAQmx.CODES_ECHEANCE_MANQUEE[1], "x"), [])
+    @test FLIMApp.loop_problem_id(deadline, :scan) == "DAQ-05" && FLIMApp.missed_deadline(deadline)
+    @test FLIMApp.loop_problem_id(FLIMApp.SafetyError("galvo"), :scan) == "DAQ-07"
+    @test FLIMApp.loop_problem_id(ErrorException("NI device(s) not found: X6321 (seen: Dev1 (PCIe-6321))"), :connect) == "DAQ-01"
+    @test FLIMApp.loop_problem_id(FLIMApp.ContextError("creating the galvo AO task", ErrorException("x"), []), :connect) == "DAQ-03"
+    @test FLIMApp.loop_problem_id(ErrorException("x"), :connect) == "DAQ-09"
+
+    # SPC engine alerts (in French) get their code.
+    @test FLIMApp.alert_problem_id("module 0 : SYNC perdu (pas de signal) : laser coupé") == "SPC-03"
+    @test FLIMApp.alert_problem_id("module 1 : chute du CFD (12 /s, seuil 100 /s)") == "SPC-04"
+    @test FLIMApp.alert_problem_id("module 0 : FIFO débordé, des photons sont perdus") == "SPC-07"
+    @test FLIMApp.alert_problem_id("module 0 : réglage non appliqué, tac_gain demandé 4, appliqué 2") == "SPC-05"
+    @test FLIMApp.alert_problem_id("canal 2 : carte n° 3N0318 introuvable ou pas prête") == "SPC-02"
+    @test FLIMApp.alert_problem_id("module 1 verrouillé par un autre programme (SPCM ouvert ?)") == "SPC-01"
+    @test FLIMApp.alert_problem_id("module 0 : 3 passe(s) de durée M3 − M0 hors tolérance") == "PASS-05"
+    @test FLIMApp.alert_problem_id("autre chose") == "SPC-06"
+
+    # The debug log: time, level, thread, source line, values, stack trace.
+    path = joinpath(mktempdir(), "debug", "test_debug.log")
+    logger = FLIMApp.DebugLogger(path; console = Logging.NullLogger())
+    Logging.with_logger(logger) do
+        @info "hello" value = 42
+        try
+            error("boom")
+        catch e
+            @error "it failed" exception = (e, catch_backtrace())
+        end
+    end
+    text = read(path, String)
+    @test occursin(r"INFO t\d+ Main runtests\.jl:\d+ \| hello\n    value = 42", text)
+    @test occursin("ERROR", text) && occursin("it failed", text) && occursin("boom", text) && occursin("Stacktrace", text)
+    @test length(logger.recent) == 2
+
+    # GUI handlers can't fail silently: GUI-01 with the handler's source line.
+    x = FLIMApp.Observable(0)
+    FLIMApp.on(x) do v
+        v == 1 && error("handler boom")
+        return v
+    end
+    Logging.with_logger(Logging.NullLogger()) do
+        x[] = 1                                         # doesn't throw
+    end
+    gui = filter(r -> r.id == "GUI-01" && occursin("handler boom", r.text), FLIMApp.problem_records())
+    @test !isempty(gui) && occursin(r"runtests\.jl:\d+", first(gui).text)
+end
+
+@testset "Diagnostics: what the cards received (pass signal, routing)" begin
+    counters(; carte = 0, photons = 10_000, marqueurs = [10, 0, 0, 10], codes = Dict(1 => 5000), hors_passe = 0,
+             passes = 10, durations = (0.95, 0.95, 0.95), pertes = 0, fovfl = false, unpaired = 0) =
+        FLIMCore.CompteursCarte(carte, "3N0317", carte + 1, 25e-9, 2photons, photons, marqueurs, [get(codes, k, 0) for k in 0:15],
+                                10, hors_passe, passes, 0, pertes, fovfl, durations..., 0, unpaired, 0)
+    state(cards; written = [1], duree = 10.0) = FLIMCore.EtatClamp(time(), duree, false, written, 0.95, 0.05, 1e-4 + 95e-6, cards, 10)
+    ids(st) = sort([d.id for d in FLIMApp.diagnose_passes(st)])
+    detail(st, id) = only(filter(d -> d.id == id, FLIMApp.diagnose_passes(st))).detail
+
+    @test isempty(ids(state([counters()])))                                                     # all well
+    @test ids(state([counters(photons = 0)])) == ["PASS-01"]
+    @test ids(state([counters(marqueurs = [0, 0, 0, 0], passes = 0)])) == ["PASS-02"]
+    @test isempty(ids(state([counters(marqueurs = [0, 0, 0, 0], passes = 0)]; duree = 1.0)))      # too early to say
+    @test ids(state([counters(marqueurs = [0, 300, 4, 0], passes = 0)])) == ["PASS-07"]
+    @test ids(state([counters(marqueurs = [10, 0, 0, 0], passes = 0)])) == ["PASS-03"]
+    @test ids(state([counters(marqueurs = [10, 0, 0, 6])])) == ["PASS-04"]
+    swapped = state([counters(durations = (0.05, 0.05, 0.05))])
+    @test ids(swapped) == ["PASS-05"] && occursin("edges swapped", detail(swapped, "PASS-05"))
+    late = state([counters(durations = (0.9, 0.95, 0.9))])
+    @test ids(late) == ["PASS-05"] && !occursin("swapped", detail(late, "PASS-05"))
+    @test ids(state([counters(pertes = 3, fovfl = true)])) == ["SPC-07"]
+    @test ids(state([counters(hors_passe = 2000)])) == ["PASS-08"]
+    @test ids(state([counters(unpaired = 2)])) == ["PASS-06"]
+    @test "PASS-06" in ids(state([counters(passes = 10), counters(carte = 1, passes = 4)]))
+
+    # Routing: nothing received, inverted, a line stuck, other codes.
+    @test ids(state([counters(codes = Dict(0 => 5000))])) == ["ROUTE-01"]
+    inverted = state([counters(codes = Dict(14 => 2000, 13 => 2000))]; written = [1, 2])
+    @test ids(inverted) == ["ROUTE-02"] && occursin("[13, 14] read", detail(inverted, "ROUTE-02"))
+    # R1 stuck low: codes 2 and 3 written, 0 and 1 read.
+    stuck = state([counters(codes = Dict(1 => 2000, 0 => 2000, 3 => 0))]; written = [1, 2, 3])
+    @test ids(stuck) == ["ROUTE-03"] && occursin("R1 (P0.5) never high", detail(stuck, "ROUTE-03"))
+    high = state([counters(codes = Dict(9 => 2000, 10 => 2000))]; written = [1, 2])
+    @test ids(high) == ["ROUTE-03"] && occursin("R3 (P0.7) always high", detail(high, "ROUTE-03"))
+    @test ids(state([counters(codes = Dict(1 => 2000, 4 => 2000))]; written = [1, 2])) == ["ROUTE-04"]
+    @test isempty(ids(state([counters(codes = Dict(1 => 2000))]; written = [1, 2])))          # ROI 2 dark: not wiring
+    @test length(FLIMApp.pass_status_lines(state([counters(), counters(carte = 1)]))) == 5
+
+    # From the engine itself: a replay where the cards read the NOT of the
+    # codes the NI writes (inverser_routage the wrong way).
+    flux = Dict(m => FLIMCore.FluxRejeu(FLIMCore.flux_passes_synthetique(codes = [14, 13], passes = 6, scan_s = 0.02, pause_s = 0.005,
+                                                                          graine = m + 1), 0x1, 25e-9, 12.5; serie = s)
+                for (m, s) in ((0, "3N0317"), (1, "3N0318")))
+    engine = FLIMCore.demarrer_moteur(FLIMCore.Reglages(dossier = mktempdir(), seuil_cfd = 10.0);
+                                      source = FLIMCore.SourceRejeu(flux; vitesse = 0, boucle = false))
+    FLIMCore.commander!(engine, FLIMCore.Clamp(rois = [1, 2], scan_s = 0.02, pause_s = 0.005, echantillon_s = 1e-4))
+    final = nothing
+    @test timedwait(() -> (while isready(engine.resultats)
+                               r = take!(engine.resultats)
+                               r isa FLIMCore.EtatClamp && r.fin && (final = r)
+                           end; while isready(engine.histogrammes); take!(engine.histogrammes); end; final !== nothing), 60.0) === :ok
+    FLIMCore.arreter_moteur(engine)
+    @test final.codes == [1, 2] && all(c -> c.marqueurs[1] == 6 && c.marqueurs[4] == 6 && c.passes == 6, final.cartes)
+    @test all(c -> c.duree_min_s ≈ 0.02 && c.duree_max_s ≈ 0.02 && c.photons_par_code[15] > 0, final.cartes)
+    @test sort(unique(d.id for d in FLIMApp.diagnose_passes(final))) == ["ROUTE-02"]
+
+    # The analysis worker's counters.
+    stats = FLIMApp.WorkerStats()
+    stats.passes[] = 40
+    stats.fits_failed[2][] = 9
+    stats.backlog_max[] = 30
+    stats.unmatched[] = 3
+    stats.unmatched_codes[] = 1 << 7
+    FLIMApp.count_exclusion!(stats, ["module 0 : GAP, 2 enregistrement(s) perdus", "module 1 : M3 − M0 = 20 ms au lieu de 19 ms"])
+    worker = FLIMApp.diagnose_worker(stats)
+    @test sort([d.id for d in worker]) == ["FIT-02", "FIT-03", "FIT-04", "ROUTE-05"]
+    @test !any(d -> d.id == "FIT-03", FLIMApp.diagnose_worker(stats; check_backlog = false))      # Playback faster than 1×
+    @test occursin("channel 2: 9 of 40", only(filter(d -> d.id == "FIT-02", worker)).detail)
+    @test occursin("GAP records", only(filter(d -> d.id == "FIT-04", worker)).detail)
+    @test occursin("[7]", only(filter(d -> d.id == "ROUTE-05", worker)).detail)
+end
+
+@testset "Debug report" begin
+    app_run = AppRun(test_bench_config())
+    FLIMApp.report_problem!("PASS-02", "card 0: test"; key = "PASS-02/report test")
+    text = FLIMApp.debug_report_text(app_run; app = AppState(true))
+    for title in ("Versions and environment", "Problems seen", "DAQ loop", "SPC engine", "Realtime: what the cards received",
+                  "Analysis worker", "IRF", "Settings (layout, controller, protocol)", "config/spc.toml", "Debug log")
+        @test occursin(title, text)
+    end
+    @test occursin("[PASS-02]", text) && occursin("check: The pass signal", text) && !occursin("this section failed", text)
+    path = FLIMApp.write_debug_report(app_run, joinpath(mktempdir(), "debug_report.txt"))
+    @test isfile(path) && startswith(read(path, String), "FLIMApp debug report")
+    FLIMApp.clear_problems!(("PASS-",))
 end
 
 @testset "Realtime analysis: passes to frames" begin

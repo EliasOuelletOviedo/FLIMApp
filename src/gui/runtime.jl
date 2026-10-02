@@ -352,9 +352,16 @@ function start_pressed(app, app_run, blocks)
 
     refusal = realtime_start_refusal(app, app_run)
     if !isempty(refusal)
-        @warn "Cannot start the Realtime acquisition" reason=refusal
-        startswith(refusal, "IRF taken") &&
-            @warn "IRF settings differ" differences=irf_mismatches(loaded_irf_info(), app_run.spc.settings; applied = spc_applied_settings(app_run.spc))
+        # The refusals that are bench problems carry their code.
+        if startswith(refusal, "IRF") || startswith(refusal, "Load an IRF")
+            differences = irf_mismatches(loaded_irf_info(), app_run.spc.settings; applied = spc_applied_settings(app_run.spc))
+            refusal = report_problem!("FIT-01", refusal; quiet_s = 0)
+            isempty(differences) || @warn "IRF settings differ from the current ones" differences = join(differences, "; ")
+        elseif startswith(refusal, "Recording folder")
+            refusal = report_problem!("ENV-05", refusal; quiet_s = 0)
+        else
+            @warn "Cannot start the Realtime acquisition" reason=refusal
+        end
         show_status!(blocks, refusal)
         return
     end
@@ -386,11 +393,13 @@ function start_pressed(app, app_run, blocks)
         dir = try
             new_run_dir(sessions_root(app_run.spc.settings), t)
         catch e
-            @error "Cannot create the session folder" exception=e
-            show_status!(blocks, "Cannot create the session folder: $(sprint(showerror, e))")
+            show_status!(blocks, report_problem!("ENV-05", "cannot create the session folder in $(sessions_root(app_run.spc.settings)): " *
+                                                           sprint(showerror, e); level = :error, quiet_s = 0, exception = (e, catch_backtrace())))
             abort_start!(app_run, blocks)
             return nothing
         end
+        app_run.run_dir = dir
+        @info "Realtime run started" session=dir rois=length(rois) order=order roi_active=app.roi.active scan_ms=app.protocol.scan_time shift_ms=app.protocol.shift_time
         app_run.run_open = true
         app_run.run_started_ns = time_ns()
         send_journal!(ex.journal, JournalRunStart(t, dir, run_info(app, app_run, order), loaded_irfs(), loaded_irf_info()))
@@ -406,7 +415,7 @@ function start_pressed(app, app_run, blocks)
         FLIMCore.commander!(engine, clamp_command(app, app_run, order, dir))
         send_command!(ex, StartCommand(scan_request(app, app_run, order)))
 
-        out = AnalysisOutput(ex; roi_order=order)
+        out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats)
         spawn_acquisition_worker!(app_run, out, engine.histogrammes, initial_guess)
         show_status!(blocks, "Realtime: session $(basename(dir))")
         return nothing
@@ -445,6 +454,12 @@ function prepare_run_display!(app, app_run, blocks; n_rois::Int)
     publish_analysis_settings!(app, app_run; force=true)
     set_command_values!(ex, NaN, NaN)
     app_run.worker_output = nothing
+    # Fresh diagnostics: the previous run's pass and analysis problems are history.
+    clear_problems!()
+    app_run.worker_stats = WorkerStats()
+    app_run.spc.clamp_status = nothing
+    app_run.diagnosed_t = 0.0
+    app_run.run_dir = ""
     return nothing
 end
 
@@ -480,13 +495,13 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
     session = try
         read_session(app_run.playback.dir)
     catch e
-        @error "Unreadable session" exception=e
-        show_status!(blocks, "Unreadable session: $(sprint(showerror, e))")
+        show_status!(blocks, report_problem!("PLAY-01", sprint(showerror, e); level = :error, quiet_s = 0,
+                                             exception = (e, catch_backtrace())))
         return nothing
     end
     order = session.roi_order
     if length(order) > ROI_MAX || any(k -> !(1 <= k <= length(session.rois)), order)
-        show_status!(blocks, "Session ROIs unreadable (run.toml): order $(order)")
+        show_status!(blocks, report_problem!("PLAY-01", "ROIs unreadable in run.toml: order $(order), $(length(session.rois)) ROI(s)"; quiet_s = 0))
         return nothing
     end
 
@@ -511,15 +526,17 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
     engine = try
         FLIMCore.demarrer_moteur(app_run.spc.settings; source = FLIMCore.source_session(session.dir; vitesse = speed))
     catch e
-        @error "Cannot start the replay" exception=e
-        show_status!(blocks, "Cannot start the replay: $(sprint(showerror, e))")
+        show_status!(blocks, report_problem!("PLAY-01", "cannot start the replay: " * sprint(showerror, e); level = :error,
+                                             quiet_s = 0, exception = (e, catch_backtrace())))
         abort_start!(app_run, blocks)
         return nothing
     end
     playback.engine = engine
     # Commands wait in the engine's queue until it has opened the session.
-    _, scan_s, sample_s = session_pass_timing(session)
-    FLIMCore.commander!(engine, FLIMCore.Clamp(rois = copy(order), ordre = copy(order), scan_s = scan_s, echantillon_s = sample_s))
+    rate, scan_s, sample_s = session_pass_timing(session)
+    pause_s = isfinite(rate) && rate > 0 ? 1 / rate - scan_s : 0.05
+    FLIMCore.commander!(engine, FLIMCore.Clamp(rois = copy(order), ordre = copy(order), scan_s = scan_s, pause_s = pause_s,
+                                               echantillon_s = sample_s))
 
     app_run.run_mode = "Playback"
     app_run.run_rois = copy(session.rois)
@@ -535,12 +552,14 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
         @warn "Cannot create the run folder; Playback runs without a journal" error=string(e)
         ""
     end
+    app_run.run_dir = dir
+    @info "Playback started" session=session.dir run=dir settings=mode speed=speed order=order
     app_run.run_open = true
     app_run.run_started_ns = time_ns()
     isempty(dir) || send_journal!(ex.journal, JournalRunStart(t, dir, run_info(app, app_run, order; mode, session, settings),
                                                              loaded_irfs(), loaded_irf_info()))
 
-    out = AnalysisOutput(ex; roi_order = order, drive_outputs = false)
+    out = AnalysisOutput(ex; roi_order = order, drive_outputs = false, stats = app_run.worker_stats)
     spawn_acquisition_worker!(app_run, out, engine.histogrammes, selected_initial_guess(blocks);
                               source_done = playback.source_done)
     what = playback.session_settings ? "session settings" : "current settings"

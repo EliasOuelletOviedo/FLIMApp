@@ -45,7 +45,7 @@ end
 const SPC_WINDOW_SETTINGS = [
     ("Pixel time [ns] (1024 pixels / line)", :temps_pixel_ns, Float64, 0),
     ("Pixel offset (scan_borders x)", :decalage_pixels, Int, 0),
-    ("Lines / image (1024, 512, 256, 128)", :lignes_par_image, Int, 128),
+    ("Lines / image (0 = from the frame clock)", :lignes_par_image, Int, 0),
     ("Line offset (scan_borders y)", :decalage_lignes, Int, 0),
     ("Imaging time [s] (0 = until STOP)", :duree_s, Float64, 0),
     ("Frames / image (0 = all)", :trames_par_image, Int, 0),

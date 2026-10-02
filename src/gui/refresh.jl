@@ -38,7 +38,8 @@ function start_refresh_task!(app, app_run, blocks, fig)
             try
                 refresh_tick!(app, app_run, blocks)
             catch e
-                @error "Refresh tick failed" exception=(e, catch_backtrace())
+                report_problem!("GUI-02", first(split(sprint(showerror, e), '\n')); level = :error, quiet_s = 10,
+                                exception = (e, catch_backtrace()))
             end
             next_ns += period_ns
             now_ns = time_ns()
@@ -276,7 +277,43 @@ function update_info_label!(app_run, blocks, now_ns::UInt64)
     state.last_frame_count = app_run.i
     state.last_frame_count_time_ns = now_ns
 
+    run_diagnostics!(app_run)
     state.diagnostics[] = diagnostics_text(app_run)
+    return nothing
+end
+
+"""
+    run_diagnostics!(app_run)
+
+Once a second: diagnose what the cards received (the latest
+`FLIMCore.EtatClamp`, `diagnose_passes`) and the analysis worker's counters
+(`diagnose_worker`), check the journal, and put the latest problem in the
+top bar (every problem keeps its code: see diagnostics.jl and DEBUGGING.md).
+"""
+function run_diagnostics!(app_run)
+    view = app_run.spc
+    status = view.clamp_status
+    if status !== nothing && status.t != app_run.diagnosed_t
+        app_run.diagnosed_t = status.t
+        for d in diagnose_passes(status)
+            level = startswith(d.id, "PASS-01") || startswith(d.id, "PASS-02") || startswith(d.id, "ROUTE-01") ? :error : :warn
+            report_problem!(d.id, d.detail; key = d.key, level)
+        end
+    end
+    if app_run.run_open || app_run.running[]
+        for d in diagnose_worker(app_run.worker_stats; check_backlog = app_run.run_mode == "Realtime")
+            report_problem!(d.id, d.detail; key = d.key)
+        end
+    end
+    dropped = app_run.exchange.journal.dropped[]
+    dropped > 0 && report_problem!("JRN-01", "$dropped journal entries dropped (queue full)"; key = "JRN-01/dropped", quiet_s = 300)
+
+    # The top bar shows the latest problem of the last two minutes.
+    records = problem_records()
+    latest = isempty(records) ? nothing : first(records)
+    text = latest === nothing || time() - latest.last_t > 120 ? "" : latest.text
+    length(text) > 180 && (text = first(text, 177) * "…")
+    view.problem == text || (view.problem = text)
     return nothing
 end
 
@@ -304,8 +341,19 @@ function diagnostics_text(app_run)::String
         spc_diagnostics_text(app_run.spc),
         "Memory: $(round(Sys.maxrss() / 2^20, digits=0)) MB peak",
         "Threads: $(Threads.nthreads(:interactive)) interactive + $(Threads.nthreads(:default)) default",
-        "Config: $(app_run.config.source) ($(app_run.config.backend))"
+        "Config: $(app_run.config.source) ($(app_run.config.backend))",
+        "Debug log: " * (isempty(debug_log_path()) ? "none (console only)" : debug_log_path())
     ]
+    # What a bench problem looks like, with its code (diagnostics.jl, DEBUGGING.md).
+    problems = problem_lines(; limit = 6)
+    push!(lines, isempty(problems) ? "Problems: none" : "Problems (latest first):")
+    append!(lines, ["  " * p for p in problems])
+    status = app_run.spc.clamp_status
+    status === nothing || append!(lines, pass_status_lines(status))
+    stats = app_run.worker_stats
+    stats.passes[] > 0 && push!(lines, "Analysis: $(stats.passes[]) passes, fits failed $(stats.fits_failed[1][]) / $(stats.fits_failed[2][]), " *
+                                       "kept out of the PI $(stats.excluded[]), not analyzed $(stats.unmatched[]), " *
+                                       "most waiting $(stats.backlog_max[]), longest $(round(stats.pass_max_ns[] / 1e6, digits = 1)) ms")
     return join(lines, "\n")
 end
 
@@ -328,8 +376,8 @@ function playback_tick!(app_run)
     n = 0
     while n < 1000 && isready(engine.resultats)
         r = take!(engine.resultats)
-        if r isa FLIMCore.Alerte
-            spc_handle_result!(app_run.spc, r)
+        if r isa FLIMCore.Alerte || r isa FLIMCore.EtatClamp
+            spc_handle_result!(app_run.spc, r)          # coded problems and the pass counters, as in Realtime
         elseif r isa FLIMCore.Fin && r.mesure in (:clamp, :moteur)
             playback.fin === nothing && (playback.fin = r)
             playback.source_done[] = true
@@ -408,9 +456,10 @@ end
     finalize_run!(app, app_run, blocks)
 
 Close a run: last redraw over the whole run, buttons back to START/CLEAR,
-and the journal's run closed. Nothing to save: everything went to the
-session folder during the run (journal, cards' streams), so neither a crash
-nor a forgotten click loses anything.
+the journal's run closed, and the run's debug report written in its folder
+(`write_debug_report`, gui/debug_report.jl). Nothing to save: everything
+went to the session folder during the run (journal, cards' streams), so
+neither a crash nor a forgotten click loses anything.
 """
 function finalize_run!(app, app_run, blocks)
     app_run.run_open = false
@@ -437,5 +486,11 @@ function finalize_run!(app, app_run, blocks)
     send_journal!(app_run.exchange.journal, JournalRunEnd(time()))
     update_start_button_label!(app_run, blocks)
     update_stop_button_label!(app_run, blocks)
+
+    run_diagnostics!(app_run)                  # the final counters of the run
+    if !isempty(app_run.run_dir)
+        path = write_debug_report(app_run, joinpath(app_run.run_dir, "debug_report.txt"); app)
+        isempty(path) || @info "Run debug report written" path=path
+    end
     return nothing
 end

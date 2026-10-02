@@ -51,6 +51,10 @@ include("data_types.jl")
 # (Plan.pdf); the routing limits it defines are shared with the DAQ loop.
 include("spc/FLIMCore.jl")
 
+# Problem codes, the debug log, error context, guarded GUI handlers, and the
+# diagnosis of what the cards received (needs FLIMCore's results)
+include("diagnostics.jl")
+
 # The exchanges between threads (depends on data_types.jl, bench_config.jl)
 include("exchange.jl")
 
@@ -94,6 +98,7 @@ include("gui/app_run.jl")
 include("gui/plotting.jl")
 include("gui/runtime.jl")
 include("gui/refresh.jl")
+include("gui/debug_report.jl")
 include("gui/protocol_popup.jl")
 include("gui/roi_popup.jl")
 include("gui/spc_window.jl")

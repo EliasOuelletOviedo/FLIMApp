@@ -132,6 +132,8 @@ mutable struct SpcView
     roi_image_parts::Dict{Int, FLIMCore.ImageSomme}
     roi_image::Observable{Any}
     banner::String
+    problem::String
+    clamp_status::Union{Nothing, FLIMCore.EtatClamp}
     status::Observable{String}
     check_text::Observable{String}
     alerts_text::Observable{String}
@@ -156,11 +158,11 @@ Read the SPC settings file; defaults (with a warning) if it is missing or
 invalid, so a typo never keeps the app from starting.
 """
 function load_spc_settings(path::AbstractString)::FLIMCore.Reglages
-    isfile(path) || @warn "SPC settings file not found; using defaults" path=path
+    isfile(path) || report_problem!("ENV-04", "$path not found: SPC settings at their defaults")
     try
         return FLIMCore.lire_reglages(path)
     catch e
-        @warn "SPC settings file unreadable; using defaults" path=path error=sprint(showerror, e)
+        report_problem!("ENV-04", "$path: " * sprint(showerror, e) * " — SPC settings at their defaults"; level = :error)
         return FLIMCore.Reglages(fichier = abspath(path))
     end
 end
@@ -169,7 +171,7 @@ function SpcView(settings_path::AbstractString, journal::Union{Nothing, JournalQ
     settings = load_spc_settings(settings_path)
     view = SpcView(String(settings_path), settings, nothing, nothing, journal, Dict{Int, SpcCard}(),
                    nothing, FLIMCore.Alerte[], nothing, "", 0.0, time(), UInt64(0), false, nothing, 0.0,
-                   :none, true, false, false, Dict{Int, FLIMCore.ImageSomme}(), Observable{Any}(nothing), "",
+                   :none, true, false, false, Dict{Int, FLIMCore.ImageSomme}(), Observable{Any}(nothing), "", "", nothing,
                    Observable("SPC: not connected"), Observable(""), Observable(""), Observable(""))
     for card in spc_displayed_cards(view)
         view.cards[card] = SpcCard(card)
@@ -461,7 +463,18 @@ function spc_handle_result!(view::SpcView, r::FLIMCore.Alerte)
     length(view.alerts) > SPC_ALERT_HISTORY && deleteat!(view.alerts, 1)
     level = r.gravite == :erreur ? :error : r.gravite == :avertissement ? :warn : :info
     spc_journal!(view, level, "SPC: " * r.texte)
+    # Every warning or error of the engine carries a problem code (diagnostics.jl).
+    if level != :info
+        id = alert_problem_id(r.texte)
+        report_problem!(id, "SPC engine: " * r.texte; level, key = "$id/module $(r.carte)/" * first(r.texte, 30))
+    end
     view.texts_dirty = true
+    return nothing
+end
+
+"""The counters of the current Realtime measurement (diagnosed once a second by the refresh tick)."""
+function spc_handle_result!(view::SpcView, r::FLIMCore.EtatClamp)
+    view.clamp_status = r
     return nothing
 end
 
@@ -486,6 +499,13 @@ end
 
 function spc_handle_result!(view::SpcView, r::FLIMCore.EtatCartes)
     view.check = r
+    for p in r.problemes
+        id = alert_problem_id(p)
+        report_problem!(id, "SPC check: " * p; key = "$id/check/" * first(p, 30))
+    end
+    @info "SPC check" source = r.source ok = r.ok cards = join(["module $(c.carte): $(c.serie) channel $(c.canal) " *
+                                                                  (c.pret ? "ready, SYNC $(c.sync), CFD $(fmt_rate(c.cfd))" : "not ready ($(c.etat_init))")
+                                                                  for c in r.cartes], "; ")
     view.texts_dirty = true
     return nothing
 end
@@ -659,7 +679,8 @@ fmt_rate(x) = isfinite(x) ? @sprintf("%.3g", x) : "—"
 """
     spc_status_text(view)::String
 
-One line for the main window's top bar: the offline banner if any
+One line for the main window's top bar: the latest problem (`view.problem`,
+with its code, see diagnostics.jl), the offline banner if any
 (`view.banner`, see `offline_reason`), engine state, each card's CFD rate
 and SYNC, and the last error of the last 30 s.
 """
@@ -668,6 +689,7 @@ function spc_status_text(view::SpcView)::String
     head = state == :none ? (view.last_fin !== nothing && view.last_fin.erreur ? "SPC: stopped — $(view.last_fin.raison)" : "SPC: not connected") :
            "SPC: " * SPC_ENGINE_STATE_NAMES[state]
     parts = isempty(view.banner) ? String[head] : String["⚠ " * view.banner, head]
+    isempty(view.problem) || pushfirst!(parts, "⚠ " * view.problem)
     if state != :none
         for c in sort!(collect(keys(view.cards)))
             r = view.cards[c].last_rates

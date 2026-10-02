@@ -152,6 +152,65 @@ HistoClamp(passe, t_debut_s, t_fin_s, cartes, series, histogrammes, pertes, dt_n
     HistoClamp(passe, t_debut_s, t_fin_s, cartes, series, histogrammes, pertes, dt_ns,
                pertes > 0 ? ["GAP : $pertes enregistrement(s) perdus"] : String[])
 
+"""
+Les compteurs d'une carte pendant une mesure Realtime, depuis son début :
+mots lus du FIFO, photons décodés, fronts de chaque marqueur M0–M3,
+photons lus pendant les passes par code de routage (codes 0–15, le code
+réservé compris), photons jetés (code réservé) et hors passe, passes
+terminées et abandonnées (marqueur de fin perdu), enregistrements GAP,
+SPC_FOVFL vu, durées M3 − M0 (s ; NaN avant la première passe), passes hors
+tolérance, sans correspondante sur l'autre carte, et en attente de
+l'appariement.
+"""
+struct CompteursCarte
+    carte::Int
+    serie::String
+    canal::Int
+    tic_s::Float64
+    mots::Int
+    photons::Int
+    marqueurs::Vector{Int}
+    photons_par_code::Vector{Int}
+    hors_roi::Int
+    hors_passe::Int
+    passes::Int
+    abandonnees::Int
+    pertes::Int
+    fifo_deborde::Bool
+    duree_min_s::Float64
+    duree_max_s::Float64
+    duree_derniere_s::Float64
+    hors_duree::Int
+    sans_partenaire::Int
+    en_attente::Int
+end
+
+"""
+    EtatClamp
+
+Ce que les cartes ont reçu depuis le début d'une mesure Realtime
+(`CompteursCarte`, une par carte, dans l'ordre des canaux), publié chaque
+seconde et à la fin (`fin`) : de quoi diagnostiquer le signal de passe et
+le routage sans rien deviner (le GUI en tire des problèmes identifiés,
+diagnostics.jl). `codes` : les codes de routage que la NI écrit pendant
+les scans ; `scan_s`, `pause_s`, `tolerance_s` : les passes programmées
+(NaN : inconnues) ; `publiees` : passes publiées pour l'analyse.
+"""
+struct EtatClamp <: Resultat
+    t::Float64
+    duree_s::Float64
+    fin::Bool
+    codes::Vector{Int}
+    scan_s::Float64
+    pause_s::Float64
+    tolerance_s::Float64
+    cartes::Vector{CompteursCarte}
+    publiees::Int
+end
+
+"""Période de publication d'`EtatClamp` pendant un Realtime."""
+const PERIODE_ETAT_CLAMP = 1.0
+
 const LigneTableau = NamedTuple{(:cle, :demande, :applique, :statut),Tuple{String,Any,Float64,Symbol}}
 
 """
@@ -475,8 +534,7 @@ function _boucle_moteur(m::Moteur)
     catch e
         raison, erreur = _texte_erreur(e), true
         publier!(m, Alerte(:erreur, -1, "moteur SPC arrêté : " * raison))
-        @warn "Moteur SPC arrêté : $raison"
-        @debug "Moteur SPC arrêté" exception = (e, catch_backtrace())
+        @error "Moteur SPC arrêté : $raison" exception = (e, catch_backtrace())
     finally
         # Les cartes sont libérées quoi qu'il arrive.
         try
@@ -528,6 +586,7 @@ function _executer!(m::Moteur, src::Source, ctx::Contexte, c::Commande)
         end                                  # Arret sans mesure en cours : rien à faire
     catch e
         texte = _texte_erreur(e)
+        @error "Commande $(nameof(typeof(c))) en échec" exception = (e, catch_backtrace())
         publier!(m, Alerte(:erreur, -1, "$(nameof(typeof(c))) : " * texte))
         c isa Verifier && c.reponse !== nothing && !isready(c.reponse) && put!(c.reponse, ErrorException(texte))
         _etat!(m, :pret)
@@ -816,6 +875,7 @@ function _imagerie!(m::Moteur, src::Source, ctx::Contexte, c::Imagerie)
         end
     catch e
         raison, erreur = _texte_erreur(e), true
+        @error "Imagerie interrompue" exception = (e, catch_backtrace())
         publier!(m, Alerte(:erreur, -1, "imagerie interrompue : " * raison))
     finally
         # Lire avant d'arrêter : l'arrêt vide le FIFO.
@@ -840,6 +900,7 @@ function _imagerie!(m::Moteur, src::Source, ctx::Contexte, c::Imagerie)
             _finir_acquisition!(m, a, r, g, duree, fichiers)
         catch e
             erreur = true
+            @error "Fichiers du module $(a.carte)" exception = (e, catch_backtrace())
             publier!(m, Alerte(:erreur, a.carte, "fichiers du module $(a.carte) : " * _texte_erreur(e)))
         end
     end
@@ -1019,6 +1080,7 @@ function _single!(m::Moteur, src::Source, ctx::Contexte, c::Single)
         end
     catch e
         raison, erreur = _texte_erreur(e), true
+        @error "Single interrompu" exception = (e, catch_backtrace())
         publier!(m, Alerte(:erreur, -1, "Single interrompu : " * raison))
         for k in modules
             try
@@ -1129,10 +1191,25 @@ mutable struct ClampCarte
     decalage::Float64
     sans_partenaire::Int
     hors_duree::Int
+    mots::Int
 end
 
 ClampCarte(carte, serie, nom, tic_s, passes, ecrivain) =
-    ClampCarte(carte, serie, nom, tic_s, passes, PasseCarte[], ecrivain, false, false, typemin(Int64), false, NaN, 0, 0)
+    ClampCarte(carte, serie, nom, tic_s, passes, PasseCarte[], ecrivain, false, false, typemin(Int64), false, NaN, 0, 0, 0)
+
+"""Les compteurs de la carte `a` (canal `canal`), pour `EtatClamp`."""
+function _compteurs(a::ClampCarte, canal::Int)
+    p = a.passes
+    s(x) = x < 0 ? NaN : x * a.tic_s
+    return CompteursCarte(a.carte, a.serie, canal, a.tic_s, a.mots, p.decodeur.photons, copy(p.marqueurs_vus),
+                          copy(p.photons_par_code), p.hors_roi, p.hors_passe, p.numero, p.passes_abandonnees,
+                          p.decodeur.pertes, a.deborde, s(p.duree_min), s(p.duree_max), s(p.duree_derniere),
+                          a.hors_duree, a.sans_partenaire, length(a.file))
+end
+
+_etat_clamp(cartes::Vector{ClampCarte}, codes, c::Clamp, debut, publiees, fin::Bool) =
+    EtatClamp(time(), time() - debut, fin, collect(codes), c.scan_s, c.pause_s, tolerance_passe(c),
+              [_compteurs(a, k) for (k, a) in enumerate(cartes)], publiees)
 
 function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
     r = _reglages_courants!(m, ctx)
@@ -1178,11 +1255,16 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
         debut = time()
         foreach(a -> lancer!(src, a.carte), cartes)
         prochain_taux = debut + PERIODE_TAUX
+        prochain_etat = debut + PERIODE_ETAT_CLAMP
         while true
             m.arret[] && break
             cmd = _prochaine_commande(m)
             cmd isa Arret && break
             cmd === nothing || _refuser!(m, cmd, "Realtime en cours")
+            if time() >= prochain_etat
+                publier!(m, _etat_clamp(cartes, codes, c, debut, passes, false))
+                prochain_etat += PERIODE_ETAT_CLAMP
+            end
             for a in cartes
                 avant = length(a.file)
                 _lire_passes!(src, a, tampon, c)
@@ -1201,6 +1283,7 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
         end
     catch e
         raison, erreur = _texte_erreur(e), true
+        @error "Realtime interrompu" exception = (e, catch_backtrace())
         publier!(m, Alerte(:erreur, -1, "Realtime interrompu : " * raison))
     finally
         for a in cartes
@@ -1221,6 +1304,7 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
             terminer_passes!((p, t0, t1, pertes) -> _ranger_passe!(a, p, t0, t1, pertes, c), a.passes)
         end
         passes += _publier_passes!(m, cartes, dt_ns, attendre)
+        isempty(cartes) || publier!(m, _etat_clamp(cartes, codes, c, debut, passes, true))
         for (canal, a) in enumerate(cartes)
             a.passes.passes_abandonnees > 0 &&
                 publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : $(a.passes.passes_abandonnees) passe(s) sans marqueur de fin, ignorées"))
@@ -1245,6 +1329,7 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
         end
     catch e
         erreur = true
+        @error "Fichiers du Realtime" exception = (e, catch_backtrace())
         publier!(m, Alerte(:erreur, -1, "fichiers du Realtime : " * _texte_erreur(e)))
     end
     publier!(m, Fin(:clamp, "$raison après $passes passe(s)", erreur, fichiers, time()))
@@ -1256,6 +1341,7 @@ end
 function _lire_passes!(src::Source, a::ClampCarte, tampon::Vector{UInt16}, c::Clamp)
     n = lire_mots!(src, a.carte, tampon)
     n > 0 || return nothing
+    a.mots += n
     a.ecrivain === nothing || ajouter_spc!(a.ecrivain, tampon, n)
     passes!((p, t0, t1, pertes) -> _ranger_passe!(a, p, t0, t1, pertes, c), a.passes, tampon, n)
     return nothing

@@ -78,7 +78,9 @@ function journal_loop(cfg::BenchConfig, ex::Exchange)
                     write_entry!(writer, entry)
                 catch e
                     writer.write_errors += 1
-                    writer.write_errors <= 5 && @warn "Journal write failed" entry=typeof(entry) error=string(e)
+                    writer.write_errors <= 5 && report_problem!("JRN-01", "writing a $(nameof(typeof(entry))) to " *
+                                                                    something(writer.run_dir, writer.root) * ": " * sprint(showerror, e);
+                                                                    level = :error, key = "JRN-01/write", exception = (e, catch_backtrace()))
                 end
             end
             flush_journal!(writer)

@@ -43,7 +43,17 @@ function show_recording_space!(app_run, blocks)
     warning = low ? "recording folder: only " * text : ""
     banner = filter(!isempty, [app_run.offline, warning])
     app_run.spc.banner = join(banner, "   ·   ")
-    low && @warn "Little space left in the recording folder" folder=FLIMCore.dossier_spc(app_run.spc.settings) space=text
+    folder = sessions_root(app_run.spc.settings)
+    low && report_problem!("ENV-05", "$folder: $text")
+    # Writable? A session that can't be written is lost data: check now, not at START.
+    probe = joinpath(folder, ".flimapp_write_test")
+    try
+        mkpath(folder)
+        write(probe, "ok")
+        rm(probe; force = true)
+    catch e
+        report_problem!("ENV-05", "$folder is not writable: " * sprint(showerror, e); level = :error)
+    end
     return nothing
 end
 
