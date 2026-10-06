@@ -2,12 +2,13 @@
 # -1 V à +1 V de plus en plus rapides, avec la PCIe-6321.
 #
 # Branchements (BNC-2090A de la 6321) :
-#   AO 0 → té → AI 0 (retour de la commande) et → entrée J7 du driver du galvo ;
-#   J6 du driver : broche 1 (position) → âme du BNC AI 1, broche 8 (masse) → blindage.
-#   Commutateurs SE/DIFF de AI 0 et AI 1 réglés comme bornes_commande et
+#   AO 0 → té → AI 0 (retour de la commande) et → entrée J7 des deux drivers ;
+#   J6 de chaque driver : broche 1 (position) → âme des BNC AI 1 et AI 2,
+#   broche 8 (masse) → blindage.
+#   Commutateurs SE/DIFF de AI 0, AI 1 et AI 2 réglés comme bornes_commande et
 #   bornes_position (DIFF = réglage d'usine ; en DIFF, rien sur AI 8 ni AI 9).
-# Avant : galvo alimenté ; laser inutile (coupé ou bloqué) ; ton GUI et tout
-# programme qui se sert de la 6321 fermés. L'autre galvo n'est pas piloté.
+# Avant : les deux galvos alimentés ; laser inutile (coupé ou bloqué) ; ton GUI
+# et tout programme qui se sert de la 6321 fermés.
 # Le script appelle NI-DAQmx directement (nicaiu) : DAQmxLite n'est pas utilisé.
 #
 # Déroulé :
@@ -35,6 +36,7 @@
 # premiers cycles de chaque bloc rapide sont écartés (régime établi).
 #
 # Sorties, dans resultats/galvo :
+#   *_ai1_* et *_ai2_*    un jeu de fichiers par voie de position ;
 #   *_resume.csv          une ligne par fréquence et par sens ;
 #   *_reponses.csv        réponses moyennes normalisées (0 au départ, 1 à la cible) ;
 #   *_reponses.svg        ces réponses : montées en trait plein, descentes en tirets ;
@@ -49,18 +51,18 @@ galvo_reglages = (
     carte = "X6321",
     sortie = "ao0",                  # commande du galvo
     voie_commande = "ai0",           # retour de la commande (té sur AO 0)
-    voie_position = "ai1",           # J6 : broche 1 (position), broche 8 (masse)
-    bornes_commande = :diff,         # :diff, :rse ou :nrse, comme les commutateurs de la BNC-2090A
-    bornes_position = :diff,
-    fe = 100_000.0,                  # échantillons/s par voie (110 000 au plus)
+    voies_position = ("ai1", "ai2"), # J6 : une voie de position par galvo
+    bornes_commande = :rse,         # :diff, :rse ou :nrse, comme les commutateurs de la BNC-2090A
+    bornes_position = (:rse, :rse),
+    fe = 80_000.0,                   # échantillons/s par voie (3 voies : 240 000 au total)
     amplitude_v = 1.0,               # créneau de -amplitude à +amplitude ; 1 V au plus
-    frequence_reference_hz = 5.0,    # bloc lent du début (20 Hz au plus)…
+    frequence_reference_hz = 20.0,    # bloc lent du début (20 Hz au plus)…
     cycles_reference = 10,           # … et ses cycles : la réponse moyenne en dépend (bruit)
-    frequences_hz = [10, 20, 50, 100, 200, 300, 400, 500, 600, 700, 800, 1000],
-    duree_bloc_s = 0.3,              # durée de chaque fréquence (1 s au plus)…
+    frequences_hz = collect(50:5:200),   # balayage tous les 10 Hz jusqu'à 200 Hz
+    duree_bloc_s = 0.5,              # durée de chaque fréquence (1 s au plus)…
     cycles_min = 5,                  # … avec au moins ce nombre de cycles
     repos_s = 2.0,                   # pause à 0 V entre deux blocs, contre l'échauffement (1 s au moins)
-    bandes = [0.05, 0.01, 0.002],    # bandes de stabilisation, en fraction du saut
+    bandes = [0.05, 0.01, 0.005],    # bandes de stabilisation, en fraction du saut
                                      # (0,2 % ≈ un demi-pixel pour 256 pixels sur ±1 V)
 )
 
@@ -68,7 +70,7 @@ const LIMITE_V = 1.0              # champ du galvo : jamais plus de ±1 V sur la
 const FREQUENCE_MAX_HZ = 1500.0   # au-delà, le moteur chauffe sans rien apprendre de plus
 const PLAGE_AI = 5.0              # ±5 V sur les deux voies : même gain, pas d'écrêtage
 const DELAI_CONVERSION_S = 1e-6   # première conversion 1 µs après le front d'horloge : AO 0 a déjà changé
-const FE_MAX_VOIE = 110e3         # 1 µs de délai + 2 conversions de 4 µs (250 kS/s) par période
+const FE_MAX_TOTAL = 250e3        # PCIe-6321 : conversions AI cumulées, toutes voies confondues
 const SEUIL_SUIVI = 0.95          # le galvo « suit » s'il atteint 95 % du saut à chaque demi-période
 const ECART_MAX = 1.6             # position au-delà de 1,6 fois le demi-saut : arrêt
 const GAIN_MIN = 0.1              # en dessous, le galvo ne bouge pas (attendu 0,5 à 1)
@@ -125,7 +127,10 @@ function verifier_reglages_galvo(r)
     issorted(f) || error("frequences_hz : en ordre croissant (le balayage s'arrête quand le galvo ne suit plus)")
     0 < r.frequence_reference_hz <= 20 ||
         error("frequence_reference_hz : 20 Hz au plus, pour que chaque saut se stabilise")
-    r.fe <= FE_MAX_VOIE || error("fe : $(FE_MAX_VOIE) échantillons/s par voie au plus")
+    n_voies_ai = 1 + length(r.voies_position)
+    r.fe * n_voies_ai <= FE_MAX_TOTAL ||
+        error("fe trop élevée : $(r.fe) échantillons/s × $n_voies_ai voies = " *
+              "$(r.fe * n_voies_ai) échantillons/s, limite PCIe-6321 $(FE_MAX_TOTAL)")
     r.fe >= 20_000 || error("fe : au moins 20 000 échantillons/s, sinon la stabilisation n'est pas résolue")
     isempty(f) || r.fe / (2 * maximum(f)) >= 10 ||
         error("fe trop basse pour $(maximum(f)) Hz : au moins 10 échantillons par demi-période")
@@ -136,8 +141,11 @@ function verifier_reglages_galvo(r)
         error("cycles_reference : au moins 3, et 5 s de bloc au plus")
     r.repos_s >= 1.0 || error("repos_s : 1 s au moins (échauffement du moteur)")
     r.sortie in ("ao0", "ao1") || error("sortie : ao0 ou ao1")
-    r.voie_commande != r.voie_position || error("voie_commande et voie_position : deux voies différentes")
-    for (v, b) in ((r.voie_commande, r.bornes_commande), (r.voie_position, r.bornes_position))
+    length(r.voies_position) == 2 || error("voies_position : exactement deux voies (une par galvo)")
+    length(r.bornes_position) == length(r.voies_position) ||
+        error("bornes_position : une configuration par voie de position")
+    r.voie_commande ∉ r.voies_position || error("voie_commande et voies_position : voies différentes")
+    for (v, b) in ((r.voie_commande, r.bornes_commande), zip(r.voies_position, r.bornes_position)...)
         code_bornes(b)
         m = match(r"^ai([0-9]+)$", v)
         m === nothing && error("voie « $v » : ai0 à ai15")
@@ -179,22 +187,24 @@ function creneau(fe, f, A, cycles)
 end
 
 """
-Envoie le créneau sur la sortie et enregistre les deux voies d'entrée. L'AO
+Envoie le créneau sur la sortie et enregistre les trois voies d'entrée. L'AO
 prend comme horloge celle de l'AI : l'échantillon k de l'AO sort au front
 d'horloge où l'AI prend son échantillon k. La voie commande est convertie
 DELAI_CONVERSION_S après ce front, la voie position une conversion plus tard.
-Renvoie les deux voies, la cadence réelle et ce retard de la voie position.
+Renvoie le retour de commande, les deux positions, la cadence réelle et ce
+retard de la voie position.
 """
 function acquerir_bloc(r, cr)
     onde = cr.onde
     n_ao = length(onde)
     n_ai = n_ao + round(Int, 0.005 * r.fe)          # 5 ms de plus : la sortie a fini, à 0 V
-    donnees = zeros(Float64, 2 * n_ai)
+    n_voies = 1 + length(r.voies_position)
+    donnees = zeros(Float64, n_voies * n_ai)
     ecrits, lus = Ref{Int32}(0), Ref{Int32}(0)
     fe_reel, conv, delai = Ref{Float64}(0.0), Ref{Float64}(0.0), Ref{Float64}(0.0)
     conv_lue, delai_ok = false, false
     avec_tache("galvo_ai") do ai
-        for (voie, bornes) in ((r.voie_commande, r.bornes_commande), (r.voie_position, r.bornes_position))
+        for (voie, bornes) in ((r.voie_commande, r.bornes_commande), zip(r.voies_position, r.bornes_position)...)
             verif_ni(ccall((:DAQmxCreateAIVoltageChan, LIB_NI_GALVO), Int32,
                            (Ptr{Cvoid}, Cstring, Cstring, Int32, Float64, Float64, Int32, Ptr{Cchar}),
                            ai, "$(r.carte)/$voie", "", code_bornes(bornes), -PLAGE_AI, PLAGE_AI, GV_VOLTS, C_NULL))
@@ -249,8 +259,13 @@ function acquerir_bloc(r, cr)
     retard = (delai_ok ? delai[] : 0.0) + (conv_lue ? 1 / conv[] : 0.0)
     return (f = fe / (2 * cr.h), h = cr.h, fronts = cr.fronts, sens = cr.sens, fe = fe,
             decalage = retard, delai = delai_ok ? delai[] : NaN, conversion = conv_lue ? 1 / conv[] : NaN,
-            delai_ok = delai_ok, onde = onde, commande = donnees[1:n_ai], position = donnees[n_ai + 1:end])
+            delai_ok = delai_ok, onde = onde, commande = donnees[1:n_ai],
+            positions = [donnees[j * n_ai + 1:(j + 1) * n_ai]
+                         for j in 1:length(r.voies_position)])
 end
+
+"Projette un bloc brut sur la position d'un galvo, sans refaire l'acquisition."
+bloc_position(b, j) = merge(b, (position = b.positions[j],))
 
 "Remet la sortie à 0 V (tâche à la demande). Renvoie false en cas d'échec, sans lever d'erreur."
 function mettre_a_zero(r)
@@ -633,7 +648,7 @@ function ecrire_resultats(prefixe, m, r, A, debut, arret)
     open(prefixe * "_resume.csv", "w") do io
         println(io, "# galvo_caracterisation.jl, ", Dates.format(debut, "yyyy-mm-dd HH:MM:SS"))
         println(io, "# carte $(r.carte), sortie $(r.sortie), commande $(r.voie_commande) ($(r.bornes_commande)), ",
-                "position $(r.voie_position) ($(r.bornes_position))")
+            "position $(r.voies_position) ($(r.bornes_position))")
         @printf(io, "# fe %.1f éch/s par voie ; voie position lue %.2f µs après le front de la commande (pris en compte)\n",
                 fe, t0 * 1e6)
         println(io, "# origine des temps : ", ref.origine)
@@ -734,47 +749,72 @@ end
 Bloc de référence, balayage, puis bloc de contrôle. Renvoie la raison d'un
 arrêt anticipé, ou "". Après un arrêt de sécurité, pas de bloc de contrôle.
 """
-function mesurer!(m, r, A)
+function mesurer!(ms, r, A)
+    n_galvos = length(ms)
+    actifs = trues(n_galvos)
+    raisons = fill("", n_galvos)
     fe = Float64(r.fe)
     cr = creneau(fe, Float64(r.frequence_reference_hz), A, r.cycles_reference)
     @printf("\n1. Bloc de référence : créneau à %.4g Hz, %d cycles\n", fe / (2 * cr.h), r.cycles_reference)
     b = acquerir_bloc(r, cr)
-    push!(m[:blocs], b)
-    ref = niveaux_reference(b, A)
-    ref = merge(ref, origine_temps(b, ref))
-    m[:ref] = ref
-    afficher_reference(ref, b, A, r)
-    abs(ref.gain) >= GAIN_MIN ||
-        return @sprintf("le galvo ne bouge pas (gain position/commande %+.3f, attendu 0,5 à 1)", ref.gain) *
-               " : alimentation du driver, câble J6 (broche 1 → âme, broche 8 → blindage), voie " *
-               "$(r.voie_position) et son commutateur SE/DIFF, ou protection thermique du driver (moteur coupé 4 s)"
-    a = analyser_bloc(b, ref, r)
-    push!(m[:res], a)
-    isnan(cavalier(ref.gain)) &&
-        return @sprintf("gain position/commande %+.3f : aucun réglage du cavalier JP7 ne donne ça", ref.gain) *
-               " (0,5 / 0,8 / 1 V/° → 1 / 0,625 / 0,5). Balayage non lancé : vérifie la voie position et son câblage"
+    for j in 1:n_galvos
+        m = ms[j]
+        bj = bloc_position(b, j)
+        push!(m[:blocs], bj)
+        niveaux = niveaux_reference(bj, A)
+        ref = merge(niveaux, origine_temps(bj, niveaux))
+        m[:ref] = ref
+        afficher_reference(ref, bj, A, r)
+        if abs(ref.gain) < GAIN_MIN
+            actifs[j] = false
+            raisons[j] = @sprintf("le galvo ne bouge pas (gain position/commande %+.3f, attendu 0,5 à 1)", ref.gain) *
+                         " : alimentation du driver, câble J6, voie $(r.voies_position[j]) ou protection thermique du driver"
+            continue
+        end
+        a = analyser_bloc(bj, ref, r)
+        push!(m[:res], a)
+        if isnan(cavalier(ref.gain))
+            actifs[j] = false
+            raisons[j] = @sprintf("gain position/commande %+.3f : aucun réglage du cavalier JP7 ne donne ça", ref.gain) *
+                         " (0,5 / 0,8 / 1 V/° → 1 / 0,625 / 0,5). Balayage non lancé : vérifie le câblage"
+        end
+    end
     println("\n2. Balayage (blocs de $(r.duree_bloc_s) s, pause de $(r.repos_s) s à 0 V entre deux blocs)")
-    entete_tableau(r.bandes, ref.bruit_rel)
-    afficher_bloc(a, r.bandes, ref.bruit_rel)
-    raison = verdict_securite(a)
-    isempty(raison) || return raison
-
-    raison = ""
+    galvos_actifs = findall(actifs)
+    if !isempty(galvos_actifs)
+        bruit_rel = minimum(ms[j][:ref].bruit_rel for j in galvos_actifs)
+        entete_tableau(r.bandes, bruit_rel)
+    end
+    for j in 1:n_galvos
+        actifs[j] || continue
+        ref = ms[j][:ref]
+        afficher_bloc(ms[j][:res][1], r.bandes, ref.bruit_rel)
+        raisons[j] = verdict_securite(ms[j][:res][1])
+        isempty(raisons[j]) || (actifs[j] = false)
+    end
     for f in r.frequences_hz
         sleep(r.repos_s)
         cycles = max(r.cycles_min, ceil(Int, r.duree_bloc_s * f))
         b = acquerir_bloc(r, creneau(fe, Float64(f), A, cycles))
-        push!(m[:blocs], b)
-        a = analyser_bloc(b, ref, r)
-        push!(m[:res], a)
-        afficher_bloc(a, r.bandes, ref.bruit_rel)
-        s = verdict_securite(a)
-        isempty(s) || return s
-        if !a.suit
-            raison = @sprintf("le galvo ne suit plus à %.4g Hz (moins de %.0f %% du saut atteint) : balayage arrêté là",
-                              a.f, 100 * SEUIL_SUIVI)
-            break
+        for j in 1:n_galvos
+            actifs[j] || continue
+            m, ref = ms[j], ms[j][:ref]
+            bj = bloc_position(b, j)
+            push!(m[:blocs], bj)
+            a = analyser_bloc(bj, ref, r)
+            push!(m[:res], a)
+            afficher_bloc(a, r.bandes, ref.bruit_rel)
+            s = verdict_securite(a)
+            if !isempty(s)
+                raisons[j] = s
+                actifs[j] = false
+            elseif !a.suit
+                raisons[j] = @sprintf("le galvo ne suit plus à %.4g Hz (moins de %.0f %% du saut atteint) : balayage arrêté là",
+                                      a.f, 100 * SEUIL_SUIVI)
+                actifs[j] = false
+            end
         end
+        all(!, actifs) && break
     end
 
     sleep(r.repos_s)
@@ -782,13 +822,16 @@ function mesurer!(m, r, A)
     @printf("\n3. Bloc de contrôle : créneau à %.4g Hz, 3 cycles\n", fe / (2 * cr.h))
     try
         b = acquerir_bloc(r, cr)
-        push!(m[:blocs], b)
-        m[:fin] = niveaux_reference(b, A)
+        for j in 1:n_galvos
+            bj = bloc_position(b, j)
+            push!(ms[j][:blocs], bj)
+            ms[j][:fin] = niveaux_reference(bj, A)
+        end
     catch err
         err isa InterruptException && rethrow()
         println("  bloc de contrôle impossible : ", sprint(showerror, err))
     end
-    return raison
+    return raisons
 end
 
 function caracteriser_galvo(r)
@@ -798,13 +841,15 @@ function caracteriser_galvo(r)
     mkpath(dossier)
     debut = now()
     prefixe = joinpath(dossier, Dates.format(debut, "yyyymmdd_HHMMSS") * "_galvo")
-    @printf("Galvo piloté par %s/%s (créneau ±%g V), commande relue sur %s (%s), position sur %s (%s)\n",
-            r.carte, r.sortie, A, r.voie_commande, r.bornes_commande, r.voie_position, r.bornes_position)
+    @printf("Deux galvos pilotés par %s/%s (créneau ±%g V), commande relue sur %s (%s), positions sur %s (%s)\n",
+            r.carte, r.sortie, A, r.voie_commande, r.bornes_commande, join(r.voies_position, " et "), r.bornes_position)
 
-    m = Dict{Symbol,Any}(:blocs => Any[], :res => Any[], :ref => nothing)
+    ms = [Dict{Symbol,Any}(:blocs => Any[], :res => Any[], :ref => nothing) for _ in r.voies_position]
+    raisons = fill("", length(ms))
     arret = ""
     try
-        arret = mesurer!(m, r, A)
+        raisons = mesurer!(ms, r, A)
+        arret = join(filter(!isempty, raisons), " | ")
     catch err
         arret = err isa InterruptException ? "interrompu (Ctrl+C)" : "erreur : " * sprint(showerror, err)
     finally
@@ -816,17 +861,24 @@ function caracteriser_galvo(r)
         end
     end
     isempty(arret) || println("ARRÊT : ", arret, ".")
-    isempty(m[:blocs]) && return nothing
+    all(isempty(m[:blocs]) for m in ms) && return nothing
 
-    # Données brutes d'abord : elles restent même si la suite échoue
-    serialize(prefixe * ".jls", Dict("reglages" => r, "reference" => m[:ref], "controle" => get(m, :fin, nothing),
-                                     "blocs" => m[:blocs], "resultats" => m[:res], "arret" => arret))
-    m[:ref] === nothing || synthese(m, r, A)
-    if m[:ref] !== nothing && !isempty(m[:res])
-        ecrire_resultats(prefixe, m, r, A, debut, arret)
-        println("\nFichiers : ", prefixe, ".jls, _resume.csv, _reponses.csv, _reponses.svg, _stabilisation.svg")
-    else
-        println("\nDonnées brutes : ", prefixe, ".jls")
+    for (j, m) in enumerate(ms)
+        isempty(m[:blocs]) && continue
+        suffixe = "_$(r.voies_position[j])"
+        prefixe_j = prefixe * suffixe
+        # Données brutes d'abord : elles restent même si la suite échoue
+        serialize(prefixe_j * ".jls", Dict("reglages" => r, "galvo" => r.voies_position[j],
+                                             "reference" => m[:ref], "controle" => get(m, :fin, nothing),
+                                             "blocs" => m[:blocs], "resultats" => m[:res],
+                                             "arret" => raisons[j]))
+        m[:ref] === nothing || synthese(m, r, A)
+        if m[:ref] !== nothing && !isempty(m[:res])
+            ecrire_resultats(prefixe_j, m, r, A, debut, raisons[j])
+            println("\nFichiers galvo $(r.voies_position[j]) : ", prefixe_j, ".jls, _resume.csv, _reponses.csv, _reponses.svg, _stabilisation.svg")
+        else
+            println("\nDonnées brutes : ", prefixe_j, ".jls")
+        end
     end
     println("Colle cette sortie dans la conversation.")
     return nothing
