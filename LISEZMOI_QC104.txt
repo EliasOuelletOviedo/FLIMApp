@@ -1,0 +1,34 @@
+Passage à la SPC-QC-104 : fichiers à copier dans ton dossier banc-chlore
+=====================================================================
+
+Copie ces fichiers à côté de DAQmxLite.jl (inchangé, nécessaire à qc1, qc4 et qc5).
+SPCLite.jl remplace la version 8 : redémarre Julia après la copie.
+
+  SPCLite.jl            module, version 9 (SPC-150N et SPC-QC-104)
+  reglages_qc.jl        réglages de la QC-104, en noms clairs : À REMPLIR avec SPCM
+  spc_deverrouiller.jl  version 9 (affiche le type de chaque carte)
+
+Tests, dans l'ordre (SPCM fermé ; procédure complète dans le document
+« Passage à la SPC-QC-104 ») :
+
+  qc1_inventaire.jl     trouve la QC-104 (type 104), son n° de série, son état.  Aucun fil.
+  qc2_parametres.jl     identité, paramètres écrits et relus, type de flux FIFO.  Aucun fil.
+  qc3_entrees.jl        SYNC et compteurs de taux, entrée par entrée.            Laser + détecteurs.
+  qc4_format_fifo.jl    établit et VÉRIFIE le format FIFO (non publié par B&H), Laser + détecteurs
+                        écrit format_fifo_qc104.jl.                              + câbles NI.
+  qc5_photons.jl        photons, déclins IN1/IN2, marqueurs M0/M3, routage,     Comme qc4.
+                        contrôle par la DLL.
+  qc6_single.jl         mode histogramme : place de IN1 et IN2 en mémoire.       Laser + détecteurs.
+
+Câbles NI pour qc4 et qc5 (connecteur Micro Sub-D 15 de la QC-104) :
+  CTR 1 OUT (PFI 13) de la 6321 → broches 12 (Marker 0) ET 10 (Marker 3)
+  P0.4, P0.5, P0.6, P0.7        → broches 2, 3, 4, 7 (/R0 à /R3)
+  D GND                         → broche 5 ou 15
+  Rien sur les broches 1 (+5 V), 6 (-5 V) et 11 (+12 V).
+
+Colle la sortie de chaque test dans la conversation. Si qc4 échoue, envoie
+aussi le dossier resultats/qc/format.
+
+Anciens scripts SPC-150N : avec les deux types de cartes installés, ajoute
+types = (151,) à avec_spc(...) et avec_spc_tous(...), sinon SPCLite refuse
+(la DLL ne pilote qu'un type de carte à la fois).
