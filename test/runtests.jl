@@ -710,13 +710,48 @@ end
     FLIMApp.report_problem!("PASS-02", "card 0: test"; key = "PASS-02/report test")
     text = FLIMApp.debug_report_text(app_run; app = AppState(true))
     for title in ("Versions and environment", "Problems seen", "DAQ loop", "SPC engine", "Realtime: what the cards received",
-                  "Analysis worker", "IRF", "Settings (layout, controller, protocol)", "config/spc.toml", "Debug log")
+                  "Routing lines read back", "Analysis worker", "IRF", "Settings (layout, controller, protocol)", "config/spc.toml", "Debug log")
         @test occursin(title, text)
     end
     @test occursin("[PASS-02]", text) && occursin("check: The pass signal", text) && !occursin("this section failed", text)
     path = FLIMApp.write_debug_report(app_run, joinpath(mktempdir(), "debug_report.txt"))
     @test isfile(path) && startswith(read(path, String), "FLIMApp debug report")
     FLIMApp.clear_problems!(("PASS-",))
+end
+
+@testset "Routing lines read back" begin
+    # A readback.bin as the journal writes it: P0.0 (gate) and P0.4–P0.7,
+    # 240 samples of scan then 10 of pause, 20 slots.
+    signals = ["galvo_x", "galvo_y", "line_0", "line_4", "line_5", "line_6", "line_7"]
+    function session(scan_code, pause_code; invert = true, volts = 3.3)
+        dir = mktempdir()
+        open(joinpath(dir, "readback.txt"), "w") do io
+            println(io, "sample_rate_hz = 10000.0")
+            println(io, "signals = ", join(signals, ", "))
+        end
+        samples = Float32[]
+        for _ in 1:20, j in 1:250
+            scanning = j <= 240
+            code = scanning ? scan_code : pause_code
+            append!(samples, [0.0f0, 0.0f0, scanning ? volts : 0.0f0, (volts * ((code >> b) & 1) for b in 0:3)...])
+        end
+        write(joinpath(dir, "readback.bin"), samples)
+        open(io -> FLIMApp.TOML.print(io, Dict("spc" => Dict("inverser_routage" => invert), "roi" => Dict("active" => false))),
+             joinpath(dir, "run.toml"), "w")
+        return dir
+    end
+    conclusion(dir) = last(FLIMApp.routing_readback_lines(FLIMApp.routing_readback(dir)))
+
+    # No ROI, inverted: NOT 1 = 14 during scans, NOT 0 = 15 during pauses — as programmed.
+    r = FLIMApp.routing_readback(session(14, 15))
+    @test r.scan_samples == 20 * 240 && r.pause_samples == 20 * 10 && r.expected == [FLIMCore.CODE_SANS_ROI]
+    @test r.lines[1].scan_high == 0 && r.lines[1].pause_high == 1 && r.lines[2].scan_high == 1
+    @test occursin("as programmed", conclusion(session(14, 15)))
+    @test occursin("as programmed", conclusion(session(1, 0; invert = false)))
+    @test occursin("never high", conclusion(session(14, 15; volts = 0.3)))
+    @test occursin("doesn't write what the run programs", conclusion(session(15, 15)))
+    @test FLIMApp.routing_readback(mktempdir()) === nothing
+    @test occursin("no readback.bin", only(FLIMApp.routing_readback_lines(nothing)))
 end
 
 @testset "Realtime analysis: passes to frames" begin

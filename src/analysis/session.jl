@@ -17,6 +17,7 @@ cells).
 """
 
 using TOML
+using Printf
 
 const SESSION_FORMAT = 1
 
@@ -252,6 +253,117 @@ function playback_speed(target_hz::Real, s::Session)::Float64
     (isfinite(target_hz) && target_hz > 0) || return 1.0
     rate = session_pass_timing(s)[1]
     return isfinite(rate) && rate > 0 ? target_hz / rate : Float64(target_hz)
+end
+
+# -----------------------------------------------------------------------------
+# Routing lines, read back
+# -----------------------------------------------------------------------------
+
+"""Readback voltage above which a digital line counts as high (TTL)."""
+const LINE_HIGH_V = 1.4
+
+"""
+    routing_readback(dir; max_s=60)
+
+What the NI really drove on the routing lines during the session in `dir`,
+from its readback.bin: the AI channels wired to P0.0 (the gate, high during
+scans) and P0.4–P0.7 (`readback_signals` line_0, line_4 … line_7 in
+config/bench.toml), over the first `max_s` seconds. Per line: the share of
+scan and pause samples where it is high, and its voltage range. The 4-bit
+code on P0.7…P0.4 during scans and during pauses (counts per code), and the
+code the cards then read (`[clamp] inverser_routage` of the session's
+run.toml), next to the codes the run should give them. `nothing` without
+readback.bin or without those signals.
+"""
+function routing_readback(dir::AbstractString; max_s::Real = 60.0)
+    txt, bin = joinpath(dir, "readback.txt"), joinpath(dir, "readback.bin")
+    (isfile(txt) && isfile(bin)) || return nothing
+    signals, rate = String[], NaN
+    for line in eachline(txt)
+        startswith(line, "signals = ") && (signals = String.(strip.(split(chopprefix(line, "signals = "), ","))))
+        startswith(line, "sample_rate_hz = ") && (rate = parse(Float64, chopprefix(line, "sample_rate_hz = ")))
+    end
+    gate = findfirst(==("line_0"), signals)
+    code_lines = [findfirst(==("line_$b"), signals) for b in 4:7]
+    (gate === nothing || any(isnothing, code_lines) || !isfinite(rate)) && return nothing
+    n_signals = length(signals)
+    n = min(filesize(bin) ÷ (4 * n_signals), round(Int, max_s * rate))
+    data = Vector{Float32}(undef, n * n_signals)
+    open(io -> read!(io, data), bin)
+    v = reshape(data, n_signals, n)
+
+    info = isfile(joinpath(dir, "run.toml")) ? TOML.parsefile(joinpath(dir, "run.toml")) : Dict{String, Any}()
+    spc = get(info, "spc", Dict{String, Any}())
+    invert = Bool(get(spc, "inverser_routage", true))
+    roi = get(info, "roi", Dict{String, Any}())
+    expected = [Int(e["code_read"]) for e in get(roi, "list", Any[]) if get(roi, "active", false)]
+    isempty(expected) && (expected = [Int(get(spc, "code_sans_roi", FLIMCore.CODE_SANS_ROI))])
+
+    scan_codes, pause_codes = Dict{Int, Int}(), Dict{Int, Int}()
+    high_scan, high_pause = zeros(Int, 4), zeros(Int, 4)
+    vmin, vmax = fill(Inf, 4), fill(-Inf, 4)
+    for j in 1:n
+        scanning = v[gate, j] > LINE_HIGH_V
+        code = 0
+        for b in 1:4
+            x = v[code_lines[b], j]
+            vmin[b], vmax[b] = min(vmin[b], x), max(vmax[b], x)
+            x > LINE_HIGH_V || continue
+            code |= 1 << (b - 1)
+            scanning ? (high_scan[b] += 1) : (high_pause[b] += 1)
+        end
+        counts = scanning ? scan_codes : pause_codes
+        counts[code] = get(counts, code, 0) + 1
+    end
+    n_scan, n_pause = sum(values(scan_codes); init = 0), sum(values(pause_codes); init = 0)
+    lines = [(name = "P0.$(b + 3) (R$(b - 1))", scan_high = high_scan[b] / max(1, n_scan), pause_high = high_pause[b] / max(1, n_pause),
+              vmin = vmin[b], vmax = vmax[b]) for b in 1:4]
+    return (seconds = n / rate, scan_samples = n_scan, pause_samples = n_pause, scan_codes = scan_codes, pause_codes = pause_codes,
+            invert = invert, expected = sort(unique(expected)), lines = lines)
+end
+
+"""The code the cards read for `written` on P0.7…P0.4 (NOT of it with `invert`: active-low inputs)."""
+code_read_from(written::Integer, invert::Bool) = Int(FLIMCore.code_ecrit(written, invert))
+
+"""
+    routing_readback_lines(r)::Vector{String}
+
+`routing_readback` as text, ending with what it means: the NI drives the
+code the cards should read (then a card that reads another, or 0, loses it
+after the BOB: cable, connector, ground), it drives another one, or it
+doesn't drive the lines at all.
+"""
+function routing_readback_lines(r)::Vector{String}
+    r === nothing && return ["no readback.bin with line_0 and line_4…line_7 (bench.toml: [journal] readback, readback_signals)"]
+    bits(c) = string(c; base = 2, pad = 4)
+    share(counts, c) = round(Int, 100 * get(counts, c, 0) / max(1, sum(values(counts); init = 0)))
+    out = [@sprintf("first %.1f s: %d scan samples (P0.0 gate high), %d pause samples; inverser_routage = %s; codes the cards should read during scans: %s",
+                    r.seconds, r.scan_samples, r.pause_samples, r.invert, join(r.expected, ", "))]
+    for l in r.lines
+        push!(out, @sprintf("  %s: high in %.0f %% of the scan samples, %.0f %% of the pause samples; %.2f … %.2f V",
+                            l.name, 100 * l.scan_high, 100 * l.pause_high, l.vmin, l.vmax))
+    end
+    if r.scan_samples == 0
+        push!(out, "=> P0.0 (gate) never high: no scan played, or line_0 isn't read back.")
+        return out
+    end
+    main(counts) = isempty(counts) ? -1 : first(argmax(last, collect(counts)))
+    scan, pause = main(r.scan_codes), main(r.pause_codes)
+    read_scan, read_pause = code_read_from(scan, r.invert), pause < 0 ? -1 : code_read_from(pause, r.invert)
+    push!(out, "  during scans the NI writes $scan ($(bits(scan)) on P0.7…P0.4, $(share(r.scan_codes, scan)) % of them): the cards should read $read_scan")
+    pause < 0 || push!(out, "  during pauses it writes $pause ($(bits(pause))): the cards should read $read_pause " *
+                            (read_pause == FLIMCore.CODE_HORS_ROI ? "(the reserved code, thrown away)" : "(NOT the reserved code 0)"))
+    flat = [l.name for l in r.lines if l.vmax < LINE_HIGH_V]
+    if length(flat) == 4
+        push!(out, "=> P0.4–P0.7 never high in the readback: the NI doesn't drive them (channels.lines), or their readback isn't wired.")
+    elseif read_scan in r.expected && (pause < 0 || read_pause == FLIMCore.CODE_HORS_ROI)
+        push!(out, "=> The NI drives the routing code as programmed. A card that reads another code, or 0 (ROUTE-01), loses it after " *
+                   "the BOB: the cable or adapter to its routing inputs /R0–/R3, their pins, the common ground.")
+    else
+        push!(out, "=> The NI doesn't write what the run programs: check channels.lines (port 0, lines 0–7) and readback_signals' order" *
+                   (isempty(flat) ? "." : "; never high: $(join(flat, ", "))."))
+    end
+    return out
 end
 
 # -----------------------------------------------------------------------------

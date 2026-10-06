@@ -11,7 +11,8 @@ Sections: versions and environment; the problems seen, with their codes and
 what to check (diagnostics.jl, DEBUGGING.md); the run; the DAQ loop; the
 SPC engine (cards, settings applied, alerts, rates); what the cards
 received during the last Realtime measurement (`FLIMCore.EtatClamp`) and its
-diagnosis; the analysis worker; the IRF and how it compares with the
+diagnosis; what the NI drove on the routing lines, read back
+(`routing_readback`); the analysis worker; the IRF and how it compares with the
 current settings; the settings; config/bench.toml and config/spc.toml as
 they are; the last records of the debug log, with their stack traces.
 """
@@ -130,6 +131,14 @@ function debug_report_text(app_run; app = nothing)::String
             diagnoses = diagnose_passes(status)
             println(io, "  diagnosis: ", isempty(diagnoses) ? "nothing wrong" : "")
             foreach(d -> println(io, "    ", problem_text(d.id, d.detail)), diagnoses)
+        end
+    end
+
+    part("Routing lines read back (this run)") do
+        if app_run.run_mode == "Realtime" && !isempty(app_run.run_dir)
+            foreach(l -> println(io, "  ", l), routing_readback_lines(routing_readback(app_run.run_dir)))
+        else
+            println(io, "  only for a Realtime run")
         end
     end
 

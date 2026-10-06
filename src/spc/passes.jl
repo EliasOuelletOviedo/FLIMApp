@@ -50,7 +50,7 @@ jetés et comptés dans `hors_roi` ; les autres photons hors passe (décalage
 d'un échantillon entre le code et le signal de passe) dans `hors_passe`.
 Un M0 accepté pendant une passe (M3 perdu, M0 en trop sans contrôle de
 cadence, nouvelle cadence) abandonne la passe en cours
-(`passes_abandonnees`). `dernier` : le dernier temps lu (tics).
+(`passes_abandonnees` ; pas celle que l'arrêt coupe, `terminer_passes!`). `dernier` : le dernier temps lu (tics).
 
 Pour le diagnostic (`EtatClamp`) : `marqueurs_vus` compte les fronts de
 chaque marqueur M0–M3 depuis le début, `photons_par_code` les photons lus
@@ -123,21 +123,27 @@ function passes!(f, p::Passes, mots::AbstractVector{UInt16}, n::Integer = length
     append!(p.t_photons, d.t_photons)
     append!(p.adc_photons, d.adc_photons)
     append!(p.routage_photons, d.routage_photons)
-    foreach(empty!, d.marqueurs)
-    empty!(d.t_photons); empty!(d.adc_photons); empty!(d.routage_photons)
-    limite = typemin(Int64)
-    for v in (p.debuts, p.fins, p.t_photons)
+    # Le temps atteint par le flux : tout ce qui le précède est décodé (les
+    # marqueurs ignorés et les débordements du macrotemps comptent aussi).
+    limite = d.base
+    for v in (d.marqueurs..., p.debuts, p.fins, p.t_photons)
         isempty(v) || (limite = max(limite, last(v)))
     end
+    foreach(empty!, d.marqueurs)
+    empty!(d.t_photons); empty!(d.adc_photons); empty!(d.routage_photons)
     p.dernier = max(p.dernier, limite)
     _passes_avant!(f, p, limite)
     return p
 end
 
-"""Range tout ce qui attend ; une passe sans sa fin (mesure arrêtée pendant un scan) est abandonnée."""
+"""
+Range tout ce qui attend. Une passe sans sa fin — la mesure arrêtée
+pendant un scan, le cas normal — est laissée de côté sans être comptée
+dans `passes_abandonnees` : ce n'est pas un défaut du signal de passe.
+"""
 function terminer_passes!(f, p::Passes)
     _passes_avant!(f, p, typemax(Int64))
-    p.en_passe && (p.passes_abandonnees += 1; _vider_passe!(p))
+    p.en_passe && _vider_passe!(p)
     return p
 end
 

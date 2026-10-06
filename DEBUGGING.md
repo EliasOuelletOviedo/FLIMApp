@@ -43,6 +43,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 | Problem | Test | What it tells |
 |---|---|---|
 | PASS-0x, ROUTE-0x | `julia --project -t 4 scripts/test_passes.jl [s] [--code N] [--borne /X6321/PFIx] [--laser] [--sans-ni]` | The app's own pass counter and a fixed routing code, the cards recording all four markers: per card, the edges on M0, M1, M2, M3, the passes and their length, the code read — and a conclusion per card (signal not arriving, on the wrong input, a missing M3 with fin_par_m3 = true, the code inverted, read as 0, or another code) |
+| ROUTE-0x, after a run | `julia --project scripts/lignes_routage.jl [session folder] [s]` (latest session by default; also in the debug report) | What the NI really drove on P0.0 and P0.4–P0.7, read back by the AI (readback.bin): the code written during scans and pauses, the code the cards should read, and whether the NI writes the programmed code — then a card reading another one, or 0, loses it after the BOB |
 | IMG-0x, image size | `julia -t 4 scripts/spc/horloges_scanner.jl "<scanner setting>" [s]` | The scanner's line and frame clocks, lines per frame, the setting recognized in `reglages_scanner`; with a sample, where the photons fall in the whole frame |
 
 ## Problem codes
@@ -110,9 +111,9 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 
 | Code | Problem | What to check |
 |---|---|---|
-| ROUTE-01 | Photons in passes carry the reserved code 0: no routing code received | P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0. |
+| ROUTE-01 | Photons in passes carry the reserved code 0: no routing code received | P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0. The debug report's "Routing lines read back" (or scripts/lignes_routage.jl) tells which: if the NI drives the code, the loss is after the BOB. |
 | ROUTE-02 | The cards read the inverted routing code | Set inverser_routage the other way in config/spc.toml ([clamp]). |
-| ROUTE-03 | A routing line looks stuck | The message names the line (R<b> = P0.<4+b>) and whether it is never or always high: that wire, pin or connector. |
+| ROUTE-03 | A routing line looks stuck | The message names the line (R<b> = P0.<4+b>) and whether it is never or always high: that wire, pin or connector. "Routing lines read back" (debug report) shows whether the NI drives it. |
 | ROUTE-04 | Photons carry routing codes the NI doesn't write | Lines swapped between NI and cards (bit order), or crosstalk; the message lists the codes seen and written. |
 | ROUTE-05 | Passes whose routing code is none of this run's ROIs: not analyzed | See ROUTE-02 to ROUTE-04; the message lists the codes seen. |
 

@@ -115,11 +115,11 @@ const PROBLEM_LIST = Problem[
             "The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault)."),
     # --- Routing code (P0.4–P0.7 → R0–R3) ---
     Problem("ROUTE-01", "Photons in passes carry the reserved code 0: no routing code received",
-            "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0."),
+            "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0. The debug report's \"Routing lines read back\" (or scripts/lignes_routage.jl) tells which: if the NI drives the code, the loss is after the BOB."),
     Problem("ROUTE-02", "The cards read the inverted routing code",
             "Set inverser_routage the other way in config/spc.toml ([clamp])."),
     Problem("ROUTE-03", "A routing line looks stuck",
-            "The message names the line (R<b> = P0.<4+b>) and whether it is never or always high: that wire, pin or connector."),
+            "The message names the line (R<b> = P0.<4+b>) and whether it is never or always high: that wire, pin or connector. \"Routing lines read back\" (debug report) shows whether the NI drives it."),
     Problem("ROUTE-04", "Photons carry routing codes the NI doesn't write",
             "Lines swapped between NI and cards (bit order), or crosstalk; the message lists the codes seen and written."),
     Problem("ROUTE-05", "Passes whose routing code is none of this run's ROIs: not analyzed",
@@ -396,7 +396,7 @@ function alert_problem_id(text::AbstractString)::String
     has("reglages_scanner") && return "IMG-02"
     has("m3 − m0") && return "PASS-05"
     has("sans correspondante") && return "PASS-06"
-    has("sans marqueur de fin") && return "PASS-04"
+    (has("sans marqueur de fin") || has("interrompue") || has("hors cadence") || has("m0 manquant")) && return "PASS-04"
     has("hors des passes") && return "PASS-08"
     has("réglages illisibles") && return "ENV-04"
     return "SPC-06"
