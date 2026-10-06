@@ -1,342 +1,127 @@
-FLIMApp debug report — 2026-10-02T12:02:12.337
-Problem codes: DEBUGGING.md (what each one means, what to check).
+== Cartes NI ==
+  Dev1     PCIe-6321    n° de série 1C31C12
+  S6110    PCI-6110     n° de série 1BC9D93
 
-==============================================================================
-Versions and environment
-==============================================================================
-  flimapp                   0.1.0
-  flimcore                  7
-  git_commit                64d04be
-  git_dirty                 false
-  julia                     1.13.1
-  spclite                   8
-  OS                        NT x86_64-w64-mingw32
-  threads                   1 interactive + 4 default
-  offline                   no
-  debug log                 C:\Users\Admin\FLIMApp_journal\debug\2026-10-02_120121_debug.log
-  journal                   C:\Users\Admin\FLIMApp_journal
-  recording folder          C:\Users\Admin\FLIMApp_spc
-  free space                59.4 GB free ≈ 2.1 h at 1 Mcps × 2 card(s)
-  memory peak               1526.0 MB
+== Cartes SPC (DLL : C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll) ==
+  module 0 : SPC-150N    n° de série 3N0317     bus PCI   4, slot  5, utilisé  1 : prête
+             EEPROM : type « SPC-150N », date « 13.03.2020 » ; SPC_test_id : 151 (SPC-150N)
+  module 1 : SPC-150N    n° de série 3N0318     bus PCI   4, slot  4, utilisé  1 : prête
+             EEPROM : type « SPC-150N », date « 13.03.2020 » ; SPC_test_id : 151 (SPC-150N)
+  module 2 : SPC-QC-104  n° de série 3T0089     bus PCI  23, slot  0, utilisé  1 : prête
+             EEPROM : type « SPC-QC-104 », date « 15.04.2025 » ; SPC_test_id : 104 (SPC-QC-104)
 
-==============================================================================
-Problems seen (latest first)
-==============================================================================
-  12:02:12 [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 0 (channel 1, 3N0317): 100 % of the 8693492 photons read during passes carry code 0 (×4)
-           check: P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0.
-  12:02:12 [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 1 (channel 2, 3N0318): 100 % of the 181110 photons read during passes carry code 0 (×4)
-           check: P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0.
-  12:02:12 [SPC-06] SPC engine error: SPC engine: module 0 : 1 passe(s) interrompue(s) par un M0 (cadence du signal de passe changée), ignorées
-           check: The message gives the step and the DLL function with its code; the debug log has the stack trace.
+  Cartes de types différents : la DLL n'en pilote qu'un type à la fois. Les scripts qc* prennent la QC-104 seule (types = (TYPE_QC104,)) ; pour les anciens scripts SPC-150N, ajoute types = (151,) à avec_spc / avec_spc_tous.
 
-==============================================================================
-Run
-==============================================================================
-  mode                      Realtime
-  running / open            false / false
-  run folder                C:\Users\Admin\FLIMApp_spc\sessions\2026-10-02_120204
-  ROI visiting order        Int64[]
-  ROIs                      
-  image size                (1024, 1024)
-  frames shown              17 (lost by the display: 0)
+RÉUSSI : la QC-104 répond. Suite : qc2_parametres.jl.
 
-==============================================================================
-DAQ loop
-==============================================================================
-  state                     ready — stopped
-  bench config              C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\config\bench.toml (ni)
-  slots played              17
-  iteration max             0.27 ms
-  margin min                239.6 ms of 250.0 ms
-  last slot                 slot 16, ROI 0, visit 16, commands 1.374004455 / 0.0 V
-  journal                   13 pending, 0 dropped
 
-==============================================================================
-SPC engine
-==============================================================================
-  state                     ready
-  settings                  C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\config\spc.toml
-  source                    cartes
-  check                     source cartes, all passed
-    module 0: serial 3N0317, channel 1, ready, SYNC 1, CFD 2.8e+06 /s
-    module 1: serial 3N0318, channel 2, ready, SYNC 1, CFD 4.63e+04 /s
-    rates module 0: SYNC 8.02e+07 /s, CFD 2.81e+06 /s, TAC 2.12e+06 /s, ADC 2.02e+06 /s, FIFO 0 %, SYNC state 1
-    rates module 1: SYNC 8.02e+07 /s, CFD 4.64e+04 /s, TAC 4.61e+04 /s, ADC 4.17e+04 /s, FIFO 0 %, SYNC state 1
-  alerts (oldest first):
-    12:02:12 avertissement module 0: module 0 : 1 passe(s) interrompue(s) par un M0 (cadence du signal de passe changée), ignorées
-  last measurement          clamp: arrêtée après 17 passe(s)
 
-==============================================================================
-Realtime: what the cards received
-==============================================================================
-  Realtime counters at 4.5 s (end): 17 pass(es) published, codes written [1], scan 240.000 ms, M0 only (pass = scan after M0)
-    card 0 ch1 3N0317: photons 9125538, M0 18 M1 0 M2 0 M3 0, passes 17 (abandoned 1, off 0, unpaired 0, queued 0)
-      pass 240.000…240.000 ms, M0 → M0 250.003…250.003 ms, M0 missing 0, thrown (code 0) 9125538, outside passes 0, GAP 0; in passes by code: 0:8693492
-    card 1 ch2 3N0318: photons 190331, M0 18 M1 0 M2 0 M3 0, passes 18 (abandoned 0, off 0, unpaired 0, queued 1)
-      pass 240.000…240.000 ms, M0 → M0 250.002…250.002 ms, M0 missing 0, thrown (code 0) 190331, outside passes 0, GAP 0; in passes by code: 0:181110
-  diagnosis: 
-    [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 0 (channel 1, 3N0317): 100 % of the 8693492 photons read during passes carry code 0
-    [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 1 (channel 2, 3N0318): 100 % of the 181110 photons read during passes carry code 0
+Module 2 : bus PCI 23, slot 0
+SPC_test_id : 104 (SPC-QC-104)
+EEPROM : type « SPC-QC-104 », n° de série « 3T0089 », date « 15.04.2025 »
 
-==============================================================================
-Analysis worker
-==============================================================================
-  passes analyzed           17
-  fits failed               channel 1: 0, channel 2: 0
-  kept out of the PI        0
-  not analyzed (code)       0, codes mask 0
-  most passes waiting       0
-  longest pass analysis     0.2 ms
+Aller : reglages_qc.jl → SPC_init → relecture
+  seuil IN1 (mV)                -50.0 → -50.98     (cfd_limit_low)
+  zéro IN1 (mV)                   0.0 → 0          (tac_limit_high)
+  décalage IN1 (ns)               0.0 → 0          (tdc_offset1)
+  seuil IN2 (mV)                -50.0 → -50.98     (cfd_limit_high)
+  zéro IN2 (mV)                   0.0 → 0          (sync_holdoff)
+  décalage IN2 (ns)               0.0 → 0          (tdc_offset2)
+  seuil IN3 (mV)                -50.0 → -50.98     (cfd_zc_level)
+  zéro IN3 (mV)                   0.0 → 0          (cfd_holdoff)
+  décalage IN3 (ns)               0.0 → 0          (tdc_offset3)
+  seuil SYNC (mV)               -50.0 → -50.98     (sync_threshold)
+  zéro SYNC (mV)                  0.0 → 0          (sync_zc_level)
+  décalage SYNC (ns)              0.0 → 0          (tdc_offset4)
+  plage du TDC (ns)            16.384 → 16.385     (tac_range)
+  diviseur du SYNC                  1 → 1          (sync_freq_div)
+  retard du routage (ns)            0 → 0          (ext_latch_delay)
+  contrôle du TDC              196784 → 1.9678e+05 (tdc_control)
+  tdc_control appliqué : entrées actives : IN1, IN2, SYNC ; routage sur : IN1, IN2 ; détection multiphoton
 
-==============================================================================
-IRF
-==============================================================================
-  loaded                    yes, 2 channel(s), bin 0.04886091184430619 ns
-  source                    C:\Users\Admin\Desktop\justin\2026-04-30_IRF_40X\750nm_gain4_40X.sdt
-    channel 1: card 3N0317; cfd_limit_high=5.019608020782471, cfd_limit_low=-139.21568298339844, cfd_zc_level=12.850393295288086, sync_freq_div=1.0, sync_threshold=-70.5882339477539, sync_zc_level=-6.803149700164795, tac_gain=4.0, tac_limit_high=94.90196228027344, tac_limit_low=5.098039150238037, tac_offset=3.3333332538604736, tac_range=50.033573728569536
-    channel 2: card 3N0318; cfd_limit_high=5.019608020782471, cfd_limit_low=-139.21568298339844, cfd_zc_level=12.850393295288086, sync_freq_div=1.0, sync_threshold=-70.5882339477539, sync_zc_level=-6.803149700164795, tac_gain=4.0, tac_limit_high=94.90196228027344, tac_limit_low=5.098039150238037, tac_offset=3.3333332538604736, tac_range=50.033573728569536
-  declared [dcc] then       Dict{String, Any}("sorties_numeriques" => "b0", "refroidissement_v" => 5.0, "module" => "M1", "refroidissement_a" => 1.98, "gain_c1_pourcent" => 82.0, "gain_c3_pourcent" => 82.0)
-  compared with the current settings: same
+Mode FIFO (1) : flux de type 11 (11 = FIFO_TDC attendu) ok ; mt_clock brut 2048131 ; tic retenu 2.048 ns (manuel DLL : 2,048 ns, vérifié par qc4 et qc5)
+Largeur d'un canal du microtemps : 4.00 ps (plage relue / 4096)
 
-==============================================================================
-Settings (layout, controller, protocol)
-==============================================================================
-  [layout] binning=1, plot1=Histogram, plot1_ch1=true, plot1_ch2=false, plot2=Command, plot2_ch1=true, plot2_ch2=false, smoothing=0, time_range=100
-  [controller] I1=1.0, I2=0.0, P1=10.0, P2=0.0, ch1_inv=true, ch1_mode=Analog, ch1_on=true, ch1_out=Out 1, ch2_inv=false, ch2_mode=Digital, ch2_on=false, ch2_out=Out 2, freq=1000
-  [protocol] PWM_frequency=1000, active=true, delay=0, points_per_roi=1000, repeats=0, scan_time=240, setpoints=[1.0, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN], shift_time=10, spiral_turns=10, times=[100.0, 100.0, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]
-  [roi] active=false, v_max_x=900, v_max_y=-1800, v_min_x=-1400, v_min_y=800
+Retour : valeurs B → SPC_set_parameters → relecture
+  seuil IN1 (mV)                -80.0 → -80.392    (cfd_limit_low)
+  zéro IN1 (mV)                  10.0 → 9.8268     (tac_limit_high)
+  décalage IN1 (ns)             1.024 → 1.024      (tdc_offset1)
+  seuil IN2 (mV)                -40.0 → -39.216    (cfd_limit_high)
+  zéro IN2 (mV)                 -10.0 → -9.8268    (sync_holdoff)
+  décalage IN2 (ns)             2.048 → 2.048      (tdc_offset2)
+  seuil IN3 (mV)               -120.0 → -119.61    (cfd_zc_level)
+  zéro IN3 (mV)                  20.0 → 19.654     (cfd_holdoff)
+  décalage IN3 (ns)             0.512 → 0.512      (tdc_offset3)
+  seuil SYNC (mV)               -30.0 → -29.412    (sync_threshold)
+  zéro SYNC (mV)                  5.0 → 5.2913     (sync_zc_level)
+  décalage SYNC (ns)            3.072 → 3.072      (tdc_offset4)
+  plage du TDC (ns)            32.768 → 32.77      (tac_range)
+  diviseur du SYNC                  2 → 2          (sync_freq_div)
+  retard du routage (ns)            8 → 8          (ext_latch_delay)
+  contrôle du TDC             1442000 → 1.442e+06  (tdc_control)
+  tdc_control appliqué : entrées actives : IN1, IN3, SYNC ; routage sur : IN2, IN3 ; un photon par période
 
-==============================================================================
-config/bench.toml (C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\config\bench.toml)
-==============================================================================
-# Bench configuration, read once at startup (scripts/app.jl, run_app).
-#
-# Hardware wiring, timing, safety limits and journal settings. Everything
-# the GUI edits (scan/shift time, points per ROI, galvo voltage range,
-# ROIs, controller gains...) stays in the saved AppState instead.
-# A missing key falls back to the value shown here.
+Mode FIFO temps absolu (13) : flux de type 12 (12 = FIFO_TDC_ABS attendu), mt_clock brut 4000
 
-[hardware]
-# "ni" drives the NI-DAQmx cards. "simulation" keeps everything in memory:
-# the readback returns exactly what was written, paced in real time, so the
-# whole app (loop, journal, display) runs without the cards.
-backend = "ni"
+RÉUSSI : la QC-104 s'identifie et ses paramètres passent dans les deux sens.
 
-[channels]
-galvos = "X6321/ao0:1"                  # AO 0 = galvo X, AO 1 = galvo Y
-lines = "X6321/port0/line0:7"           # sync lines, one bit per line (see src/loop/scan_pattern.jl)
-counter = "X6321/ctr0"                  # counter generating the shared sample clock
-clock = "/X6321/Ctr0InternalOutput"     # ...its output terminal, reaching the 6110 through RTSI
-commands = "S6110/ao0:1"                # AO 0 = PI command 1, AO 1 = PI command 2
-readback = "X6321/ai0:11"               # AI read back every block; paces the loop
-readback_terminal = "RSE"               # RSE, NRSE, Diff, PseudoDiff or Default
-# What each readback channel is wired to, in order: galvo_x, galvo_y,
-# command_1, command_2 or line_0 ... line_7. Used for the journal header,
-# the Readback plot legend and the simulated backend.
-readback_signals = ["galvo_x", "galvo_y", "command_1", "command_2",
-                    "line_0", "line_1", "line_2", "line_3",
-                    "line_4", "line_5", "line_6", "line_7"]
-# Static digital line that opens the shutter while a scan runs (high =
-# open). Empty: no shutter. Keep it outside port 0, e.g. "X6321/port1/line0".
-shutter = ""
-# Pass signal for the SPC-150N: a counter clocked by the AO sample clock,
-# high during each scan, wired to M0 of both cards (rising edge: start of
-# pass), with a common ground (D GND on pin 15); the end of each pass is the
-# programmed scan later — or, with [clamp] fin_par_m3 = true in
-# config/spc.toml, the falling edge of the same signal wired to M3 too.
-# Check the wiring with scripts/test_passes.jl. Empty: no pass signal.
-passes = "X6321/ctr1"
-passes_terminal = ""                    # output PFI; "" = the counter's default, PFI13 (CTR 1 OUT), validated by test_spc4
 
-[timing]
-sample_rate_hz = 10000.0
-block_ms = 20           # readback block: loop period and stop-flag latency
-lead_slots = 0          # slots written ahead of the card; 0 = max(2, number of ROIs)
 
-[limits]
-galvo_v = 5.0                  # any galvo sample beyond this is refused
-command_full_scale_v = 5.0     # output for a 100 % PI command
-command_max_v = 5.0            # AO range declared to NI-DAQmx: it refuses any write beyond
+entrées actives             valeur 1    valeur 2    valeur 3    valeur 4   SYNC
+toutes (reglages_qc.jl)    8.007e+07        1650       467.7           0   SYNC correct
+SYNC seul                  8.007e+07          90          33           0   SYNC correct
+IN1 + SYNC                 8.007e+07        1558           0           0   SYNC correct
+IN2 + SYNC                 8.007e+07       50.33       443.7           0   SYNC correct
+IN3 + SYNC                 8.007e+07           0           4           0   SYNC correct
+IN1 seule, SYNC coupé              0        1614           0           0   SYNC correct
 
-[sync]
-pulse_s = 0.001                # width of the sequence (P0.2) and ROI (P0.3) pulses
+  valeur 1 : SYNC
+  valeur 2 : IN1
+  valeur 3 : IN2
+  valeur 4 : non associée (entrée sans signal, ou compteur insensible)
 
-[watchdog]
-# 6321 watchdog: if the loop stops re-arming it for timeout_s, the lines
-# below (and the shutter) go low. Digital/PFI lines only.
-enabled = true
-timeout_s = 1.0
-lines = "X6321/port0/line0:7"
+RÉUSSI : SYNC correct ; association ci-dessus (note-la, ton GUI en aura besoin).
 
-[journal]
-directory = ""                 # "" = ~/FLIMApp_journal; one folder per run
-readback = true                # every readback sample, Float32: 12 ch at 10 kHz ≈ 29 MB/min
-queue_capacity = 4096          # entries waiting to be written; beyond, they are dropped and counted
-flush_interval_s = 1.0
 
-[display]
-refresh_hz = 30
-autoscale_interval_s = 1.0     # Histogram/Readback limits recomputed at most this often (time series follow every refresh)
-max_points_per_line = 4000     # longer windows are decimated before plotting
 
-==============================================================================
-config/spc.toml (C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\config\spc.toml)
-==============================================================================
-# Réglages des SPC-150N pour FLIMCore (src/spc/FLIMCore.jl), relus à chaque
-# démarrage de mesure. Le GUI réécrit ce fichier quand tu changes un réglage
-# dans la fenêtre SPC : les commentaires sont regénérés, garde tes notes
-# ailleurs.
-#
-# [spc_module] remplace reglages_spc.jl : recopie les valeurs de SPCM
-# (panneau « System Parameters ») qui te donnent un beau déclin. Plages :
-# manuel de la DLL SPCM, section [spc_module]. Une clé inconnue de la DLL
-# est signalée par le tableau « demandé → appliqué ».
+DLL : C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll
+SPC-QC-104 : module 2, n° de série 3T0089
 
-[source]
-type = "cartes"                  # "cartes" (les SPC-150N), "rejeu" (fichiers .spc ci-dessous) ou "simulation"
-rejeu = []                       # fichiers .spc à rejouer, un par carte (écrits par l'imagerie, avec leur _acquisition.ini)
-vitesse = 1.0                    # rejeu et simulation : 1 = temps réel ; 0 = le plus vite possible
-connexion_au_demarrage = true    # le GUI lance le moteur et vérifie les cartes à l'ouverture
+Acquisitions :
+  marqueurs :     64000 enregistrements en 0.5 s ; flux de type 11, mt_clock 2048131
+  in1       :    119936 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
+  in2       :    119232 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
+  controle  :    242176 enregistrements en 2.0 s ; flux de type 11, mt_clock 2048131
 
-[spc_module]
-cfd_limit_low = -139.22          # mV, seuil du CFD (-500 à 0)
-cfd_zc_level = 12.85             # mV, passage par zéro du CFD (-96 à 96)
-rate_count_time = 0.25           # s, intégration des compteurs de taux (relus toutes les 0,5 s)
-sync_freq_div = 1                # diviseur du SYNC : 1, 2 ou 4
-sync_threshold = -70.9           # mV, seuil du SYNC (-500 à -20)
-sync_zc_level = -6.8             # mV, passage par zéro du SYNC (-96 à 96)
-tac_gain = 4                     # 1 à 15 ; fenêtre = tac_range / tac_gain (12,5 ns ici)
-tac_limit_high = 94.9            # % de la fenêtre
-tac_limit_low = 5.1              # % de la fenêtre
-tac_offset = 3.33                # % (0 à 50 pour la SPC-150N)
-tac_range = 50.034               # ns (50 à 5000)
+Décodage par la DLL (arbitre) :
+  marqueurs :        0 photons valides, 0 invalides, marqueurs M0-M3 [2576, 0, 0, 0] ; drapeaux vus 1000 ; fin 2
+  in1       :      682 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
+  in2       :      221 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
+  controle  :     1928 photons valides, 0 invalides, marqueurs M0-M3 [1999, 0, 0, 0] ; drapeaux vus 0 1000 ; fin 2
+  marqueurs : M0 tous les 97649.1 tics → tic de 2.0482 ns (2,048 ns attendu, écart +0.01 %)
+  controle  : M0 tous les 488245.5 tics → tic de 2.0482 ns (2,048 ns attendu, écart +0.01 %)
 
-[verification]
-series = ["3N0317", "3N0318"]    # n° de série du canal 1 puis du canal 2 : identifient les cartes, quel que soit leur n° de module
-seuil_cfd = 100.0                # /s : en dessous, détecteurs éteints (Enable outputs dans le logiciel DCC ?)
+Oracle des préfixes (1500 enregistrements par acquisition) :
+  marqueurs : 1500 enregistrements, 60 entrées (1440 silencieux)
+  in1       : 1500 enregistrements, 13 entrées (1487 silencieux)
+  in2       : 1500 enregistrements, 3 entrées (1497 silencieux)
+  controle  : 1500 enregistrements, 26 entrées (1474 silencieux)
 
-[imagerie]
-modules = [0, 1]                 # cartes enregistrées
-duree_s = 0.0                    # 0 : en continu jusqu'à « Arrêter »
-temps_pixel_ns = 50.0            # pixel_time de SPCM : horloge de pixel interne
-pixels_par_ligne = 1024          # scan_size_x de SPCM : 1024
-decalage_pixels = 21             # scan_borders (gauche) de SPCM : pixels ignorés après chaque début de ligne (retour du balayage)
-lignes_par_image = 0             # scan_size_y de SPCM ; 0 : selon l'horloge de trame (réglage du scanner reconnu dans reglages_scanner)
-decalage_lignes = 32             # scan_borders (haut) de SPCM : lignes ignorées après chaque début de trame (lignes_par_image > 0, ou réglage absent de reglages_scanner)
-ligne_front_montant = true       # front actif de l'horloge de ligne (M1)
-trame_front_montant = true       # front actif de l'horloge de trame (M2)
-reglages_scanner = [[1080, 1024, 32], [540, 512, 16], [270, 256, 8], [144, 128, 9], [72, 60, 7], [36, 24, 7], [20, 8, 7]] # réglages du scanner : [lignes par trame, lignes de l'image, lignes ignorées en haut], pour lignes_par_image = 0 (mesurés avec scripts/spc/horloges_scanner.jl ; lignes du haut à vérifier sauf pour 1024)
+Empreinte des enregistrements (bit 31 à gauche ; 0/1 constant, · variable) :
+  marqueurs marqueurs      60  01000000000000000001···········1
+  marqueurs silencieux   1440  10000000000000000000000000000000
+  in1       photons        13  0000············0000············
+  in1       silencieux   1487  10000000000000000000000000000000
+  in2       photons         3  000101··0·01·00·00001··0·111··1·
+  in2       silencieux   1497  10000000000000000000000000000000
+  controle  photons        13  000·············0000············
+  controle  marqueurs      13  01000000000000000001···········1
+  controle  silencieux   1474  10000000000000000000000000000000
 
-[affichage]
-binning_temps = 4                # pixels regroupés (n × n) pour le temps moyen
-photons_min = 20                 # sous ce nombre de photons, pas de temps moyen
-trames_par_image = 10            # trames additionnées par image affichée ; 0 : tout depuis le début
+ÉCHEC : format non établi.
+  ordre poids faible d'abord : routage introuvable : fils P0.4-P0.7 → broches 2, 3, 4, 7 branchés ? D GND → broche 5 ?
+  ordre poids fort d'abord : routage introuvable : fils P0.4-P0.7 → broches 2, 3, 4, 7 branchés ? D GND → broche 5 ?
+Envoie-moi cette sortie et le dossier c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\format : les fichiers .spc et bloc_*.csv suffisent pour finir l'analyse à la main.
 
-[single]
-modules = [0, 1]                 # cartes mesurées en même temps
-temps_collecte_s = 1.0           # durée de chaque histogramme
-n_histogrammes = 5               # histogrammes successifs, chacun repart de zéro
-resolution_adc = 8               # 8 bits = 256 canaux, la résolution des déclins du Realtime et de l'IRF
-arret_debordement = true         # arrêt dès qu'un canal atteint 65535 coups
-inverser = false                 # déclin à l'envers (montée lente, chute brutale) : true
 
-[clamp]
-canaux = 256                     # canaux des déclins du Realtime (les 4096 du FIFO regroupés) : 256, la résolution de l'IRF
-fin_par_m3 = false               # false : M0 seul, chaque passe dure le scan programmé ; true : sa fin vient de M3 (le même signal de passe câblé aussi sur M3, front descendant)
-inverser_routage = true          # la NI écrit NON(c) sur P0.4-P0.7 et la carte, aux entrées actives à 0 V, lit c
 
-[enregistrement]
-dossier = ""                     # "" : ~/FLIMApp_spc (sous-dossiers imagerie et single)
-flux_brut = true                 # garder le flux FIFO de chaque carte (.spc) : environ 4 octets par photon
-
-[dcc]
-# Réglages du logiciel DCC autonome, déclarés ici : le GUI ne peut pas les
-# lire. Recopiés dans le _acquisition.ini de chaque acquisition.
-gain_c1_pourcent = 82.0
-gain_c3_pourcent = 82.0
-module = "M1"
-refroidissement_a = 1.98
-refroidissement_v = 5.0
-sorties_numeriques = "b0"
-
-==============================================================================
-Debug log: last records (with stack traces)
-==============================================================================
-2026-10-02 12:01:21.780 INFO t1 FLIMApp app.jl:216 | ============================================================
-2026-10-02 12:01:22.446 INFO t1 FLIMApp app.jl:217 | FLIM Application Starting
-2026-10-02 12:01:22.446 INFO t1 FLIMApp app.jl:218 | ============================================================
-2026-10-02 12:01:22.505 INFO t1 FLIMApp app.jl:223 | Bench config loaded
-    source = "C:\\Users\\Admin\\Desktop\\FLIMApp_2\\FLIMApp\\config\\bench.toml"
-    backend = :ni
-2026-10-02 12:01:22.799 INFO t1 FLIMApp FLIMApp.jl:269 | Loaded saved state
-    theme = "dark"
-2026-10-02 12:01:23.082 INFO t1 FLIMApp FLIMApp.jl:293 | IRF loaded successfully
-    channels = 2
-    size = (256, 2)
-    bin_size = 0.04886091184430619
-    window_size = 12.51
-2026-10-02 12:01:23.170 INFO t1 FLIMApp app.jl:233 | Warming up lifetime-fitting code paths (one-time JIT compilation)...
-2026-10-02 12:01:26.587 INFO t1 FLIMApp app.jl:236 | Warmup complete
-    seconds = 3.4
-2026-10-02 12:01:28.669 INFO t1 FLIMApp app.jl:61 | Start-up
-    versions = Dict{String, Any}("flimapp" => "0.1.0", "julia" => "1.13.1", "git_commit" => "64d04be", "spclite" => 8, "git_dirty" => false, "flimcore" => 7)
-    threads = "1 interactive + 4 default"
-    os = "NT x86_64-w64-mingw32"
-    bench_config = "C:\\Users\\Admin\\Desktop\\FLIMApp_2\\FLIMApp\\config\\bench.toml (backend ni)"
-    spc_settings = "C:\\Users\\Admin\\Desktop\\FLIMApp_2\\FLIMApp\\config\\spc.toml (source cartes)"
-    nidaqmx = "C:\\WINDOWS\\SYSTEM32\\nicaiu.DLL"
-    spc_dll = "C:\\Program Files (x86)\\BH\\SPCM\\DLL\\spcm64.dll"
-    journal = "C:\\Users\\Admin\\FLIMApp_journal"
-    recording_folder = "C:\\Users\\Admin\\FLIMApp_spc"
-    debug_log = "C:\\Users\\Admin\\FLIMApp_journal\\debug\\2026-10-02_120121_debug.log"
-2026-10-02 12:01:29.052 INFO t1 FLIMApp app.jl:261 | Creating GUI...
-2026-10-02 12:01:31.635 INFO t3 FLIMApp hardware.jl:106 | NI-DAQmx 26.5.0; devices: S6110 (PCI-6110), X6321 (PCIe-6321); config needs X6321, S6110
-2026-10-02 12:01:45.584 INFO t1 FLIMApp FLIMApp.jl:184 | State saved
-    path = "C:\\Users\\Admin\\.flimapp\\AppState.jls"
-2026-10-02 12:01:54.671 INFO t1 FLIMApp spc_view.jl:506 | SPC check
-    source = "cartes"
-    ok = true
-    cards = "module 0: 3N0317 channel 1 ready, SYNC 1, CFD 2.8e+06; module 1: 3N0318 channel 2 ready, SYNC 1, CFD 4.63e+04"
-2026-10-02 12:01:54.889 INFO t1 FLIMApp app.jl:268 | Debug log: C:\Users\Admin\FLIMApp_journal\debug\2026-10-02_120121_debug.log
-2026-10-02 12:01:57.024 INFO t1 FLIMApp app.jl:274 | ============================================================
-2026-10-02 12:01:57.133 INFO t1 FLIMApp app.jl:275 | Application ready
-2026-10-02 12:01:57.139 INFO t1 FLIMApp app.jl:276 | ============================================================
-2026-10-02 12:02:04.214 INFO t1 FLIMApp runtime.jl:369 | Starting acquisition
-2026-10-02 12:02:04.960 INFO t1 FLIMApp runtime.jl:402 | Realtime run started
-    session = "C:\\Users\\Admin\\FLIMApp_spc\\sessions\\2026-10-02_120204"
-    rois = 0
-    order = Int64[]
-    roi_active = false
-    scan_ms = 240
-    shift_ms = 10
-2026-10-02 12:02:06.107 WARN t5 FLIMApp daq_loop.jl:280 | deadline of 250.0 ms leaves little room for garbage-collector pauses; longer slots or a larger timing.lead_slots (config/bench.toml) give more
-2026-10-02 12:02:07.599 INFO t3 FLIMApp acquisition.jl:376 | Real-time worker started on thread 3
-2026-10-02 12:02:09.645 ERROR t1 FLIMApp diagnostics.jl:222 | [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 0 (channel 1, 3N0317): 100 % of the 1867133 photons read during passes carry code 0
-    problem = "ROUTE-01"
-    check = "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0."
-2026-10-02 12:02:09.651 ERROR t1 FLIMApp diagnostics.jl:222 | [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 1 (channel 2, 3N0318): 100 % of the 38876 photons read during passes carry code 0
-    problem = "ROUTE-01"
-    check = "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0."
-2026-10-02 12:02:10.538 ERROR t1 FLIMApp diagnostics.jl:222 | [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 0 (channel 1, 3N0317): 100 % of the 3801137 photons read during passes carry code 0
-    problem = "ROUTE-01"
-    check = "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0."
-2026-10-02 12:02:10.540 ERROR t1 FLIMApp diagnostics.jl:222 | [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 1 (channel 2, 3N0318): 100 % of the 80011 photons read during passes carry code 0
-    problem = "ROUTE-01"
-    check = "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0."
-2026-10-02 12:02:11.545 ERROR t1 FLIMApp diagnostics.jl:222 | [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 0 (channel 1, 3N0317): 100 % of the 5735814 photons read during passes carry code 0
-    problem = "ROUTE-01"
-    check = "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0."
-2026-10-02 12:02:11.547 ERROR t1 FLIMApp diagnostics.jl:222 | [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 1 (channel 2, 3N0318): 100 % of the 118942 photons read during passes carry code 0
-    problem = "ROUTE-01"
-    check = "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0."
-2026-10-02 12:02:12.175 INFO t1 FLIMApp runtime.jl:609 | Stopping acquisition
-2026-10-02 12:02:12.186 INFO t3 FLIMApp acquisition.jl:485 | Real-time worker finished
-2026-10-02 12:02:12.255 WARN t1 FLIMApp diagnostics.jl:226 | [SPC-06] SPC engine error: SPC engine: module 0 : 1 passe(s) interrompue(s) par un M0 (cadence du signal de passe changée), ignorées
-    problem = "SPC-06"
-    check = "The message gives the step and the DLL function with its code; the debug log has the stack trace."
-2026-10-02 12:02:12.329 ERROR t1 FLIMApp diagnostics.jl:222 | [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 0 (channel 1, 3N0317): 100 % of the 8693492 photons read during passes carry code 0
-    problem = "ROUTE-01"
-    check = "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0."
-2026-10-02 12:02:12.329 ERROR t1 FLIMApp diagnostics.jl:222 | [ROUTE-01] Photons in passes carry the reserved code 0: no routing code received: card 1 (channel 2, 3N0318): 100 % of the 181110 photons read during passes carry code 0
-    problem = "ROUTE-01"
-    check = "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0."
