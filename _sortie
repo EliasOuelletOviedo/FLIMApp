@@ -17,69 +17,63 @@ Réglages appliqués :
   plage du TDC (ns)            16.384 → 16.385     (tac_range)
   diviseur du SYNC                  1 → 1          (sync_freq_div)
   retard du routage (ns)            0 → 0          (ext_latch_delay)
+  limite basse (% plage)          0.0 → 0          (tac_limit_low)
   contrôle du TDC              196784 → 1.9678e+05 (tdc_control)
   tdc_control appliqué : entrées actives : IN1, IN2, SYNC ; routage sur : IN1, IN2 ; détection multiphoton
 
 SYNC : SYNC correct
 
-Photons : 145188 en 2.5 s (IN1 134084, IN2 11104, IN3 0) ; rejetés 0 ; inattendus 0 ; pertes 0
+Photons : 171842 en 2.5 s (IN1 154140, IN2 17702, IN3 0) ; rejetés 0 ; inattendus 0 ; pertes 0
 Marqueurs : M0 200, M1 0, M2 0, M3 200 (attendu 200 M0 et 200 M3)
   tic mesuré : 2.04815 ns (retenu 2.04800 ns, écart +0.007 %)
   M3 - M0 : 0.999938 ms en moyenne, de 0.999936 à 0.999940 ms (attendu 1.000 ms)
 
 Déclins : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q5_declins.svg ; canal de 4.00 ps
-  IN1 : pic à 1.646 ns, temps moyen 4.349 ns
-  IN2 : pic à 1.854 ns, temps moyen 4.791 ns
+  IN1 : pic à 1.426 ns, temps moyen 3.726 ns ; photons des canaux 0 à 3127 (0.000 à 12.513 ns)
+  IN2 : pic à 0.738 ns, temps moyen 3.149 ns ; photons des canaux 1 à 3124 (0.004 à 12.501 ns)
+  limite basse de la fenêtre (tac_limit_low) : 0 % de la plage
+Sens du microtemps (largeurs à 20 % du pic) :
+  IN1 : montée 0.19 ns, descente 1.66 ns → sens correct (le temps croît avec le canal)
+  IN2 : montée 0.13 ns, descente 1.54 ns → sens correct (le temps croît avec le canal)
 
 Routage : code écrit 0101, valeur la plus fréquente 1010 pour 100.0 % des photons
   ok : le routage lu est le complément du code (entrées actives à l'état bas), comme sur les SPC-150N.
 
-DLL : 145188 photons, marqueurs [200, 0, 0, 200] ; SPCLite : 145188 photons, marqueurs [200, 0, 0, 200]  identiques
+Décodage de contrôle par la DLL (un appel par photon, patience)…
+DLL : 171842 photons, marqueurs [200, 0, 0, 200] ; SPCLite : 171842 photons, marqueurs [200, 0, 0, 200]
+  identiques un à un (temps, microtemps, routage, entrée de chaque photon ; temps de chaque marqueur)
 
-RÉUSSI : photons, déclins, marqueurs et routage conformes. Ouvre q5_declins.svg.
+RÉUSSI : photons, déclins, marqueurs et routage conformes ; format_fifo_qc104.jl confirmé. Ouvre q5_declins.svg.
 true
 
-Mémoire : 1024 blocs, 1 blocs par trame, 1 trames par page, 1024 pages, 4096 mots par bloc
-ERROR: SPC -14 dans SPC_read_data_block : wrong value of 2nd function parameter
-Stacktrace:
-  [1] chk_spc
-    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:153 [inlined]
-  [2] lire_bloc(m::Int16, n::Int64; bloc::Int64, page::Int64)
-    @ Main.SPCLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:1088
-  [3] lire_bloc
-    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:1086 [inlined]
-  [4] #mesure_single_qc6##0
-    @ .\none:-1 [inlined]
-  [5] iterate
-    @ .\generator.jl:48 [inlined]
-  [6] collect_to!
-    @ .\array.jl:886 [inlined]
-  [7] collect_to_with_first!
-    @ .\array.jl:864 [inlined]
-  [8] collect(itr::Base.Generator{UnitRange{Int64}, var"#mesure_single_qc6##0#mesure_single_qc6##1"{Int16, Int64}})
-    @ Base .\array.jl:838
-  [9] WARNING: Detected access to binding `Main.mesure_single_qc6` in a world prior to its definition world.
-  Julia 1.12 has introduced more strict world age semantics for global bindings.
-  !!! This code may malfunction under Revise.
-  !!! This code will error in future versions of Julia.
-Hint: Add an appropriate `invokelatest` around the access to this binding.
-To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-mesure_single_qc6(m::Int16, r::@NamedTuple{…}, nblocs::Int64, npoints::Int64)
-    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc6_single.jl:35
- [10] (::var"#test_qc6##1#test_qc6##2"{@NamedTuple{…}, Vector{…}, var"#ini#test_qc6##0"{…}, String})(modules::Vector{Int16})
-    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc6_single.jl:68
- [11] avec_spc_tous(f::var"#test_qc6##1#test_qc6##2"{…}, ini::String; types::Tuple{…}, forcer::Bool)
-    @ Main.SPCLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:501
- [12] avec_spc_tous
-    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:483 [inlined]
- [13] WARNING: Detected access to binding `Main.test_qc6` in a world prior to its definition world.
-  Julia 1.12 has introduced more strict world age semantics for global bindings.
-  !!! This code may malfunction under Revise.
-  !!! This code will error in future versions of Julia.
-Hint: Add an appropriate `invokelatest` around the access to this binding.
-To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-test_qc6(r::@NamedTuple{…}, reglages::Dict{…})
-    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc6_single.jl:47
- [14] top-level scope
-    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc6_single.jl:108
-Some type information was truncated. Use `show(err)` to see complete types.
+Canal de 4.00 ps ; limite basse de la fenêtre (tac_limit_low) : 0.0 %
+
+Mémoire avec 0 bits de routage : 1 blocs par page, 1024 pages, 4096 mots par bloc
+  IN1 seule   : page 0 bloc 0 : 60127
+  IN2 seule   : aucun coup
+  IN1 et IN2  : page 0 bloc 0 : 59468
+  IN1 → page 0, bloc 0 (100.0 % de ses 60127 coups)
+  IN2 : aucun coup (détecteur, seuil, lumière ?)
+  Courbes (IN1 et IN2 actives) : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q6_single_r0.csv
+
+Mémoire avec 2 bits de routage : 4 blocs par page, 256 pages, 4096 mots par bloc
+  IN1 seule   : page 0 bloc 0 : 59890
+  IN2 seule   : aucun coup
+  IN1 et IN2  : page 0 bloc 0 : 59908
+  IN1 → page 0, bloc 0 (100.0 % de ses 59890 coups)
+  IN2 : aucun coup (détecteur, seuil, lumière ?)
+  Courbes (IN1 et IN2 actives) : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q6_single_r2.csv
+
+Mémoire avec 4 bits de routage : 16 blocs par page, 64 pages, 4096 mots par bloc
+  IN1 seule   : page 0 bloc 0 : 59769
+  IN2 seule   : aucun coup
+  IN1 et IN2  : page 0 bloc 0 : 59980
+  IN1 → page 0, bloc 0 (100.0 % de ses 59769 coups)
+  IN2 : aucun coup (détecteur, seuil, lumière ?)
+  Courbes (IN1 et IN2 actives) : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q6_single_r4.csv
+
+Bilan :
+  0 bits : IN1 et IN2 non séparés
+  2 bits : IN1 et IN2 non séparés
+  4 bits : IN1 et IN2 non séparés
+INCOMPLET : colle la sortie dans la conversation.
