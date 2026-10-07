@@ -45,7 +45,7 @@ module SPCLite
 using Libdl, Printf
 
 """Version de ce fichier : les scripts s'arrêtent si Julia en a chargé une plus ancienne."""
-const VERSION_LITE = 9
+const VERSION_LITE = 10
 
 export SPCError, chk_spc, message_erreur, DLL_SPCM
 export ecrire_ini, lire_ini, avec_spc, avec_spc_tous, initialiser, liberer, liberer_tous
@@ -939,8 +939,37 @@ end
 # Mesure FIFO
 # =====================================================================
 
-demarrer(m::Integer) = chk_spc(ccall((:SPC_start_measurement, DLL_SPCM), Int16, (Int16,),
-                                     Int16(m)), "SPC_start_measurement")
+_start(m) = Int(ccall((:SPC_start_measurement, DLL_SPCM), Int16, (Int16,), Int16(m)))
+
+"""
+Démarre la mesure. Si la carte refuse de s'armer (code -20, « cannot arm »,
+vu sur la QC-104), arrête une éventuelle mesure restée armée et réessaie une
+fois. En cas d'échec, l'erreur donne les bits d'état et l'état du SYNC.
+"""
+function demarrer(m::Integer)
+    r = _start(m)
+    if r == -20
+        try; ccall((:SPC_stop_measurement, DLL_SPCM), Int16, (Int16,), Int16(m)); catch; end
+        sleep(0.1)
+        r = _start(m)
+    end
+    if r < 0
+        etat = try
+            "0x" * string(etat_mesure(m); base = 16, pad = 4)
+        catch
+            "?"
+        end
+        sync = try
+            s = sync_etat(m)
+            get(MESSAGES_SYNC, s, string(s))
+        catch
+            "?"
+        end
+        throw(SPCError(r, "SPC_start_measurement",
+                       message_erreur(r) * " (état $etat, $sync ; réessayé une fois après SPC_stop_measurement)"))
+    end
+    return r
+end
 
 """Arrête la mesure. En mode FIFO, l'arrêt vide le FIFO : lire avant d'arrêter."""
 arreter(m::Integer) = chk_spc(ccall((:SPC_stop_measurement, DLL_SPCM), Int16, (Int16,),
