@@ -1,35 +1,19 @@
-Séquence : 40 cycles de 16 régions = 640 passes, 4.01 s ; ordre des routes : 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
-  passes de 2.0 à 9.5 ms, transit de 0.50 ms ; images de 16 × 16 pixels
-Format : SPC-QC-104 (FIFO, format établi par qc4)
-SYNC : SYNC correct
-
-Photons : 6071989 (IN1 1491500, IN2 4580489) ; inattendus 0
-Marqueurs : M0 640, M3 640 (attendu 640 de chaque)
-  passes : écart max à la durée programmée 0.0073 % ; transit moyen 0.5000 ms (programmé 0.500 ms)
-
- route  rang  passe (ms)  mesurée (ms)  photons IN1  photons IN2  photons/ms  t moyen IN1  t moyen IN2  mauvaise route
-     0     1        2.00        1.9999        24001        71989      1199.9     3.607 ns     2.917 ns               0
-     1     2        2.50        2.4998        22738        71817       945.6     3.695 ns     2.899 ns               2
-     2     3        3.00        2.9998        32474       109428      1182.6     3.591 ns     2.856 ns               0
-     3     4        3.50        3.4998        44177       142537      1333.8     3.588 ns     2.822 ns               1
-     4     5        4.00        3.9997        60855       210634      1696.9     3.505 ns     2.810 ns               2
-     5     6        4.50        4.4997        77527       193753      1507.2     3.623 ns     3.036 ns               2
-     6     7        5.00        4.9996        48104       157065      1025.9     3.635 ns     2.874 ns               0
-     7     8        5.50        5.4996        69959       232248      1373.8     3.568 ns     2.820 ns               1
-     8     9        6.00        5.9996       112177       311955      1767.3     3.609 ns     2.959 ns               0
-     9    10        6.50        6.4995        63970       205067      1034.8     3.633 ns     2.880 ns               2
-    10    11        7.00        6.9995        92291       313323      1448.7     3.566 ns     2.804 ns               0
-    11    12        7.50        7.4995       128273       348853      1590.5     3.608 ns     2.986 ns               0
-    12    13        8.00        7.9994        86847       283848      1158.5     3.597 ns     2.857 ns               0
-    13    14        8.50        8.4994       143335       424112      1669.1     3.574 ns     2.905 ns               0
-    14    15        9.00        8.9994        92768       302161      1097.1     3.599 ns     2.871 ns               1
-    15    16        9.50        9.4993       153665       469633      1640.4     3.562 ns     2.883 ns               2
-
-Routage dans les passes : 99.9997 % des photons sur la route de leur région (5101571 sur 5101584)
-Hors des passes (transit) : 970405 photons, dont 100.00 % déjà sur la route de la région suivante
-Taux pendant les passes : 1386.4 photons/ms en moyenne, écart max d'une route 31.79 %
-IN1 : 88.8 à 600.3 photons par pixel selon la route
-Mosaïque : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q7_mosaique.svg
-Tableaux : q7_routes.csv, q7_images.csv ; données brutes : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q7_sequence.spc
-
-ÉCHEC partiel : voir les lignes ci-dessus ; colle la sortie dans la conversation.
+# format_fifo_qc104.jl — écrit par qc4_format_fifo.jl, ne pas modifier à la main.
+# SPC-QC-104 n° 3T0089, DLL C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll
+# valeur de IN3 déduite (2), non observée
+# M1, M2 déduits de M0 et M3 (non observés)
+# sens du temps indéterminé (peu de photons ?) : supposé croissant, comme le dit le manuel
+# aucun photon invalide observé : bit_invalide inconnu
+# bit de perte (FIFO plein) non observé : les pertes se lisent par SPC_FOVFL
+isdefined(Main, :SPCLite) || include("SPCLite.jl")
+using .SPCLite
+FORMAT_QC104 = FormatFIFO(
+    nom = "SPC-QC-104 (FIFO, format établi par qc4)",
+    mots_inverses = false,
+    macrotemps = (0, 12), microtemps = (16, 12), micro_inverse = false,
+    routage = (12, 4), voie = (28, 2), valeurs_voie = (0, 1, 2, -1),
+    bit_invalide = -1, bit_mtov = -1, bit_perte = -1,
+    masque_debord = 0xc0000000, valeur_debord = 0x80000000, compte = (0, 0),
+    masque_marqueur = 0x40000000, valeur_marqueur = 0x40000000, bits_marqueurs = (12, 13, 14, 15),
+    masque_photon = 0x40000000, valeur_photon = 0x00000000,
+    verification = "vérifié le 2026-10-07 11:28 sur la QC-104 n° 3T0089 : 189933 photons et 9057 marqueurs identiques à la DLL (spcm64.dll)")
