@@ -35,6 +35,7 @@ const TEXT    = parse(RGB{Float64}, DARK_MODE_THEME[:text])
 const PLOT_COLOR_CH1 = Makie.wong_colors()[1]
 const PLOT_COLOR_CH2 = Makie.wong_colors()[2]
 const PLOT_COLOR_REF = Makie.wong_colors()[3]
+const PLOT_COLOR_IRF = Makie.wong_colors()[6]   # the IRF on the Histogram plot (both channels)
 
 # Line width for every plotted trace (data lines, ROI outlines, protocol
 # preview lines) — single source of truth so line thickness changes

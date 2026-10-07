@@ -445,6 +445,88 @@ function save_imported_irf(irfs, channels, filepath::AbstractString, spc::FLIMCo
     return irfs, info
 end
 
+"""The IRF of a file, by its kind: a Single's CSV, an SPCM .sdt of the QC-104, or of SPC-150N."""
+function read_irf_file(filepath::AbstractString, spc::FLIMCore.Reglages)
+    endswith(lowercase(filepath), ".csv") && return read_single_irf(filepath; series = spc.series)
+    return FLIMCore.est_qc104(spc) ? read_sdt_irf_qc(filepath, spc) : read_sdt_irf(filepath; series = spc.series)
+end
+
+"""
+Where each QC-104 setting of an IRF's record (the DLL's names,
+`IRF_QC_SETTINGS`) goes in [qc]: (field of `Reglages`, index in its
+quadruplet IN1, IN2, IN3, SYNC; 0 for a single value).
+"""
+const IRF_QC_FIELDS = Dict{String, Tuple{Symbol, Int}}(
+    "cfd_limit_low" => (:qc_seuil_mV, 1), "cfd_limit_high" => (:qc_seuil_mV, 2),
+    "cfd_zc_level" => (:qc_seuil_mV, 3), "sync_threshold" => (:qc_seuil_mV, 4),
+    "tac_limit_high" => (:qc_zc_mV, 1), "sync_holdoff" => (:qc_zc_mV, 2),
+    "cfd_holdoff" => (:qc_zc_mV, 3), "sync_zc_level" => (:qc_zc_mV, 4),
+    "tdc_offset1" => (:qc_decalage_ns, 1), "tdc_offset2" => (:qc_decalage_ns, 2),
+    "tdc_offset3" => (:qc_decalage_ns, 3), "tdc_offset4" => (:qc_decalage_ns, 4),
+    "tac_range" => (:qc_plage_tdc_ns, 0), "sync_freq_div" => (:qc_diviseur_sync, 0),
+    "fenetre_ns" => (:qc_fenetre_ns, 0))
+
+"""
+    irf_settings_changes(spc, channels) -> (settings, changes)
+
+The settings an IRF was taken with (`channels`, its record), taken over: a
+copy of `spc` with every timing setting of the record that differs
+(beyond the DLL's rounding, `same_card_setting`) set to the IRF's — in [qc]
+for the QC-104 (`IRF_QC_FIELDS`), in [spc_module] for SPC-150N — and the
+list of changes ("key: now → IRF's"). The channels of one IRF must agree
+on each setting (one Single for both). The card itself (serial number) and
+the declared detector gains can't be taken over: `irf_mismatches` still
+refuses those.
+"""
+function irf_settings_changes(spc::FLIMCore.Reglages, channels)
+    taken = Dict{String, Float64}()
+    for channel in channels, (key, value) in get(channel, "settings", Dict{String, Any}())
+        v = Float64(value)
+        haskey(taken, key) && !same_card_setting(key, taken[key], v) &&
+            error("the IRF's channels were taken with different $key ($(taken[key]) and $v): take one Single for both channels")
+        taken[key] = v
+    end
+    settings = deepcopy(spc)
+    requested = irf_requested_settings(spc)
+    fmt(x) = x === nothing ? "—" : string(round(Float64(x); sigdigits = 6))
+    changes = String[]
+    for (key, v) in sort!(collect(taken); by = first)
+        now = get(requested, key, nothing)
+        now !== nothing && same_card_setting(key, v, now) && continue
+        if FLIMCore.est_qc104(spc)
+            target = get(IRF_QC_FIELDS, key, nothing)
+            target === nothing && continue
+            field, i = target
+            value = fieldtype(FLIMCore.Reglages, field) <: Integer ? round(Int, v) : round(v; digits = 3)
+            i == 0 ? setfield!(settings, field, value) : (getfield(settings, field)[i] = value)
+        else
+            key in first.(IRF_CARD_SETTINGS) || continue
+            value = key in IRF_EXACT_SETTINGS ? round(Int, v) : round(v; digits = 3)
+            settings.spc[key] = value
+        end
+        push!(changes, "$key: $(fmt(now)) → $(fmt(value))")
+    end
+    FLIMCore.valider_reglages(settings)
+    return settings, changes
+end
+
+"""
+    import_irf_adopting_settings(filepath, spc) -> (irfs, info, settings, changes)
+
+Import an IRF (a Single's CSV, or an SPCM .sdt) *with its settings*: the
+timing settings it was taken with become the current ones
+(`irf_settings_changes`: `settings`, to write to config/spc.toml, and the
+list of `changes`), so the IRF matches what the card will measure with.
+Refused only for what can't be taken over: another card or input than
+[verification] series says, the detector gains. Kept as `irf_csv_path()`.
+"""
+function import_irf_adopting_settings(filepath::AbstractString, spc::FLIMCore.Reglages)
+    irfs, channels = read_irf_file(filepath, spc)
+    settings, changes = irf_settings_changes(spc, channels)
+    irfs, info = save_imported_irf(irfs, channels, filepath, settings; applied = Dict{Int, Dict{String, Float64}}())
+    return irfs, info, settings, changes
+end
+
 function compute_irf_bin_size(irf_data::Matrix{Float64})::Float64
     h = Inf
     for i in 2:size(irf_data, 1)

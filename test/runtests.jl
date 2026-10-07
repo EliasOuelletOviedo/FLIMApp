@@ -1230,6 +1230,17 @@ end
     @test isempty(FLIMApp.irf_mismatches(info, bench))                         # config/spc.toml: the SPCM values
     offsets = deepcopy(bench); offsets.qc_decalage_ns = zeros(4)
     @test any(m -> occursin("tdc_offset2", m), FLIMApp.irf_mismatches(info, offsets))
+    # Loading an IRF takes its settings over ([qc]): what differs becomes the IRF's, the rest is kept.
+    other = deepcopy(bench); other.qc_decalage_ns = zeros(4); other.qc_seuil_mV[2] = -50.0; other.qc_photon_unique = true
+    taken, changes = FLIMApp.irf_settings_changes(other, channels)
+    @test taken.qc_decalage_ns == [0.512, 1.536, 0.0, 0.0] && taken.qc_seuil_mV[2] == -139.216 && taken.qc_photon_unique
+    @test sort([first(split(c, ":")) for c in changes]) == ["cfd_limit_high", "tdc_offset1", "tdc_offset2"]
+    @test isempty(FLIMApp.irf_mismatches(info, taken)) && other.qc_decalage_ns == zeros(4)        # `other` untouched
+    @test isempty(last(FLIMApp.irf_settings_changes(bench, channels)))                            # already the IRF's
+    elsewhere = deepcopy(other); elsewhere.series = ["3T0089/IN2", "3T0089/IN1"]
+    @test any(m -> occursin("is card 3T0089/IN2", m), FLIMApp.irf_mismatches(info, first(FLIMApp.irf_settings_changes(elsewhere, channels))))
+    disagree = deepcopy(channels); disagree[2]["settings"]["tdc_offset2"] = 3.072
+    @test_throws ErrorException FLIMApp.irf_settings_changes(bench, disagree)
     @test FLIMApp.rebin_counts([4.0, 6.0, 8.0], 1.0, 1.5, 3) == [7.0, 11.0, 0.0]
     @test FLIMApp.sdt_setup_value("#SP [SP_TDC_OF2,F,1.536]", "TDC_OF2") == 1.536 && isnan(FLIMApp.sdt_setup_value("", "X"))
 end
@@ -1552,10 +1563,20 @@ include("test_flimcore.jl")
     status = (info_label = (text = FLIMApp.Observable(""),),)
     @test !FLIMApp.finish_irf_acquisition!(nothing, status, stopped) && occursin("IRF unchanged", status.info_label.text[])
     view.irf_fin = nothing
+    view.last_fin = nothing                     # the imaging's own end is awaited below, not the IRF's
     FLIMApp.spc_toggle_imaging!(view)           # imaging again, as before
     @test await(() -> FLIMApp.spc_state(view) == :imagerie)
 
-    # Settings edited in the window are written back; invalid ones refused.
+    # Settings edited in the window are written back; invalid ones refused. QC-104 only: each
+    # channel's timing offset (its input's [qc] decalage_ns).
+    @test !FLIMApp.spc_edit_offset!(view, 1, 1.024)                        # the simulation has no QC-104 input
+    qc_path = joinpath(mktempdir(), "spc.toml")
+    FLIMCore.ecrire_reglages(qc_path, FLIMCore.Reglages(dossier = mktempdir()))
+    qc_view = FLIMApp.SpcView(qc_path, nothing)
+    @test FLIMApp.spc_edit_offset!(qc_view, 2, 2.048) && FLIMCore.lire_reglages(qc_path).qc_decalage_ns[2] == 2.048
+    @test !FLIMApp.spc_edit_offset!(qc_view, 1, 40.0) && FLIMCore.lire_reglages(qc_path).qc_decalage_ns[1] == 0.512
+    FLIMApp.spc_adopt_settings!(qc_view, FLIMCore.Reglages(dossier = mktempdir(), qc_decalage_ns = [1.024, 0.0, 0.0, 0.0]))
+    @test FLIMCore.lire_reglages(qc_path).qc_decalage_ns[1] == 1.024 && qc_view.settings.qc_decalage_ns[1] == 1.024
     @test FLIMApp.spc_edit_setting!(view, :binning_temps, 8)
     @test FLIMCore.lire_reglages(path).binning_temps == 8
     @test !FLIMApp.spc_edit_setting!(view, :binning_temps, 0) && view.settings.binning_temps == 8

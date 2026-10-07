@@ -32,28 +32,33 @@ end
 """
     adopt_irf!(app_run, blocks, filepath)::Bool
 
-Import `filepath` as the IRF (`import_irf`: an SPCM .sdt or a Single's CSV;
-refused, with every difference, if taken with other settings) and load it
-now — or at the next START during a run (the fit's runtime state isn't
-safe to change under a running worker, `RuntimeContext`). The status line
-says what happened.
+Import `filepath` as the IRF (an SPCM .sdt or a Single's CSV) *with the
+settings it was taken with* (`import_irf_adopting_settings`): those that
+differ become the current ones, written to config/spc.toml, and the card
+is checked again (`spc_adopt_settings!`). Refused only if taken with
+another card or input. Loaded now — or at the next START during a run (the
+fit's runtime state isn't safe to change under a running worker,
+`RuntimeContext`). The status line says what happened.
 """
 function adopt_irf!(app_run, blocks, filepath::AbstractString)::Bool
+    changes = String[]
     try
-        irfs, _ = import_irf(filepath, app_run.spc.settings; applied = spc_applied_settings(app_run.spc))
+        irfs, _, settings, changes = import_irf_adopting_settings(filepath, app_run.spc.settings)
+        isempty(changes) || spc_adopt_settings!(app_run.spc, settings)
         update_path_textbox!(blocks.irf_path_textbox, filepath)
-        @info "IRF imported" path=filepath channels=length(irfs)
+        @info "IRF imported" path=filepath channels=length(irfs) settings_taken_from_it=changes
     catch e
         @warn "IRF file refused" path=filepath error=string(e)
         show_status!(blocks, "IRF refused: " * first(split(sprint(showerror, e), '\n')))
         return false
     end
+    taken = isempty(changes) ? "" : "; settings taken from it: " * join(changes, ", ")
     if app_run.run_open
         app_run.irf_reload_pending = true
-        show_status!(blocks, "IRF saved: loaded at the next START")
+        show_status!(blocks, "IRF saved: loaded at the next START" * taken)
     else
         init_irf_runtime!(app_run.spc.settings)
-        show_status!(blocks, RUNTIME[].irf === nothing ? "IRF unreadable: see the log" : "IRF loaded")
+        show_status!(blocks, (RUNTIME[].irf === nothing ? "IRF unreadable: see the log" : "IRF loaded") * taken)
     end
     return true
 end

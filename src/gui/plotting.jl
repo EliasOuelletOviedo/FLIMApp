@@ -89,13 +89,15 @@ function shown_snapshot_series(app_run, show_ch1::Bool, show_ch2::Bool)
     return pairs
 end
 
-# IRF curve for the Histogram plot overlay, truncated/padded to `fit`'s
-# length and normalized to its own peak (max -> 1).
-function normalized_irf_from_fit(fit::AbstractVector{<:Real})
+# IRF curve of `channel` for the Histogram plot overlay (channel 2 falls back
+# on channel 1's when the IRF has a single channel, as the fit does:
+# `channel_fit_context`), truncated/padded to `fit`'s length and normalized
+# to its own peak (max -> 1).
+function normalized_irf_from_fit(fit::AbstractVector{<:Real}, channel::Integer = 1)
     nfit = length(fit)
     out = zeros(Float64, nfit)
 
-    irf = RUNTIME[].irf
+    irf = channel_fit_context(channel).irf
     if nfit == 0 || irf === nothing || size(irf, 2) < 2
         return out
     end
@@ -233,8 +235,9 @@ end
 
 Each shown channel's counts as semi-transparent bars plus its fit as a line
 on top, all normalized (see above) so shapes are comparable regardless of
-photon counts; the IRF drawn once regardless of the toggles. Driven by the
-fixed-size `ChannelSeries` Observables the refresh tick overwrites.
+photon counts; and the IRF of each shown channel (`PLOT_COLOR_IRF`; dashed
+for channel 2). Driven by the fixed-size `ChannelSeries` Observables the
+refresh tick overwrites.
 """
 function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
     for (series, color) in shown_snapshot_series(app_run, show_ch1, show_ch2)
@@ -242,10 +245,11 @@ function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
         fit_normalized = lift(normalize_to_own_max, series.fit)
         barplot!(axis, app_run.hist_time, counts_normalized, color=(color, 0.1), gap=0.0)
         lines!(axis, app_run.hist_time, fit_normalized, color=color, linewidth=PLOT_LINEWIDTH)
+        channel = series === app_run.ch1 ? 1 : 2
+        irf_normalized = lift(fit -> normalized_irf_from_fit(fit, channel), series.fit)
+        lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_IRF, linewidth=PLOT_LINEWIDTH,
+               linestyle=channel == 1 ? :solid : :dash)
     end
-
-    irf_normalized = lift(normalized_irf_from_fit, app_run.ch1.fit)
-    lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
 
     return nothing
 end

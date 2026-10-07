@@ -14,8 +14,9 @@ running.
 - Per card: the intensity image and the mean arrival time (first moment,
   no IRF correction: a preview, not a fit), then the decays (solid:
   imaging, dashed: last Single histogram) and the CFD rate.
-- The geometry, display and Single settings are written back to
-  config/spc.toml, which the engine rereads at every measurement start.
+- The geometry, display and Single settings, and (QC-104) each channel's
+  timing offset, are written back to config/spc.toml, which the engine
+  rereads at every measurement start.
 
 Every Observable here is refreshed by the refresh tick (`spc_tick!`,
 gui/spc_view.jl); the callbacks only send commands or edit the settings.
@@ -135,6 +136,25 @@ function build_spc_figure(view::SpcView)
             value = tryparse(T, strip(text))
             accepted = value !== nothing && spc_edit_setting!(view, field, value)
             accepted || (box.displayed_string[] = string(getfield(view.settings, field)))
+        end
+    end
+    # QC-104: each channel's timing offset (its input's [qc] decalage_ns).
+    if FLIMCore.est_qc104(s)
+        for (channel, serial) in enumerate(s.series[1:min(2, length(s.series))])
+            voie = FLIMCore.voie_qc(serial)
+            voie === nothing && continue
+            current = string(s.qc_decalage_ns[voie.entree])
+            Label(settings[6, 2 * channel - 1]; merge(LABEL_ATTRS, Dict{Symbol, Any}(
+                :text => "Ch$channel offset [ns] (IN$(voie.entree))", :halign => :right, :fontsize => 11))...)
+            box = Textbox(settings[6, 2 * channel]; merge(TEXT_ATTRS, Dict{Symbol, Any}(
+                :displayed_string => current, :stored_string => current, :width => 64,
+                :validator => make_float_range_validator(0.0, 32.256)))...)
+            entree = voie.entree
+            on(box.stored_string) do text
+                value = tryparse(Float64, strip(text))
+                accepted = value !== nothing && spc_edit_offset!(view, channel, value)
+                accepted || (box.displayed_string[] = string(view.settings.qc_decalage_ns[entree]))
+            end
         end
     end
     Label(settings[5, 3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Save raw stream (.spc)", :halign => :right, :fontsize => 11))...)

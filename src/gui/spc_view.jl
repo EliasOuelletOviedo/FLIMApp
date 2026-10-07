@@ -260,6 +260,43 @@ function spc_command!(view::SpcView, command::FLIMCore.Commande)::Bool
     return FLIMCore.commander!(view.engine, command)
 end
 
+"""
+    spc_adopt_settings!(view, settings)
+
+Make `settings` the current SPC settings (an imported IRF's,
+`adopt_irf!`): written to config/spc.toml — the engine rereads it at every
+measurement start — and, the engine idle, the card checked again so the
+settings read back from it (`spc_applied_settings`) follow.
+"""
+function spc_adopt_settings!(view::SpcView, settings::FLIMCore.Reglages)
+    FLIMCore.ecrire_reglages(view.settings_path, settings)
+    view.settings = settings
+    spc_state(view) == :pret && spc_command!(view, FLIMCore.Verifier())
+    view.texts_dirty = true
+    return nothing
+end
+
+"""
+    spc_edit_offset!(view, channel, value_ns)::Bool
+
+The timing offset (ns) of a channel's input on the QC-104 ([qc]
+decalage_ns, IN1 … IN3 as [verification] series says; 0 to 32.256 ns, the
+card rounds to 0.512 ns steps), written to config/spc.toml like any other
+setting of the window. Shifts the decays in the window: an IRF taken with
+another offset no longer matches (FIT-01).
+"""
+function spc_edit_offset!(view::SpcView, channel::Integer, value_ns::Real)::Bool
+    s = view.settings
+    voie = 1 <= channel <= length(s.series) ? FLIMCore.voie_qc(s.series[channel]) : nothing
+    if !FLIMCore.est_qc104(s) || voie === nothing
+        spc_error!(view, "setting refused: channel $channel has no QC-104 input ([verification] series)")
+        return false
+    end
+    offsets = copy(s.qc_decalage_ns)
+    offsets[voie.entree] = Float64(value_ns)
+    return spc_edit_setting!(view, :qc_decalage_ns, offsets)
+end
+
 """IMAGE / STOP: continuous (or `duree_s`) imaging with the settings' geometry, or stop it."""
 function spc_toggle_imaging!(view::SpcView)
     state = spc_state(view)
