@@ -45,7 +45,7 @@ module SPCLite
 using Libdl, Printf
 
 """Version de ce fichier : les scripts s'arrêtent si Julia en a chargé une plus ancienne."""
-const VERSION_LITE = 10
+const VERSION_LITE = 11
 
 export SPCError, chk_spc, message_erreur, DLL_SPCM
 export ecrire_ini, lire_ini, avec_spc, avec_spc_tous, initialiser, liberer, liberer_tous
@@ -826,6 +826,9 @@ function parametres_qc(r::AbstractDict)
         -57 <= d <= 65 || error("retard_routage_ns : $d hors de -57 à 65 ns")
         p["ext_latch_delay"] = d
     end
+    # Pas d'arrêt sur débordement : la valeur par défaut de la DLL (1) n'a pas de sens en
+    # FIFO et pourrait empêcher la QC-104 de s'armer. qc6 (histogramme) la remet à 1.
+    p["stop_on_ovfl"] = 0
     p["tdc_control"] = controle_tdc(get(r, "entrees_actives", (true, true, true, true)),
                                     get(r, "routage_entrees", (true, true, true)),
                                     Bool(get(r, "photon_unique", false)))
