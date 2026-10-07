@@ -1,79 +1,18 @@
-Format : SPC-QC-104 (FIFO, format établi par qc4)
-  vérifié le 2026-10-07 11:28 sur la QC-104 n° 3T0089 : 189933 photons et 9057 marqueurs identiques à la DLL (spcm64.dll)
+Banque 1 : la carte garde mem_bank = 0.0 ; non lue
+Banques lues : 0
 
-Réglages appliqués :
-  seuil IN1 (mV)              -139.22 → -139.22    (cfd_limit_low)
-  zéro IN1 (mV)                 12.85 → 12.85      (tac_limit_high)
-  décalage IN1 (ns)               0.0 → 0          (tdc_offset1)
-  seuil IN2 (mV)              -139.22 → -139.22    (cfd_limit_high)
-  zéro IN2 (mV)                 12.85 → 12.85      (sync_holdoff)
-  décalage IN2 (ns)               0.0 → 0          (tdc_offset2)
-  seuil IN3 (mV)              -139.22 → -139.22    (cfd_zc_level)
-  zéro IN3 (mV)                 12.85 → 12.85      (cfd_holdoff)
-  décalage IN3 (ns)               0.0 → 0          (tdc_offset3)
-  seuil SYNC (mV)              -70.59 → -70.588    (sync_threshold)
-  zéro SYNC (mV)                 -6.8 → -6.8031    (sync_zc_level)
-  décalage SYNC (ns)              0.0 → 0          (tdc_offset4)
-  plage du TDC (ns)            16.384 → 16.385     (tac_range)
-  diviseur du SYNC                  1 → 1          (sync_freq_div)
-  retard du routage (ns)            0 → 0          (ext_latch_delay)
-  limite basse (% plage)          0.0 → 0          (tac_limit_low)
-  contrôle du TDC              196784 → 1.9678e+05 (tdc_control)
-  tdc_control appliqué : entrées actives : IN1, IN2, SYNC ; routage sur : IN1, IN2 ; détection multiphoton
+IN1 seule : taux SYNC 8.189e+07, IN1 858, IN2 67, valeur 4 0 /s
+  865 coups au total, dans 1 courbe(s) non vide(s) :
+    banque 0, page 0, bloc 0 : 865 coups, canaux 0 à 3113, pic au canal 350
 
-SYNC : SYNC correct
+IN2 seule : taux SYNC 8.007e+07, IN1 196, IN2 193, valeur 4 0 /s
+  237 coups au total, dans 1 courbe(s) non vide(s) :
+    banque 0, page 256, bloc 0 : 237 coups, canaux 0 à 3111, pic au canal 166
 
-Photons : 171842 en 2.5 s (IN1 154140, IN2 17702, IN3 0) ; rejetés 0 ; inattendus 0 ; pertes 0
-Marqueurs : M0 200, M1 0, M2 0, M3 200 (attendu 200 M0 et 200 M3)
-  tic mesuré : 2.04815 ns (retenu 2.04800 ns, écart +0.007 %)
-  M3 - M0 : 0.999938 ms en moyenne, de 0.999936 à 0.999940 ms (attendu 1.000 ms)
+IN1 et IN2 : taux SYNC 8.007e+07, IN1 309, IN2 198, valeur 4 0 /s
+  1127 coups au total, dans 2 courbe(s) non vide(s) :
+    banque 0, page 0, bloc 0 : 905 coups, canaux 0 à 3108, pic au canal 410
+    banque 0, page 256, bloc 0 : 222 coups, canaux 0 à 3081, pic au canal 260
 
-Déclins : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q5_declins.svg ; canal de 4.00 ps
-  IN1 : pic à 1.426 ns, temps moyen 3.726 ns ; photons des canaux 0 à 3127 (0.000 à 12.513 ns)
-  IN2 : pic à 0.738 ns, temps moyen 3.149 ns ; photons des canaux 1 à 3124 (0.004 à 12.501 ns)
-  limite basse de la fenêtre (tac_limit_low) : 0 % de la plage
-Sens du microtemps (largeurs à 20 % du pic) :
-  IN1 : montée 0.19 ns, descente 1.66 ns → sens correct (le temps croît avec le canal)
-  IN2 : montée 0.13 ns, descente 1.54 ns → sens correct (le temps croît avec le canal)
-
-Routage : code écrit 0101, valeur la plus fréquente 1010 pour 100.0 % des photons
-  ok : le routage lu est le complément du code (entrées actives à l'état bas), comme sur les SPC-150N.
-
-Décodage de contrôle par la DLL (un appel par photon, patience)…
-DLL : 171842 photons, marqueurs [200, 0, 0, 200] ; SPCLite : 171842 photons, marqueurs [200, 0, 0, 200]
-  identiques un à un (temps, microtemps, routage, entrée de chaque photon ; temps de chaque marqueur)
-
-RÉUSSI : photons, déclins, marqueurs et routage conformes ; format_fifo_qc104.jl confirmé. Ouvre q5_declins.svg.
-true
-
-Canal de 4.00 ps ; limite basse de la fenêtre (tac_limit_low) : 0.0 %
-
-Mémoire avec 0 bits de routage : 1 blocs par page, 1024 pages, 4096 mots par bloc
-  IN1 seule   : page 0 bloc 0 : 60127
-  IN2 seule   : aucun coup
-  IN1 et IN2  : page 0 bloc 0 : 59468
-  IN1 → page 0, bloc 0 (100.0 % de ses 60127 coups)
-  IN2 : aucun coup (détecteur, seuil, lumière ?)
-  Courbes (IN1 et IN2 actives) : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q6_single_r0.csv
-
-Mémoire avec 2 bits de routage : 4 blocs par page, 256 pages, 4096 mots par bloc
-  IN1 seule   : page 0 bloc 0 : 59890
-  IN2 seule   : aucun coup
-  IN1 et IN2  : page 0 bloc 0 : 59908
-  IN1 → page 0, bloc 0 (100.0 % de ses 59890 coups)
-  IN2 : aucun coup (détecteur, seuil, lumière ?)
-  Courbes (IN1 et IN2 actives) : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q6_single_r2.csv
-
-Mémoire avec 4 bits de routage : 16 blocs par page, 64 pages, 4096 mots par bloc
-  IN1 seule   : page 0 bloc 0 : 59769
-  IN2 seule   : aucun coup
-  IN1 et IN2  : page 0 bloc 0 : 59980
-  IN1 → page 0, bloc 0 (100.0 % de ses 59769 coups)
-  IN2 : aucun coup (détecteur, seuil, lumière ?)
-  Courbes (IN1 et IN2 actives) : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q6_single_r4.csv
-
-Bilan :
-  0 bits : IN1 et IN2 non séparés
-  2 bits : IN1 et IN2 non séparés
-  4 bits : IN1 et IN2 non séparés
-INCOMPLET : colle la sortie dans la conversation.
+Courbes : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q6_memoire.csv
+RÉUSSI : IN2 va ailleurs que IN1 : banque 0 page 256 bloc 0
