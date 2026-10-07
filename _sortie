@@ -2,36 +2,91 @@ DLL : C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll
 SPC-QC-104 : module 2, n° de série 3T0089
 
 Acquisitions :
-  marqueurs :     64704 enregistrements en 0.5 s ; flux de type 11, mt_clock 2048131
-  in1       :    118976 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
-  in2       :    120992 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
-  controle  :    243008 enregistrements en 2.0 s ; flux de type 11, mt_clock 2048131
+  marqueurs :     65376 enregistrements en 0.5 s ; flux de type 11, mt_clock 2048131
+  in1       :    138144 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
+  in2       :    165536 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
+  controle  :    368544 enregistrements en 2.0 s ; flux de type 11, mt_clock 2048131
 
 Décodage par la DLL (arbitre) :
-  marqueurs :        0 photons valides, 0 invalides, marqueurs M0-M3 [2505, 0, 0, 2504] ; drapeaux vus 1000 8000 ; fin 2
-  in1       :       41 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
-  in2       :      131 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
-  controle  :      330 photons valides, 0 invalides, marqueurs M0-M3 [2002, 0, 0, 2002] ; drapeaux vus 0 1000 8000 ; fin 2
+  marqueurs :        0 photons valides, 0 invalides, marqueurs M0-M3 [2530, 0, 0, 2530] ; drapeaux vus 1000 8000 ; fin 2
+  in1       :    18292 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
+  in2       :    45334 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
+  controle  :   126307 photons valides, 0 invalides, marqueurs M0-M3 [1998, 0, 0, 1999] ; drapeaux vus 0 1000 8000 ; fin 2
   marqueurs : M0 tous les 97649.1 tics → tic de 2.0482 ns (2,048 ns attendu, écart +0.01 %)
-  controle  : M0 tous les 488245.5 tics → tic de 2.0481 ns (2,048 ns attendu, écart +0.01 %)
+  controle  : M0 tous les 488245.3 tics → tic de 2.0482 ns (2,048 ns attendu, écart +0.01 %)
 
 Oracle des préfixes (1500 enregistrements par acquisition) :
-  marqueurs : 1500 enregistrements, 117 entrées (1383 silencieux)
-  in1       : 1500 enregistrements, 0 entrées (1500 silencieux)
-  in2       : 1500 enregistrements, 0 entrées (1500 silencieux)
-  controle  : 1500 enregistrements, 29 entrées (1471 silencieux)
+  marqueurs : 1500 enregistrements, 116 entrées (1384 silencieux)
+  in1       : 1500 enregistrements, 214 entrées (1286 silencieux)
+  in2       : 1500 enregistrements, 417 entrées (1083 silencieux)
+  controle  : 1500 enregistrements, 535 entrées (965 silencieux)
 
 Empreinte des enregistrements (bit 31 à gauche ; 0/1 constant, · variable) :
-  marqueurs marqueurs     117  0100000000000000·00············0
-  marqueurs silencieux   1383  10000000000000000000000000000000
-  in1       silencieux   1500  10000000000000000000000000000000
-  in2       silencieux   1500  10000000000000000000000000000000
-  controle  photons         4  000·····1·······1011············
-  controle  marqueurs      25  0100000000000000·00············0
-  controle  silencieux   1471  10000000000000000000000000000000
+  marqueurs marqueurs     116  0100000000000000·00············0
+  marqueurs silencieux   1384  10000000000000000000000000000000
+  in1       photons       214  0000············0110············
+  in1       silencieux   1286  10000000000000000000000000000000
+  in2       photons       417  0001············0101············
+  in2       silencieux   1083  10000000000000000000000000000000
+  controle  photons       519  000·············1011············
+  controle  marqueurs      16  0100000000000000·00············0
+  controle  silencieux    965  10000000000000000000000000000000
 
-ÉCHEC : format non établi.
-  ordre poids faible d'abord : microtemps introuvable
-  ordre poids fort d'abord : microtemps introuvable
-Envoie-moi cette sortie et le dossier c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\format : les fichiers .spc et bloc_*.csv suffisent pour finir l'analyse à la main.
-false
+FORMAT ÉTABLI ET VÉRIFIÉ (vérifié le 2026-10-07 11:28 sur la QC-104 n° 3T0089 : 189933 photons et 9057 marqueurs identiques à la DLL (spcm64.dll))
+  ordre des mots     : poids faible d'abord
+  macrotemps         : bits 0 à 11 (12 bits)
+  microtemps         : bits 16 à 27, temps croissant direct
+  routage            : bits 12 à 15
+  entrée (voie)      : bits 28 à 29 ; valeurs IN1..IN4 (0, 1, 2, -1)
+  marqueurs          : motif 0x40000000 = 0x40000000 ; bits M0..M3 (12, 13, 14, 15)
+  débordements       : motif 0xc0000000 = 0x80000000, compte 1 par enregistrement ; MTOV bit -1
+  photon invalide    : bit -1
+  note : valeur de IN3 déduite (2), non observée
+  note : M1, M2 déduits de M0 et M3 (non observés)
+  note : sens du temps indéterminé (peu de photons ?) : supposé croissant, comme le dit le manuel
+  note : aucun photon invalide observé : bit_invalide inconnu
+  note : bit de perte (FIFO plein) non observé : les pertes se lisent par SPC_FOVFL
+
+Écrit : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\format_fifo_qc104.jl
+
+
+
+Format : SPC-QC-104 (FIFO, format établi par qc4)
+  vérifié le 2026-10-07 11:28 sur la QC-104 n° 3T0089 : 189933 photons et 9057 marqueurs identiques à la DLL (spcm64.dll)
+
+Réglages appliqués :
+  seuil IN1 (mV)              -139.22 → -139.22    (cfd_limit_low)
+  zéro IN1 (mV)                 12.85 → 12.85      (tac_limit_high)
+  décalage IN1 (ns)               0.0 → 0          (tdc_offset1)
+  seuil IN2 (mV)              -139.22 → -139.22    (cfd_limit_high)
+  zéro IN2 (mV)                 12.85 → 12.85      (sync_holdoff)
+  décalage IN2 (ns)               0.0 → 0          (tdc_offset2)
+  seuil IN3 (mV)              -139.22 → -139.22    (cfd_zc_level)
+  zéro IN3 (mV)                 12.85 → 12.85      (cfd_holdoff)
+  décalage IN3 (ns)               0.0 → 0          (tdc_offset3)
+  seuil SYNC (mV)              -70.59 → -70.588    (sync_threshold)
+  zéro SYNC (mV)                 -6.8 → -6.8031    (sync_zc_level)
+  décalage SYNC (ns)              0.0 → 0          (tdc_offset4)
+  plage du TDC (ns)            16.384 → 16.385     (tac_range)
+  diviseur du SYNC                  1 → 1          (sync_freq_div)
+  retard du routage (ns)            0 → 0          (ext_latch_delay)
+  contrôle du TDC              196784 → 1.9678e+05 (tdc_control)
+  tdc_control appliqué : entrées actives : IN1, IN2, SYNC ; routage sur : IN1, IN2 ; détection multiphoton
+
+SYNC : SYNC correct
+
+Photons : 167867 en 2.5 s (IN1 48214, IN2 119653, IN3 0) ; rejetés 0 ; inattendus 0 ; pertes 0
+Marqueurs : M0 200, M1 0, M2 0, M3 200 (attendu 200 M0 et 200 M3)
+  tic mesuré : 2.04815 ns (retenu 2.04800 ns, écart +0.007 %)
+  M3 - M0 : 0.999938 ms en moyenne, de 0.999936 à 0.999940 ms (attendu 1.000 ms)
+
+Déclins : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q5_declins.svg ; canal de 4.00 ps
+  IN1 : pic à 12.159 ns, temps moyen 7.085 ns
+  IN2 : pic à 3.342 ns, temps moyen 7.064 ns
+
+Routage : code écrit 0101, valeur la plus fréquente 1010 pour 100.0 % des photons
+  ok : le routage lu est le complément du code (entrées actives à l'état bas), comme sur les SPC-150N.
+
+DLL : 167867 photons, marqueurs [200, 0, 0, 200] ; SPCLite : 167867 photons, marqueurs [200, 0, 0, 200]  identiques
+
+RÉUSSI : photons, déclins, marqueurs et routage conformes. Ouvre q5_declins.svg.
