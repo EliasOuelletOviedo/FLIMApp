@@ -1,127 +1,63 @@
-== Cartes NI ==
-  Dev1     PCIe-6321    n° de série 1C31C12
-  S6110    PCI-6110     n° de série 1BC9D93
-
-== Cartes SPC (DLL : C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll) ==
-  module 0 : SPC-150N    n° de série 3N0317     bus PCI   4, slot  5, utilisé  1 : prête
-             EEPROM : type « SPC-150N », date « 13.03.2020 » ; SPC_test_id : 151 (SPC-150N)
-  module 1 : SPC-150N    n° de série 3N0318     bus PCI   4, slot  4, utilisé  1 : prête
-             EEPROM : type « SPC-150N », date « 13.03.2020 » ; SPC_test_id : 151 (SPC-150N)
-  module 2 : SPC-QC-104  n° de série 3T0089     bus PCI  23, slot  0, utilisé  1 : prête
-             EEPROM : type « SPC-QC-104 », date « 15.04.2025 » ; SPC_test_id : 104 (SPC-QC-104)
-
-  Cartes de types différents : la DLL n'en pilote qu'un type à la fois. Les scripts qc* prennent la QC-104 seule (types = (TYPE_QC104,)) ; pour les anciens scripts SPC-150N, ajoute types = (151,) à avec_spc / avec_spc_tous.
-
-RÉUSSI : la QC-104 répond. Suite : qc2_parametres.jl.
-
-
-
-Module 2 : bus PCI 23, slot 0
-SPC_test_id : 104 (SPC-QC-104)
-EEPROM : type « SPC-QC-104 », n° de série « 3T0089 », date « 15.04.2025 »
-
-Aller : reglages_qc.jl → SPC_init → relecture
-  seuil IN1 (mV)                -50.0 → -50.98     (cfd_limit_low)
-  zéro IN1 (mV)                   0.0 → 0          (tac_limit_high)
-  décalage IN1 (ns)               0.0 → 0          (tdc_offset1)
-  seuil IN2 (mV)                -50.0 → -50.98     (cfd_limit_high)
-  zéro IN2 (mV)                   0.0 → 0          (sync_holdoff)
-  décalage IN2 (ns)               0.0 → 0          (tdc_offset2)
-  seuil IN3 (mV)                -50.0 → -50.98     (cfd_zc_level)
-  zéro IN3 (mV)                   0.0 → 0          (cfd_holdoff)
-  décalage IN3 (ns)               0.0 → 0          (tdc_offset3)
-  seuil SYNC (mV)               -50.0 → -50.98     (sync_threshold)
-  zéro SYNC (mV)                  0.0 → 0          (sync_zc_level)
-  décalage SYNC (ns)              0.0 → 0          (tdc_offset4)
-  plage du TDC (ns)            16.384 → 16.385     (tac_range)
-  diviseur du SYNC                  1 → 1          (sync_freq_div)
-  retard du routage (ns)            0 → 0          (ext_latch_delay)
-  contrôle du TDC              196784 → 1.9678e+05 (tdc_control)
-  tdc_control appliqué : entrées actives : IN1, IN2, SYNC ; routage sur : IN1, IN2 ; détection multiphoton
-
-Mode FIFO (1) : flux de type 11 (11 = FIFO_TDC attendu) ok ; mt_clock brut 2048131 ; tic retenu 2.048 ns (manuel DLL : 2,048 ns, vérifié par qc4 et qc5)
-Largeur d'un canal du microtemps : 4.00 ps (plage relue / 4096)
-
-Retour : valeurs B → SPC_set_parameters → relecture
-  seuil IN1 (mV)                -80.0 → -80.392    (cfd_limit_low)
-  zéro IN1 (mV)                  10.0 → 9.8268     (tac_limit_high)
-  décalage IN1 (ns)             1.024 → 1.024      (tdc_offset1)
-  seuil IN2 (mV)                -40.0 → -39.216    (cfd_limit_high)
-  zéro IN2 (mV)                 -10.0 → -9.8268    (sync_holdoff)
-  décalage IN2 (ns)             2.048 → 2.048      (tdc_offset2)
-  seuil IN3 (mV)               -120.0 → -119.61    (cfd_zc_level)
-  zéro IN3 (mV)                  20.0 → 19.654     (cfd_holdoff)
-  décalage IN3 (ns)             0.512 → 0.512      (tdc_offset3)
-  seuil SYNC (mV)               -30.0 → -29.412    (sync_threshold)
-  zéro SYNC (mV)                  5.0 → 5.2913     (sync_zc_level)
-  décalage SYNC (ns)            3.072 → 3.072      (tdc_offset4)
-  plage du TDC (ns)            32.768 → 32.77      (tac_range)
-  diviseur du SYNC                  2 → 2          (sync_freq_div)
-  retard du routage (ns)            8 → 8          (ext_latch_delay)
-  contrôle du TDC             1442000 → 1.442e+06  (tdc_control)
-  tdc_control appliqué : entrées actives : IN1, IN3, SYNC ; routage sur : IN2, IN3 ; un photon par période
-
-Mode FIFO temps absolu (13) : flux de type 12 (12 = FIFO_TDC_ABS attendu), mt_clock brut 4000
-
-RÉUSSI : la QC-104 s'identifie et ses paramètres passent dans les deux sens.
-
-
-
-entrées actives             valeur 1    valeur 2    valeur 3    valeur 4   SYNC
-toutes (reglages_qc.jl)    8.007e+07        1650       467.7           0   SYNC correct
-SYNC seul                  8.007e+07          90          33           0   SYNC correct
-IN1 + SYNC                 8.007e+07        1558           0           0   SYNC correct
-IN2 + SYNC                 8.007e+07       50.33       443.7           0   SYNC correct
-IN3 + SYNC                 8.007e+07           0           4           0   SYNC correct
-IN1 seule, SYNC coupé              0        1614           0           0   SYNC correct
-
-  valeur 1 : SYNC
-  valeur 2 : IN1
-  valeur 3 : IN2
-  valeur 4 : non associée (entrée sans signal, ou compteur insensible)
-
-RÉUSSI : SYNC correct ; association ci-dessus (note-la, ton GUI en aura besoin).
-
-
-
 DLL : C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll
 SPC-QC-104 : module 2, n° de série 3T0089
 
 Acquisitions :
-  marqueurs :     64000 enregistrements en 0.5 s ; flux de type 11, mt_clock 2048131
-  in1       :    119936 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
-  in2       :    119232 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
-  controle  :    242176 enregistrements en 2.0 s ; flux de type 11, mt_clock 2048131
-
-Décodage par la DLL (arbitre) :
-  marqueurs :        0 photons valides, 0 invalides, marqueurs M0-M3 [2576, 0, 0, 0] ; drapeaux vus 1000 ; fin 2
-  in1       :      682 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
-  in2       :      221 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
-  controle  :     1928 photons valides, 0 invalides, marqueurs M0-M3 [1999, 0, 0, 0] ; drapeaux vus 0 1000 ; fin 2
-  marqueurs : M0 tous les 97649.1 tics → tic de 2.0482 ns (2,048 ns attendu, écart +0.01 %)
-  controle  : M0 tous les 488245.5 tics → tic de 2.0482 ns (2,048 ns attendu, écart +0.01 %)
-
-Oracle des préfixes (1500 enregistrements par acquisition) :
-  marqueurs : 1500 enregistrements, 60 entrées (1440 silencieux)
-  in1       : 1500 enregistrements, 13 entrées (1487 silencieux)
-  in2       : 1500 enregistrements, 3 entrées (1497 silencieux)
-  controle  : 1500 enregistrements, 26 entrées (1474 silencieux)
-
-Empreinte des enregistrements (bit 31 à gauche ; 0/1 constant, · variable) :
-  marqueurs marqueurs      60  01000000000000000001···········1
-  marqueurs silencieux   1440  10000000000000000000000000000000
-  in1       photons        13  0000············0000············
-  in1       silencieux   1487  10000000000000000000000000000000
-  in2       photons         3  000101··0·01·00·00001··0·111··1·
-  in2       silencieux   1497  10000000000000000000000000000000
-  controle  photons        13  000·············0000············
-  controle  marqueurs      13  01000000000000000001···········1
-  controle  silencieux   1474  10000000000000000000000000000000
-
-ÉCHEC : format non établi.
-  ordre poids faible d'abord : routage introuvable : fils P0.4-P0.7 → broches 2, 3, 4, 7 branchés ? D GND → broche 5 ?
-  ordre poids fort d'abord : routage introuvable : fils P0.4-P0.7 → broches 2, 3, 4, 7 branchés ? D GND → broche 5 ?
-Envoie-moi cette sortie et le dossier c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\format : les fichiers .spc et bloc_*.csv suffisent pour finir l'analyse à la main.
-
-
-
+ERROR: SPC -20 dans SPC_start_measurement : cannot arm SPC module
+Stacktrace:
+  [1] chk_spc
+    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:153 [inlined]
+  [2] demarrer
+    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:942 [inlined]
+  [3] WARNING: Detected access to binding `Main.acquerir_brut_qc4` in a world prior to its definition world.
+  Julia 1.12 has introduced more strict world age semantics for global bindings.
+  !!! This code may malfunction under Revise.
+  !!! This code will error in future versions of Julia.
+Hint: Add an appropriate `invokelatest` around the access to this binding.
+To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
+acquerir_brut_qc4(m::Int16, duree_s::Float64)
+    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:81
+  [4] (::var"#une_acquisition_qc4##0#une_acquisition_qc4##1"{@NamedTuple{…}, Int16, @NamedTuple{…}})(th::Ptr{Nothing})
+    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:119
+  [5] WARNING: Detected access to binding `DAQmxLite.withtask` in a world prior to its definition world.
+  Julia 1.12 has introduced more strict world age semantics for global bindings.
+  !!! This code may malfunction under Revise.
+  !!! This code will error in future versions of Julia.
+Hint: Add an appropriate `invokelatest` around the access to this binding.
+To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
+withtask(f::var"#une_acquisition_qc4##0#une_acquisition_qc4##1"{@NamedTuple{…}, Int16, @NamedTuple{…}}, name::String)
+    @ Main.DAQmxLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\DAQmxLite.jl:160
+  [6] WARNING: Detected access to binding `Main.une_acquisition_qc4` in a world prior to its definition world.
+  Julia 1.12 has introduced more strict world age semantics for global bindings.
+  !!! This code may malfunction under Revise.
+  !!! This code will error in future versions of Julia.
+Hint: Add an appropriate `invokelatest` around the access to this binding.
+To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
+une_acquisition_qc4(r::@NamedTuple{…}, m::Int16, a::@NamedTuple{…}, th_routage::Ptr{…}, dossier::String)
+    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:111
+  [7] (::var"#test_qc4##8#test_qc4##9"{…})(a::@NamedTuple{…})
+    @ Main .\none:-1
+  [8] iterate
+    @ .\generator.jl:48 [inlined]
+  [9] collect(itr::Base.Generator{Vector{@NamedTuple{…}}, var"#test_qc4##8#test_qc4##9"{Ptr{…}, @NamedTuple{…}, String}})
+    @ Base .\array.jl:828
+ [10] (::var"#test_qc4##6#test_qc4##7"{@NamedTuple{…}, String})(th::Ptr{Nothing})
+    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:560
+ [11] withtask(f::var"#test_qc4##6#test_qc4##7"{@NamedTuple{…}, String}, name::String)
+    @ Main.DAQmxLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\DAQmxLite.jl:160
+ [12] (::var"#test_qc4##0#test_qc4##1"{@NamedTuple{…}, String})(modules::Vector{Int16})
+    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:558
+ [13] avec_spc_tous(f::var"#test_qc4##0#test_qc4##1"{@NamedTuple{…}, String}, ini::String; types::Tuple{Int64}, forcer::Bool)
+    @ Main.SPCLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:501
+ [14] avec_spc_tous
+    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:483 [inlined]
+ [15] WARNING: Detected access to binding `Main.test_qc4` in a world prior to its definition world.
+  Julia 1.12 has introduced more strict world age semantics for global bindings.
+  !!! This code may malfunction under Revise.
+  !!! This code will error in future versions of Julia.
+Hint: Add an appropriate `invokelatest` around the access to this binding.
+To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
+test_qc4(r::@NamedTuple{…})
+    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:544
+ [16] top-level scope
+    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:726
+Some type information was truncated. Use `show(err)` to see complete types.
