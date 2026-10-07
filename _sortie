@@ -3,32 +3,32 @@ Séquence : 40 cycles de 16 régions = 640 passes, 4.01 s ; ordre des routes : 0
 Format : SPC-QC-104 (FIFO, format établi par qc4)
 SYNC : SYNC correct
 
-Photons : 1095325 (IN1 1094550, IN2 775) ; inattendus 0
+Photons : 6071989 (IN1 1491500, IN2 4580489) ; inattendus 0
 Marqueurs : M0 640, M3 640 (attendu 640 de chaque)
   passes : écart max à la durée programmée 0.0073 % ; transit moyen 0.5000 ms (programmé 0.500 ms)
 
  route  rang  passe (ms)  mesurée (ms)  photons IN1  photons IN2  photons/ms  t moyen IN1  t moyen IN2  mauvaise route
-     0     1        2.00        1.9999        14450            9       180.7     3.617 ns     4.729 ns               0
-     1     2        2.50        2.4998        21355           11       213.7     3.594 ns     4.835 ns               0
-     2     3        3.00        2.9998        28338           24       236.4     3.617 ns     5.457 ns               0
-     3     4        3.50        3.4998        38514           26       275.3     3.473 ns     6.921 ns               1
-     4     5        4.00        3.9997        56127           30       351.0     3.618 ns     7.358 ns               1
-     5     6        4.50        4.4997        29930           29       166.4     3.641 ns     5.049 ns               0
-     6     7        5.00        4.9996        44336           30       221.8     3.577 ns     6.618 ns               0
-     7     8        5.50        5.4996        62812           32       285.7     3.522 ns     6.825 ns               0
-     8     9        6.00        5.9996        59306           50       247.3     3.637 ns     6.285 ns               0
-     9    10        6.50        6.4995        56131           36       216.0     3.570 ns     6.813 ns               0
-    10    11        7.00        6.9995        89197           53       318.8     3.535 ns     7.284 ns               0
-    11    12        7.50        7.4995        59989           57       200.2     3.639 ns     7.180 ns               0
-    12    13        8.00        7.9994        75310           68       235.6     3.555 ns     6.019 ns               0
-    13    14        8.50        8.4994        95720           48       281.7     3.624 ns     6.376 ns               0
-    14    15        9.00        8.9993        78044           77       217.0     3.579 ns     6.012 ns               0
-    15    16        9.50        9.4993       109242           73       287.7     3.589 ns     6.522 ns               0
+     0     1        2.00        1.9999        24001        71989      1199.9     3.607 ns     2.917 ns               0
+     1     2        2.50        2.4998        22738        71817       945.6     3.695 ns     2.899 ns               2
+     2     3        3.00        2.9998        32474       109428      1182.6     3.591 ns     2.856 ns               0
+     3     4        3.50        3.4998        44177       142537      1333.8     3.588 ns     2.822 ns               1
+     4     5        4.00        3.9997        60855       210634      1696.9     3.505 ns     2.810 ns               2
+     5     6        4.50        4.4997        77527       193753      1507.2     3.623 ns     3.036 ns               2
+     6     7        5.00        4.9996        48104       157065      1025.9     3.635 ns     2.874 ns               0
+     7     8        5.50        5.4996        69959       232248      1373.8     3.568 ns     2.820 ns               1
+     8     9        6.00        5.9996       112177       311955      1767.3     3.609 ns     2.959 ns               0
+     9    10        6.50        6.4995        63970       205067      1034.8     3.633 ns     2.880 ns               2
+    10    11        7.00        6.9995        92291       313323      1448.7     3.566 ns     2.804 ns               0
+    11    12        7.50        7.4995       128273       348853      1590.5     3.608 ns     2.986 ns               0
+    12    13        8.00        7.9994        86847       283848      1158.5     3.597 ns     2.857 ns               0
+    13    14        8.50        8.4994       143335       424112      1669.1     3.574 ns     2.905 ns               0
+    14    15        9.00        8.9994        92768       302161      1097.1     3.599 ns     2.871 ns               1
+    15    16        9.50        9.4993       153665       469633      1640.4     3.562 ns     2.883 ns               2
 
-Routage dans les passes : 99.9998 % des photons sur la route de leur région (919452 sur 919454)
-Hors des passes (transit) : 175871 photons, dont 100.00 % déjà sur la route de la région suivante
-Taux pendant les passes : 249.9 photons/ms en moyenne, écart max d'une route 40.48 %
-IN1 : 56.4 à 426.7 photons par pixel selon la route
+Routage dans les passes : 99.9997 % des photons sur la route de leur région (5101571 sur 5101584)
+Hors des passes (transit) : 970405 photons, dont 100.00 % déjà sur la route de la région suivante
+Taux pendant les passes : 1386.4 photons/ms en moyenne, écart max d'une route 31.79 %
+IN1 : 88.8 à 600.3 photons par pixel selon la route
 Mosaïque : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q7_mosaique.svg
 Tableaux : q7_routes.csv, q7_images.csv ; données brutes : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q7_sequence.spc
 
