@@ -754,6 +754,11 @@ end
     @test occursin("as programmed", conclusion(session(1, 0; invert = false)))
     @test occursin("never high", conclusion(session(14, 15; volts = 0.3)))
     @test occursin("doesn't write what the run programs", conclusion(session(15, 15)))
+    # Slots played (visits.csv) but the gate never high: the readback isn't wired to the lines.
+    dir = session(0, 0; volts = 0.1)
+    write(joinpath(dir, "visits.csv"), "slot,roi\n0,0\n1,0\n")
+    @test FLIMApp.routing_readback(dir).slots == 2
+    @test occursin("aren't wired", conclusion(dir)) && occursin("2 slot(s)", conclusion(dir))
     @test FLIMApp.routing_readback(mktempdir()) === nothing
     @test occursin("no readback.bin", only(FLIMApp.routing_readback_lines(nothing)))
 end

@@ -402,7 +402,8 @@ end
     @test FLIMCore.parametres_clamp(FLIMCore.Reglages())[1]["routing_mode"] == 0x1900   # défaut : M0 et M3, M3 descendant
     @test FLIMCore.parametres_clamp(FLIMCore.Reglages(); tous_marqueurs = true)[1]["routing_mode"] == 0x7F00   # test : M0–M3
 
-    # Photons pile sur M0 : dans la passe ; pile sur M3 : dehors ; entre deux passes : hors passe.
+    # Photons pile sur M0 : dans la passe ; pile sur M3 : dehors ; entre deux passes : hors passe ;
+    # avant la première passe et après la dernière (la NI ne pilote pas encore, ou plus) : à part.
     e = FLIMCore.EncodeurFifo()
     FLIMCore.photon!(e, 50, 4000; routage = 2)              # avant toute passe
     FLIMCore.photon!(e, 100, 4000; routage = 2)             # même tic que M0, écrit avant lui
@@ -411,15 +412,20 @@ end
     FLIMCore.photon!(e, 160, 4000; routage = FLIMCore.CODE_HORS_ROI)   # code réservé : jeté, même dans la passe
     FLIMCore.photon!(e, 200, 4000; routage = 2)             # même tic que M3
     FLIMCore.marqueur!(e, 200, 0b1000)
+    FLIMCore.photon!(e, 250, 4000; routage = 2)             # entre deux passes
+    FLIMCore.marqueur!(e, 300, 0b0001)
+    FLIMCore.marqueur!(e, 400, 0b1000)
+    FLIMCore.photon!(e, 450, 4000; routage = 2)             # après la dernière passe
     vus = []
     q = FLIMCore.Passes(canaux = 256)
     FLIMCore.passes!((pp, t0, t1, pertes) -> push!(vus, (t0, t1, copy(pp.histo))), q, e.mots)
     FLIMCore.terminer_passes!((pp, t0, t1, pertes) -> push!(vus, (t0, t1, copy(pp.histo))), q)
-    @test length(vus) == 1 && vus[1][1:2] == (100, 200)
+    @test length(vus) == 2 && vus[1][1:2] == (100, 200) && vus[2][1:2] == (300, 400)
     # ADC 4000 : microtemps 95, canal 6 sur 256 ; ADC 4079 : microtemps 16, canal 2 ; code 2 : colonne 3.
     @test sum(vus[1][3]) == 2 && vus[1][3][6, 3] == 1 && vus[1][3][2, 3] == 1
-    @test q.hors_passe == 2                                  # t = 50 (avant M0) et t = 200 (pile sur M3)
-    @test q.hors_roi == 1 && q.dernier == 200
+    @test q.hors_passe == 2                                  # t = 200 (pile sur M3) et t = 250
+    @test q.hors_bords == 2                                  # t = 50 (avant le premier M0) et t = 450
+    @test q.hors_roi == 1 && q.dernier == 450
 end
 
 @testset "passes du Realtime : flux synthétique, lectures quelconques" begin
@@ -947,6 +953,20 @@ end
     csv = only(filter(f -> endswith(f, "_module0.csv"), fin.fichiers))
     @test any(l -> l == "# serie = 3T0089/IN1", readlines(csv))
     @test any(l -> occursin("SPC-QC-104, entrée 1", l), readlines(csv))
+end
+
+@testset "SPC-QC-104 : taux de la vérification, au temps de la carte" begin
+    # 0,2 s de flux à un photon toutes les 1000 tics (488 kHz) sur IN1, rendus d'un coup : le taux
+    # est celui du flux, quel que soit le temps que la lecture a pris (pas 0,2 s / 0,5 s de moins).
+    e = FLIMCore.EncodeurQC()
+    n = floor(Int, 0.2 / 2.048e-9 / 1000)
+    foreach(t -> FLIMCore.photon_qc!(e, 1000t, 1000; entree = 1), 1:n)
+    s = FLIMCore.SourceQC(FLIMCore.QCRejeu(e.mots))
+    r = reglages_qc()
+    FLIMCore.ouvrir!(s, r)
+    FLIMCore.configurer!(s, 0, FLIMCore.parametres_clamp(r)[1], joinpath(r.dossier, "p.ini"))
+    taux = FLIMCore.mesurer_taux!(s, [0, 1], 0.3)
+    @test isapprox(taux[0], 1 / (1000 * 2.048e-9); rtol = 0.01) && taux[1] == 0
 end
 
 @testset "SPC-QC-104 : messages d'ouverture" begin

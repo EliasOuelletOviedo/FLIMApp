@@ -319,10 +319,12 @@ function routing_readback(dir::AbstractString; max_s::Real = 60.0)
         counts[code] = get(counts, code, 0) + 1
     end
     n_scan, n_pause = sum(values(scan_codes); init = 0), sum(values(pause_codes); init = 0)
+    visits = joinpath(dir, "visits.csv")                     # one line per slot played, after the header
+    slots = isfile(visits) ? max(0, countlines(visits) - 1) : -1
     lines = [(name = "P0.$(b + 3) (R$(b - 1))", scan_high = high_scan[b] / max(1, n_scan), pause_high = high_pause[b] / max(1, n_pause),
               vmin = vmin[b], vmax = vmax[b]) for b in 1:4]
     return (seconds = n / rate, scan_samples = n_scan, pause_samples = n_pause, scan_codes = scan_codes, pause_codes = pause_codes,
-            invert = invert, expected = sort(unique(expected)), lines = lines)
+            invert = invert, expected = sort(unique(expected)), lines = lines, slots = slots)
 end
 
 """The code the cards read for `written` on P0.7…P0.4 (NOT of it with `invert`: active-low inputs)."""
@@ -334,7 +336,8 @@ code_read_from(written::Integer, invert::Bool) = Int(FLIMCore.code_ecrit(written
 `routing_readback` as text, ending with what it means: the NI drives the
 code the cards should read (then a card that reads another, or 0, loses it
 after the BOB: cable, connector, ground), it drives another one, or it
-doesn't drive the lines at all.
+doesn't drive the lines at all — or, the DAQ loop having played slots
+(visits.csv) with the gate never high, the readback isn't wired.
 """
 function routing_readback_lines(r)::Vector{String}
     r === nothing && return ["no readback.bin with line_0 and line_4…line_7 (bench.toml: [journal] readback, readback_signals)"]
@@ -347,7 +350,11 @@ function routing_readback_lines(r)::Vector{String}
                             l.name, 100 * l.scan_high, 100 * l.pause_high, l.vmin, l.vmax))
     end
     if r.scan_samples == 0
-        push!(out, "=> P0.0 (gate) never high: no scan played, or line_0 isn't read back.")
+        push!(out, r.slots > 0 ?
+            "=> P0.0 (gate) never high, although the DAQ loop played $(r.slots) slot(s): the readback inputs aren't wired to the " *
+            "port-0 lines (readback_signals line_0 … line_7 in config/bench.toml; they read about 0 V). Nothing can be said " *
+            "about the routing from the readback: see what the cards read (ROUTE-0x, \"in passes by code\")." :
+            "=> P0.0 (gate) never high: no scan played, or line_0 isn't read back.")
         return out
     end
     main(counts) = isempty(counts) ? -1 : first(argmax(last, collect(counts)))

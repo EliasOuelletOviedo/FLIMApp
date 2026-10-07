@@ -429,7 +429,9 @@ Taux de photons de chaque module comptés dans le flux pendant `duree_s`
 (la carte est configurée en FIFO) : la vérification les préfère aux
 compteurs de la carte quand la source sait le faire (QC-104 : le sens des
 valeurs de SPC_read_rates n'est pas documenté). `nothing` : pas pour cette
-source.
+source. QC-104 : divisés par le temps de la carte que couvrent les données
+lues (son macrotemps), pas par le temps écoulé — la carte met un moment à
+livrer ses premières données après le départ.
 """
 mesurer_taux!(::Source, modules, duree_s) = nothing
 
@@ -437,10 +439,12 @@ function mesurer_taux!(s::SourceQC, modules, duree_s)
     s.en_mesure && return nothing
     _reinitialiser_flux!(s)
     s.compter_seulement = true
+    tic = qc_tic_s(s.carte)
     qc_demarrer!(s.carte)
     t0 = time()
     try
-        while time() - t0 < duree_s
+        # `duree_s`, et au moins 60 % de `duree_s` de données de la carte (1,5 s de plus au plus).
+        while time() - t0 < duree_s || (s.base * tic < 0.6 * duree_s && time() - t0 < duree_s + 1.5)
             _pomper!(s)
             sleep(0.01)
         end
@@ -449,7 +453,8 @@ function mesurer_taux!(s::SourceQC, modules, duree_s)
         s.compter_seulement = false
         qc_arreter!(s.carte)
     end
-    dt = time() - t0
+    couvert = s.base * tic                         # temps de la carte couvert par ce qui a été lu
+    dt = couvert > 0.01 ? couvert : time() - t0
     return Dict(k => s.photons[k + 1] / dt for k in modules)
 end
 

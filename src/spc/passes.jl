@@ -47,7 +47,9 @@ Les événements du dernier tic lu attendent la lecture suivante.
 
 Les photons du code réservé (`CODE_HORS_ROI` : déplacements, pauses) sont
 jetés et comptés dans `hors_roi` ; les autres photons hors passe (décalage
-d'un échantillon entre le code et le signal de passe) dans `hors_passe`.
+d'un échantillon entre le code et le signal de passe) dans `hors_passe` —
+sauf ceux d'avant la première passe et d'après la dernière (la NI ne
+pilote pas encore, ou plus, les lignes de routage), dans `hors_bords`.
 Un M0 accepté pendant une passe (M3 perdu, M0 en trop sans contrôle de
 cadence, nouvelle cadence) abandonne la passe en cours
 (`passes_abandonnees` ; pas celle que l'arrêt coupe, `terminer_passes!`). `dernier` : le dernier temps lu (tics).
@@ -92,6 +94,9 @@ mutable struct Passes
     dernier_valide::Int64
     m0_hors_cadence::Int
     m0_manquants::Int
+    hors_bords::Int
+    hors_depuis_fin::Int                 # photons hors passe depuis la fin de la dernière passe
+    passe_vue::Bool
 end
 
 function Passes(; canaux::Integer = 256, duree::Integer = 0, periode::Integer = 0, tolerance::Integer = 0)
@@ -103,7 +108,7 @@ function Passes(; canaux::Integer = 256, duree::Integer = 0, periode::Integer = 
                   4096 ÷ canaux, false, Int64(0), 0, zeros(UInt32, canaux, 16), 0, 0, 0, 0, 0, typemin(Int64),
                   zeros(Int, 4), zeros(Int, 16), Int64(-1), Int64(-1), Int64(-1),
                   Int64(duree), typemin(Int64), Int64(-1), Int64(-1), Int64(-1),
-                  Int64(periode), Int64(tolerance), typemin(Int64), 0, 0)
+                  Int64(periode), Int64(tolerance), typemin(Int64), 0, 0, 0, 0, false)
 end
 
 """
@@ -144,6 +149,10 @@ dans `passes_abandonnees` : ce n'est pas un défaut du signal de passe.
 function terminer_passes!(f, p::Passes)
     _passes_avant!(f, p, typemax(Int64))
     p.en_passe && _vider_passe!(p)
+    # Après la dernière passe, la NI ne pilotait plus les lignes : pas un décalage.
+    p.hors_passe -= p.hors_depuis_fin
+    p.hors_bords += p.hors_depuis_fin
+    p.hors_depuis_fin = 0
     return p
 end
 
@@ -169,6 +178,8 @@ function _passes_avant!(f, p::Passes, limite::Int64)
                 p.en_passe && (p.passes_abandonnees += 1; _vider_passe!(p))
                 p.en_passe = true
                 p.t_debut = td
+                p.passe_vue = true
+                p.hors_depuis_fin = 0
             end
             if p.dernier_debut != typemin(Int64)
                 p.intervalle = td - p.dernier_debut
@@ -185,8 +196,11 @@ function _passes_avant!(f, p::Passes, limite::Int64)
             elseif p.en_passe
                 p.histo[(4095 - Int(p.adc_photons[k])) ÷ p.groupe + 1, code + 1] += 1
                 p.photons += 1
-            else
+            elseif p.passe_vue
                 p.hors_passe += 1
+                p.hors_depuis_fin += 1
+            else
+                p.hors_bords += 1                    # avant la première passe
             end
             k += 1
         end
