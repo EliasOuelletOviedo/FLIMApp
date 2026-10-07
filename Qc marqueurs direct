@@ -1,0 +1,159 @@
+# qc_marqueurs_direct.jl — affiche en continu les marqueurs M0 à M3 reçus par la QC-104.
+#
+# Il faut : SPCM fermé. Laser et détecteurs inutiles (les marqueurs ne
+# dépendent pas des photons). Arrêt : Ctrl+C (cartes et compteur libérés).
+#
+# Branchements (comme le GUI) : CTR 1 OUT (PFI 13) de la 6321 → broches 12 (M0)
+# et 10 (M3) du Micro Sub-D 15 ; D GND → broche 5. Jamais rien sur 1, 6 et 11.
+#
+# Avec ni = :ctr1, la 6321 envoie en continu des impulsions de `largeur_s` à
+# `frequence` : M0 doit tomber sur chaque front montant, M3 sur chaque front
+# descendant, donc M3 - M0 = largeur_s. Avec ni = :aucun, rien n'est piloté :
+# le script montre ce qui arrive (horloges du scanner sur M1 et M2, par exemple,
+# avec routing_mode = 0x7f00).
+#
+# Chaque ligne résume une période (0,5 s) d'après le décodage de la DLL de B&H :
+# nombre de fronts par marqueur et fréquence mesurée ; pour les paires M0 → M3,
+# largeur moyenne, minimum et maximum. Le tic du macrotemps vaut 2,048 ns.
+
+Base.exit_on_sigint(false)          # Ctrl+C passe par la libération des cartes
+isdefined(Main, :DAQmxLite) || include("DAQmxLite.jl")
+using .DAQmxLite
+isdefined(Main, :SPCLite) || include("SPCLite.jl")
+using .SPCLite
+(isdefined(SPCLite, :VERSION_LITE) && SPCLite.VERSION_LITE >= 9) ||
+    error("Julia a gardé une ancienne version de SPCLite.jl : redémarre Julia, puis relance ce script.")
+using Printf
+include("reglages_qc.jl")
+
+marqueurs_direct = (
+    ni = :ctr1,                   # :ctr1 (impulsions de la 6321) ou :aucun
+    carte = "Dev1", compteur = "ctr1", sortie = "PFI13",
+    frequence = 1000.0,           # Hz
+    largeur_s = 100e-6,           # durée de l'impulsion = M3 - M0 attendu
+    routing_mode = 0x1900,        # M0 front montant + M3 front descendant ;
+                                  # 0x7f00 : les 4 marqueurs (M3 descendant, les autres montants)
+    periode_s = 0.5,
+    duree_max_s = Inf,            # Inf : jusqu'à Ctrl+C
+    numero_serie = "",
+)
+
+"""Fronts de chaque marqueur dans une période, d'après la DLL (temps en tics)."""
+function marqueurs_periode(mots, n, f, fichier)
+    ecrire_spc(fichier, f.entete, mots, n)
+    ent, _ = photons_dll(fichier; type_fifo = f.type_fifo, type_flux = type_flux_fichier(f.type_flux),
+                         quoi = 0x3c, max = 500_000)          # bits 2 à 5 : marqueurs M0 à M3
+    t = [Int64[] for _ in 1:4]
+    for e in ent
+        for k in 1:4
+            (e.drapeaux & DRAPEAUX_MARQUEURS[k]) != 0 && push!(t[k], Int64(e.mtime))
+        end
+    end
+    return t
+end
+
+"""Largeurs M0 → M3 : pour chaque M0, le premier M3 qui le suit avant le M0 suivant."""
+function largeurs_paires(t0, t3)
+    l = Int64[]
+    j = 1
+    for (i, a) in enumerate(t0)
+        suivant = i < length(t0) ? t0[i + 1] : typemax(Int64)
+        while j <= length(t3) && t3[j] <= a
+            j += 1
+        end
+        j <= length(t3) && t3[j] < suivant && push!(l, t3[j] - a)
+    end
+    return l
+end
+
+function ligne_marqueurs(t_s, t, tic, r)
+    freq(v) = length(v) >= 2 ? (length(v) - 1) / ((v[end] - v[1]) * tic) : NaN
+    @printf("%7.1f ", t_s)
+    for k in 1:4
+        n = length(t[k])
+        n == 0 ? @printf("  M%d      0          ", k - 1) : @printf("  M%d %6d %9.3f Hz", k - 1, n, freq(t[k]))
+    end
+    l = largeurs_paires(t[1], t[4]) .* tic
+    if isempty(l)
+        print("   M3-M0 : —")
+    else
+        moy = sum(l) / length(l)
+        @printf("   M3-M0 : %d paires, %.3f µs (%.3f à %.3f)", length(l), moy * 1e6,
+                minimum(l) * 1e6, maximum(l) * 1e6)
+        r.ni == :ctr1 && @printf(", écart %+.1f ns", (moy - r.largeur_s) * 1e9)
+    end
+    println()
+end
+
+function boucle_marqueurs(r, m, f, fichier, tic)
+    tampon = zeros(UInt16, 1 << 21)
+    morceau = UInt16[]
+    if r.ni == :ctr1
+        @printf("Attendu : M0 et M3 à %.3f Hz, soit %d fronts chacun par période ; M3-M0 = %.3f µs\n\n",
+                r.frequence, round(Int, r.frequence * r.periode_s), r.largeur_s * 1e6)
+    end
+    demarrer(m)
+    t0 = time()
+    try
+        while time() - t0 < r.duree_max_s
+            fin = time() + r.periode_s
+            while time() < fin
+                n = lire_fifo!(m, tampon)
+                append!(morceau, view(tampon, 1:n))
+                sleep(0.01)
+            end
+            (etat_mesure(m) & SPC_FOVFL) != 0 && println("        FIFO débordé")
+            n = length(morceau) - isodd(length(morceau))
+            ligne_marqueurs(time() - t0, marqueurs_periode(morceau, n, f, fichier), tic, r)
+            reste = isodd(length(morceau)) ? morceau[end] : nothing
+            empty!(morceau)
+            reste === nothing || push!(morceau, reste)
+        end
+    finally
+        try; arreter(m); catch; end
+    end
+end
+
+function surveiller_marqueurs(r, reglages)
+    r.ni in (:aucun, :ctr1) || error("ni : :aucun ou :ctr1")
+    r.ni == :ctr1 && !(0 < r.largeur_s < 1 / r.frequence) && error("largeur_s doit être plus courte que la période")
+    dossier = joinpath(@__DIR__, "resultats", "qc", "marqueurs")
+    p = merge(parametres_qc(reglages), Dict{String,Any}(
+        "mode" => 1, "adc_resolution" => 12, "stop_on_time" => 0, "collect_time" => 1.0,
+        "macro_time_clk" => 0, "trigger" => 0, "routing_mode" => Int(r.routing_mode)))
+    ini = ecrire_ini(joinpath(dossier, "marqueurs.ini"), p)
+    fichier = joinpath(dossier, "periode.spc")
+
+    avec_spc_tous(ini; types = (TYPE_QC104,)) do modules
+        m = modules[1]
+        if !isempty(r.numero_serie)
+            i = findfirst(k -> (try eeprom(k).serie catch; "" end) == r.numero_serie, modules)
+            i === nothing && error("aucune QC-104 de n° de série $(r.numero_serie)")
+            m = modules[i]
+        end
+        f = fifo_init(m)
+        tic = tic_macro_s(m)
+        @printf("QC-104 module %d ; routing_mode 0x%04x ; tic %.3f ns. Ctrl+C pour arrêter.\n",
+                m, r.routing_mode, tic * 1e9)
+        if r.ni == :aucun
+            boucle_marqueurs(r, m, f, fichier, tic)
+        else
+            withtask("marqueurs_direct") do th
+                voie = "$(r.carte)/$(r.compteur)"
+                add_co_pulse_freq(th, voie, r.frequence; duty = r.largeur_s * r.frequence)
+                chk(ccall((:DAQmxSetCOPulseTerm, "nicaiu"), Int32,
+                          (Ptr{Cvoid}, Cstring, Cstring), th, voie, "/$(r.carte)/$(r.sortie)"))
+                cfg_implicit_timing(th, Val_ContSamps, 1000)
+                start_task(th)
+                boucle_marqueurs(r, m, f, fichier, tic)
+            end
+        end
+    end
+end
+
+try
+    surveiller_marqueurs(marqueurs_direct, REGLAGES_QC)
+catch err
+    err isa InterruptException || rethrow()
+    println("\nArrêté ; cartes et compteur libérés.")
+end
