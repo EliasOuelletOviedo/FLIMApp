@@ -955,6 +955,33 @@ end
     @test any(l -> occursin("SPC-QC-104, entrée 1", l), readlines(csv))
 end
 
+@testset "Single jusqu'à une cible : l'acquisition de l'IRF, les deux canaux ensemble" begin
+    flux = [FLIMCore.flux_passes_synthetique(codes = [1], passes = 4, scan_s = 0.02, pause_s = 0.005, graine = g,
+                                             photons_par_s = 3e5) for g in (1, 2)]
+    m = FLIMCore.demarrer_moteur(reglages_qc(); source = FLIMCore.SourceQC(FLIMCore.QCRejeu(vers_qc(flux))))
+    @test attendre_etat(m, :pret)
+    # Chaque Single rend tout le flux (environ 24 000 photons par entrée) : la somme passe 2^11 au plus tard
+    # au quatrième, sur les deux canaux ; arrêt là, bien avant les 50.
+    histos = FLIMCore.HistoSingle[]
+    FLIMCore.commander!(m, FLIMCore.Single(0.02, 50; jusqu_a = 2^11))
+    fin = FLIMCore.attendre_fin(m, :single; delai_s = 60, io = nothing, f = x -> x isa FLIMCore.HistoSingle && push!(histos, x))
+    @test !fin.erreur && startswith(fin.raison, FLIMCore.RAISON_CIBLE_ATTEINTE)
+    n = maximum(h.numero for h in histos)
+    @test 1 <= n < 50 && length(histos) == 2n                                   # les deux canaux à chaque Single
+    for k in 0:1
+        somme = sum(Int.(h.histogramme) for h in histos if h.carte == k)
+        @test maximum(somme) > 2^11
+        csv = only(filter(f -> endswith(f, "_module$k.csv"), fin.fichiers))
+        lignes = filter(l -> !startswith(l, "#"), readlines(csv))
+        @test [parse(Int, last(split(l, ","))) for l in lignes[2:end]] == somme   # la colonne somme : l'IRF
+    end
+    # Pas atteinte dans le nombre de Singles permis : dit, sans « cible atteinte ».
+    FLIMCore.commander!(m, FLIMCore.Single(0.02, 2; jusqu_a = 10^9))
+    fin = FLIMCore.attendre_fin(m, :single; delai_s = 60, io = nothing)
+    FLIMCore.arreter_moteur(m)
+    @test !fin.erreur && startswith(fin.raison, "cible pas atteinte")
+end
+
 @testset "SPC-QC-104 : taux de la vérification, au temps de la carte" begin
     # 0,2 s de flux à un photon toutes les 1000 tics (488 kHz) sur IN1, rendus d'un coup : le taux
     # est celui du flux, quel que soit le temps que la lecture a pris (pas 0,2 s / 0,5 s de moins).

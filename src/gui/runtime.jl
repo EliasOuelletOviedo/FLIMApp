@@ -60,13 +60,13 @@ end
 """
     publish_frame!(series::ChannelSeries, frame::ChannelFrame)
 
-Publish one frame's histogram/fit/counts onto one channel's "latest value"
-Observables (Histogram plot).
+Publish one frame's histogram and fit onto one channel's "latest value"
+Observables (Histogram plot). The counts bar shows the card's count rate
+instead, fed continuously by the refresh tick (`spc_channel_rates`).
 """
 function publish_frame!(series::ChannelSeries, frame::ChannelFrame)
     series.histogram[] = frame.histogram
     series.fit[] = frame.fit
-    series.counts[] = frame.photons
     return nothing
 end
 
@@ -81,17 +81,6 @@ function recompute_roi_smooth!(app, series::RoiChannelSeries)
     recompute_smooth_series!(app, series.photons, series.photons_smooth, series.timestamps, series.photons_kalman)
     recompute_smooth_series!(app, series.lifetime, series.lifetime_smooth, series.timestamps, series.lifetime_kalman)
     recompute_smooth_series!(app, series.concentration, series.concentration_smooth, series.timestamps, series.concentration_kalman)
-    return nothing
-end
-
-"""
-    reset_channel_series!(series::ChannelSeries)
-
-Clear one channel's "latest frame" counter ahead of a fresh run
-(histogram/fit are left as-is — `clear_runtime_plots!` NaN-fills them).
-"""
-function reset_channel_series!(series::ChannelSeries)
-    series.counts[] = 0.0
     return nothing
 end
 
@@ -120,7 +109,6 @@ histories are emptied in place (plot bindings keep them); the per-ROI ones
 are rebuilt (see `rebuild_roi_series!`).
 """
 function reset_acquisition_state!(app, app_run; n_rois::Union{Nothing, Int} = nothing)
-    foreach(reset_channel_series!, channel_series(app_run))
     rebuild_roi_series!(app, app_run; n_rois = n_rois)
     empty!(app_run.protocol_setpoint)
     empty!(app_run.command1)

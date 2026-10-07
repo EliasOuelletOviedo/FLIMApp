@@ -122,7 +122,7 @@ Base.@kwdef mutable struct Reglages
     qc_taux::Vector{Int} = [2, 3, 4, 1]
     # [verification]
     series::Vector{String} = ["3T0089/IN1", "3T0089/IN2"]
-    seuil_cfd::Float64 = 100.0
+    seuil_cfd::Float64 = 10.0
     # [imagerie]
     modules_imagerie::Vector{Int} = [0, 1]
     duree_s::Float64 = 0.0
@@ -145,6 +145,9 @@ Base.@kwdef mutable struct Reglages
     resolution_adc::Int = 8
     arret_debordement::Bool = true
     inverser::Bool = false
+    irf_temps_s::Float64 = 1.0
+    irf_maximum::Int = 32768
+    irf_histogrammes_max::Int = 600
     # [clamp]
     canaux_clamp::Int = 256
     inverser_routage::Bool = true
@@ -197,6 +200,9 @@ const CLES_REGLAGES = [
     ("single", "resolution_adc", :resolution_adc, "8 bits = 256 canaux, la résolution des déclins du Realtime et de l'IRF"),
     ("single", "arret_debordement", :arret_debordement, "arrêt dès qu'un canal atteint 65535 coups"),
     ("single", "inverser", :inverser, "déclin à l'envers (montée lente, chute brutale) : true"),
+    ("single", "irf_temps_s", :irf_temps_s, "acquisition d'IRF (bouton IRF de la fenêtre SPC) : un Single de cette durée à la fois, sur les deux canaux ensemble"),
+    ("single", "irf_maximum", :irf_maximum, "… additionnés jusqu'à ce que le maximum de la somme dépasse ce nombre de coups sur chaque canal (2^15)"),
+    ("single", "irf_histogrammes_max", :irf_histogrammes_max, "… au plus ce nombre de Singles : au-delà, l'IRF n'est pas changée"),
     ("clamp", "canaux", :canaux_clamp, "canaux des déclins du Realtime (les 4096 du FIFO regroupés) : 256, la résolution de l'IRF"),
     ("clamp", "fin_par_m3", :fin_par_m3, "false : M0 seul, chaque passe dure le scan programmé ; true : sa fin vient de M3 (le même signal de passe câblé aussi sur M3, front descendant)"),
     ("clamp", "inverser_routage", :inverser_routage, "la NI écrit NON(c) sur P0.4-P0.7 et la carte, aux entrées actives à 0 V, lit c"),
@@ -315,6 +321,9 @@ function valider_reglages(r::Reglages)
     r.trames_par_image >= 0 || error("réglages SPC : [affichage] trames_par_image positif ou nul")
     r.temps_collecte_s > 0 || error("réglages SPC : [single] temps_collecte_s doit être positif")
     r.n_histogrammes >= 1 || error("réglages SPC : [single] n_histogrammes d'au moins 1")
+    r.irf_temps_s > 0 || error("réglages SPC : [single] irf_temps_s doit être positif")
+    (r.irf_maximum >= 1 && r.irf_histogrammes_max >= 1) ||
+        error("réglages SPC : [single] irf_maximum et irf_histogrammes_max d'au moins 1")
     r.resolution_adc == 8 ||
         error("réglages SPC : [single] resolution_adc : 8 bits, des histogrammes de 256 canaux comme ceux du Realtime et de l'IRF")
     r.canaux_clamp in (64, 128, 256, 512, 1024, 4096) || error("réglages SPC : [clamp] canaux : 64 à 4096, un diviseur de 4096")

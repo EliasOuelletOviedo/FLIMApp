@@ -30,6 +30,68 @@ function show_status!(blocks, message::AbstractString)
 end
 
 """
+    adopt_irf!(app_run, blocks, filepath)::Bool
+
+Import `filepath` as the IRF (`import_irf`: an SPCM .sdt or a Single's CSV;
+refused, with every difference, if taken with other settings) and load it
+now — or at the next START during a run (the fit's runtime state isn't
+safe to change under a running worker, `RuntimeContext`). The status line
+says what happened.
+"""
+function adopt_irf!(app_run, blocks, filepath::AbstractString)::Bool
+    try
+        irfs, _ = import_irf(filepath, app_run.spc.settings; applied = spc_applied_settings(app_run.spc))
+        update_path_textbox!(blocks.irf_path_textbox, filepath)
+        @info "IRF imported" path=filepath channels=length(irfs)
+    catch e
+        @warn "IRF file refused" path=filepath error=string(e)
+        show_status!(blocks, "IRF refused: " * first(split(sprint(showerror, e), '\n')))
+        return false
+    end
+    if app_run.run_open
+        app_run.irf_reload_pending = true
+        show_status!(blocks, "IRF saved: loaded at the next START")
+    else
+        init_irf_runtime!(app_run.spc.settings)
+        show_status!(blocks, RUNTIME[].irf === nothing ? "IRF unreadable: see the log" : "IRF loaded")
+    end
+    return true
+end
+
+"""
+    irf_acquisition_csv(fin)::Union{Nothing, String}
+
+The CSV to import as the IRF at the end of an IRF acquisition: one of the
+summed Single's CSVs (`read_single_irf` finds the other channel's next to
+it) when the target was reached on both channels; `nothing` when it was
+stopped, not reached or failed.
+"""
+function irf_acquisition_csv(fin::FLIMCore.Fin)::Union{Nothing, String}
+    (fin.erreur || !startswith(fin.raison, FLIMCore.RAISON_CIBLE_ATTEINTE)) && return nothing
+    k = findfirst(f -> endswith(f, ".csv"), fin.fichiers)
+    return k === nothing ? nothing : fin.fichiers[k]
+end
+
+"""
+    finish_irf_acquisition!(app_run, blocks, fin)::Bool
+
+The end of the SPC window's IRF acquisition (`spc_toggle_irf!`). Its target
+reached on both channels, the summed Single — one CSV per channel, found
+together — becomes the IRF (`adopt_irf!`). Stopped, target not reached or
+failed: the IRF is unchanged, and the status line says why.
+"""
+function finish_irf_acquisition!(app_run, blocks, fin::FLIMCore.Fin)::Bool
+    csv = irf_acquisition_csv(fin)
+    if csv === nothing
+        @warn "IRF acquisition not used: the IRF is unchanged" reason=fin.raison
+        show_status!(blocks, "IRF acquisition: $(fin.raison) — IRF unchanged")
+        return false
+    end
+    @info "IRF acquisition done" reason=fin.raison files=fin.fichiers
+    return adopt_irf!(app_run, blocks, csv)
+end
+
+"""
     show_recording_space!(app_run, blocks)
 
 The free space where the sessions go (`recording_space`): in the status
@@ -156,26 +218,7 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
         # Imported now (kept as ~/.flimapp/irf.csv): a file that isn't a
         # Single (the SPC window's CSV, or SPCM's .sdt), or an IRF taken with
         # other card or detector settings, is refused here, not at the next START.
-        try
-            irfs, _ = import_irf(filepath, app_run.spc.settings; applied = spc_applied_settings(app_run.spc))
-            update_path_textbox!(blocks.irf_path_textbox, filepath)
-            @info "IRF imported" path=filepath channels=length(irfs)
-        catch e
-            @warn "IRF file refused" path=filepath error=string(e)
-            show_status!(blocks, "IRF refused: " * first(split(sprint(showerror, e), '\n')))
-            return
-        end
-
-        # Reload it now — or, during a run, at the next START: the fit's
-        # runtime state isn't safe to change under a running worker
-        # (RuntimeContext, lifetime_analysis.jl).
-        if app_run.run_open
-            app_run.irf_reload_pending = true
-            show_status!(blocks, "IRF saved: loaded at the next START")
-        else
-            init_irf_runtime!(app_run.spc.settings)
-            show_status!(blocks, RUNTIME[].irf === nothing ? "IRF unreadable: see the log" : "IRF loaded")
-        end
+        adopt_irf!(app_run, blocks, filepath)
     end
 
     # The recording folder ([enregistrement] dossier, config/spc.toml): the

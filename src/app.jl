@@ -148,7 +148,6 @@ function warm_up_gui!(app, app_run, blocks)
     refresh_tick!(app, app_run, blocks)
 
     reset_acquisition_state!(app, app_run)
-    foreach(reset_channel_series!, channel_series(app_run))
     render_plot!(app, app_run, blocks, :plot1)
     render_plot!(app, app_run, blocks, :plot2)
     reset_diagnostics!(app_run.display)

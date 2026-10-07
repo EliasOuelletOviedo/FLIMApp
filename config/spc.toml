@@ -45,7 +45,7 @@ taux = [2, 3, 4, 1]              # quelle valeur de SPC_read_rates (1 à 8) est 
 
 [verification]
 series = ["3T0089/IN1", "3T0089/IN2"] # canal 1 puis canal 2 : "<n° de série>/IN<entrée>" pour la QC-104 (3T0089/IN1), le n° de série de chaque carte pour les SPC-150N
-seuil_cfd = 100.0                # /s : en dessous, détecteurs éteints (Enable outputs dans le logiciel DCC ?)
+seuil_cfd = 10.0                 # /s : en dessous, détecteurs éteints (Enable outputs dans le logiciel DCC ?)
 
 [imagerie]
 modules = [0, 1]                 # cartes enregistrées
@@ -71,6 +71,9 @@ n_histogrammes = 5               # histogrammes successifs, chacun repart de zé
 resolution_adc = 8               # 8 bits = 256 canaux, la résolution des déclins du Realtime et de l'IRF
 arret_debordement = true         # arrêt dès qu'un canal atteint 65535 coups
 inverser = false                 # déclin à l'envers (montée lente, chute brutale) : true
+irf_temps_s = 1.0                # acquisition d'IRF (bouton IRF de la fenêtre SPC) : un Single de cette durée à la fois, sur les deux canaux ensemble
+irf_maximum = 32768              # … additionnés jusqu'à ce que le maximum de la somme dépasse ce nombre de coups sur chaque canal (2^15)
+irf_histogrammes_max = 600       # … au plus ce nombre de Singles : au-delà, l'IRF n'est pas changée
 
 [clamp]
 canaux = 256                     # canaux des déclins du Realtime (les 4096 du FIFO regroupés) : 256, la résolution de l'IRF

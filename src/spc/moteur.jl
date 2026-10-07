@@ -267,12 +267,25 @@ end
 Imagerie(g::Geometrie = Geometrie(); duree::Real = Inf, trames::Integer = 0, garder_mots::Bool = false) =
     Imagerie(g, Float64(duree), Int(trames), garder_mots)
 
-"""`n` histogrammes Single de `temps_s` secondes, construits dans les cartes."""
+"""
+    Single(temps_s, n=1; jusqu_a=0)
+
+`n` histogrammes Single de `temps_s` secondes, construits dans les cartes,
+toutes en même temps. Avec `jusqu_a > 0` (l'acquisition d'une IRF) : `n`
+au plus, arrêtés dès que, sur chaque carte, le maximum de la somme des
+histogrammes dépasse `jusqu_a` coups — la `Fin` commence alors par
+`RAISON_CIBLE_ATTEINTE`, et le CSV de chaque carte (colonne `somme`) est
+l'IRF de son canal.
+"""
 struct Single <: Commande
     temps_s::Float64
     n::Int
+    jusqu_a::Int
 end
-Single(temps_s::Real, n::Integer = 1) = Single(Float64(temps_s), Int(n))
+Single(temps_s::Real, n::Integer = 1; jusqu_a::Integer = 0) = Single(Float64(temps_s), Int(n), Int(jusqu_a))
+
+"""Début de la raison d'une `Fin` de Single arrêtée par sa cible (`Single(...; jusqu_a)`)."""
+const RAISON_CIBLE_ATTEINTE = "cible atteinte"
 
 """
     Clamp(; rois=Int[], ordre=rois, dossier="", scan_s=0.95, pause_s=0.05, echantillon_s=NaN)
@@ -1071,6 +1084,7 @@ function _single!(m::Moteur, src::Source, ctx::Contexte, c::Single)
     canaux, fenetre, serie = Dict{Int,Int}(), Dict{Int,Float64}(), Dict{Int,String}()
     lus = Dict{Int,Dict{String,Float64}}()
     H = Dict{Int,Matrix{UInt16}}()
+    sommes = Dict{Int,Vector{Int}}()                   # Single(...; jusqu_a) : la somme des histogrammes
     etats = Dict(k => zeros(UInt16, c.n) for k in modules)
     durees = Dict(k => zeros(c.n) for k in modules)
     faits, raison, erreur = 0, "terminée", false
@@ -1084,6 +1098,7 @@ function _single!(m::Moteur, src::Source, ctx::Contexte, c::Single)
             fenetre[k] = fenetre_tac(src, k, lus[k])
             serie[k] = identifier(src, k).serie
             H[k] = zeros(UInt16, canaux[k], c.n)
+            sommes[k] = zeros(Int, canaux[k])
         end
         _etat!(m, :single)
         delai = 4 * c.temps_s + 5                        # le temps mort allonge la mesure
@@ -1125,11 +1140,22 @@ function _single!(m::Moteur, src::Source, ctx::Contexte, c::Single)
                 h = lire_histo(src, k, canaux[k])
                 r.inverser && (h = reverse(h))
                 H[k][:, i] = h
+                sommes[k] .+= h
                 etats[k][i], durees[k][i] = fin[k]
                 publier!(m, HistoSingle(k, i, c.n, h, fenetre[k] / canaux[k], fin[k][1], fin[k][2],
                                         texte_fin_single(fin[k][1])))
             end
             faits = i
+            if c.jusqu_a > 0
+                maxima = [maximum(sommes[k]) for k in modules]
+                if all(>(c.jusqu_a), maxima)
+                    raison = "$RAISON_CIBLE_ATTEINTE : maximum de la somme au-delà de $(c.jusqu_a) coups sur chaque carte " *
+                             "($(join(maxima, ", "))) après $i histogramme(s) de $(c.temps_s) s"
+                    break
+                end
+                i == c.n && (raison = "cible pas atteinte : maxima de la somme $(join(maxima, ", ")) après $i histogramme(s), " *
+                                      "$(c.jusqu_a) visés (plus de lumière, ou plus d'histogrammes)")
+            end
         end
     catch e
         raison, erreur = _texte_erreur(e), true

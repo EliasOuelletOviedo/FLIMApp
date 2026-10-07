@@ -130,8 +130,9 @@ The build takes tens of minutes and bundles Julia + all libraries
 
 ### Initial Setup
 
-1. **Load IRF**: On first run, you'll be prompted to select the IRF: a
-   Single measurement of it. With the SPC-QC-104, either SPCM's `.sdt`
+1. **Load IRF**: the SPC window's IRF button acquires it and loads it
+   (see "SPC window" below). Or, on first run, you'll be prompted to select
+   the IRF: a Single measurement of it. With the SPC-QC-104, either SPCM's `.sdt`
    (one curve per input; one detector per file works too —
    `irf_ch1.sdt` and `irf_ch2.sdt`, the other found by its number), its TDC
    channels spread onto `[qc] fenetre_ns`; or the SPC window's Single
@@ -224,7 +225,11 @@ the scanner's line and frame clocks go to Marker 1 and Marker 2.
    outputs off in the DCC software.
 
 **SPC window**: CONNECT/DISCONNECT, CHECK, IMAGE (continuous, or
-`duree_s`), SINGLE, UNLOCK (cards left locked by a crashed session: asks for
+`duree_s`), SINGLE, IRF (acquires the IRF: 1 s Singles on both channels at
+once, summed until the maximum passes 2^15 on each — `[single] irf_temps_s`,
+`irf_maximum`, `irf_histogrammes_max` — then imported and loaded like the
+IRF button's file; the dashed curves show the running sum; a second click
+stops it, the IRF unchanged), UNLOCK (cards left locked by a crashed session: asks for
 a second click, SPCM must be closed). Per card, the intensity and mean
 arrival time images (refreshed at most 10 times a second, summing
 `trames_par_image` frames), the decays and the CFD rate. The geometry,

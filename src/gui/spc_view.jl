@@ -96,6 +96,7 @@ mutable struct SpcWindowWidgets
     connect_button::Any
     image_button::Any
     single_button::Any
+    irf_button::Any
     unlock_button::Any
     axes::Any                  # SpcWindowAxes, gui/spc_window.jl
 end
@@ -138,6 +139,9 @@ mutable struct SpcView
     check_text::Observable{String}
     alerts_text::Observable{String}
     info_text::Observable{String}
+    irf_acquisition::Bool                  # the running Single is the IRF button's (`spc_toggle_irf!`)
+    irf_fin::Union{Nothing, FLIMCore.Fin}  # its end, for the refresh tick to import (`finish_irf_acquisition!`)
+    irf_sums::Dict{Int, Vector{Int}}       # per card, the sum of its Singles so far (shown dashed)
 end
 
 """
@@ -172,7 +176,8 @@ function SpcView(settings_path::AbstractString, journal::Union{Nothing, JournalQ
     view = SpcView(String(settings_path), settings, nothing, nothing, journal, Dict{Int, SpcCard}(),
                    nothing, FLIMCore.Alerte[], nothing, "", 0.0, time(), UInt64(0), false, nothing, 0.0,
                    :none, true, false, false, Dict{Int, FLIMCore.ImageSomme}(), Observable{Any}(nothing), "", "", nothing,
-                   Observable("SPC: not connected"), Observable(""), Observable(""), Observable(""))
+                   Observable("SPC: not connected"), Observable(""), Observable(""), Observable(""),
+                   false, nothing, Dict{Int, Vector{Int}}())
     for card in spc_displayed_cards(view)
         view.cards[card] = SpcCard(card)
     end
@@ -267,6 +272,32 @@ function spc_toggle_imaging!(view::SpcView)
             notify(card.single)
         end
         spc_command!(view, FLIMCore.Imagerie(FLIMCore.geometrie(s); duree = s.duree_s > 0 ? s.duree_s : Inf))
+    end
+    return nothing
+end
+
+"""
+    spc_toggle_irf!(view)
+
+IRF / STOP: acquire the IRF — Singles of `[single] irf_temps_s` (1 s) on
+both channels at once, summed until the maximum of the sum passes
+`irf_maximum` (2^15) on each channel, `irf_histogrammes_max` Singles at
+most. The refresh tick then imports the sum as the IRF of both channels
+(`finish_irf_acquisition!`). A second click stops it, the IRF unchanged.
+"""
+function spc_toggle_irf!(view::SpcView)
+    state = spc_state(view)
+    if state == :single && view.irf_acquisition
+        spc_command!(view, FLIMCore.Arret())
+    elseif state == :pret
+        s = view.settings
+        empty!(view.irf_sums)
+        for card in values(view.cards)
+            empty!(card.single[])
+            notify(card.single)
+        end
+        view.irf_acquisition = spc_command!(view, FLIMCore.Single(s.irf_temps_s, s.irf_histogrammes_max; jusqu_a = s.irf_maximum))
+        view.last_state = :none                # relabel the buttons on the next tick
     end
     return nothing
 end
@@ -443,6 +474,28 @@ function spc_handle_result!(view::SpcView, r::FLIMCore.ImageTrame)
     return nothing
 end
 
+"""
+    spc_channel_rates(view; max_age_s=2.0) -> (channel1, channel2)
+
+The latest count rate (CFD, /s) of each channel's card — the card the last
+check put on that channel ([verification] series), card k on channel k + 1
+before any check — for the counts bar. The engine sends them every 0.5 s,
+measuring or not. 1.0 (the bar's bottom) for a channel without a rate
+younger than `max_age_s` (engine stopped, card absent).
+"""
+function spc_channel_rates(view::SpcView; max_age_s::Real = 2.0)
+    out = [1.0, 1.0]
+    channel_of = Dict{Int, Int}()
+    view.check === nothing || foreach(c -> c.canal > 0 && (channel_of[c.carte] = c.canal), view.check.cartes)
+    for (k, card) in view.cards
+        r = card.last_rates
+        (r === nothing || !r.valide || !isfinite(r.cfd) || time() - r.t > max_age_s) && continue
+        channel = get(channel_of, k, k + 1)
+        1 <= channel <= 2 && (out[channel] = max(r.cfd, 1.0))
+    end
+    return out[1], out[2]
+end
+
 function spc_handle_result!(view::SpcView, r::FLIMCore.Taux)
     card = spc_card!(view, r.carte)
     card.last_rates = r
@@ -485,6 +538,10 @@ end
 
 function spc_handle_result!(view::SpcView, r::FLIMCore.Fin)
     view.last_fin = r
+    if view.irf_acquisition && r.mesure == :single
+        view.irf_acquisition = false
+        view.irf_fin = r                                     # the refresh tick imports it
+    end
     if view.roi_image_pending && r.mesure == :imagerie
         view.roi_image_pending = false
         view.roi_image[] = copy(view.roi_image_parts)        # the ROI popup listens
@@ -513,6 +570,12 @@ end
 function spc_handle_result!(view::SpcView, r::FLIMCore.HistoSingle)
     card = spc_card!(view, r.carte)
     h = r.histogramme
+    if view.irf_acquisition
+        # The IRF acquisition: the running sum, and how far its maximum is from the target.
+        sum_ = get!(() -> zeros(Int, length(h)), view.irf_sums, r.carte)
+        length(sum_) == length(h) && (sum_ .+= h)
+        h = sum_
+    end
     group = max(1, length(h) ÷ 256)
     points = card.single[]
     empty!(points)
@@ -521,7 +584,9 @@ function spc_handle_result!(view::SpcView, r::FLIMCore.HistoSingle)
         push!(points, Point2f((k - 1 + group / 2) * r.dt_ns, counts + 1))
     end
     notify(card.single)
-    card.title[] = "Card $(r.carte) — Single $(r.numero)/$(r.total): $(r.fin)"
+    card.title[] = view.irf_acquisition ?
+        "Card $(r.carte) — IRF: $(r.numero) Single(s), maximum $(maximum(h)) / $(view.settings.irf_maximum)" :
+        "Card $(r.carte) — Single $(r.numero)/$(r.total): $(r.fin)"
     return nothing
 end
 
@@ -755,7 +820,8 @@ function spc_update_widgets!(view::SpcView, state::Symbol)
     set_label!(button, text) = button.label[] == text || (button.label[] = text)
     set_label!(w.connect_button, state == :none ? "CONNECT" : "DISCONNECT")
     set_label!(w.image_button, state == :imagerie ? "STOP" : "IMAGE")
-    set_label!(w.single_button, state == :single ? "STOP" : "SINGLE")
+    set_label!(w.single_button, state == :single && !view.irf_acquisition ? "STOP" : "SINGLE")
+    set_label!(w.irf_button, state == :single && view.irf_acquisition ? "STOP" : "IRF")
     set_label!(w.unlock_button, view.unlock_armed_until > time() ? "CONFIRM?" : "UNLOCK")
     return nothing
 end

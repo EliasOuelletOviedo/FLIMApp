@@ -110,6 +110,18 @@ function refresh_tick!(app, app_run, blocks)
     spc_tick!(app_run.spc, started_ns)
     playback_tick!(app_run)
 
+    # The SPC window's IRF acquisition has ended: its sum becomes the IRF (or the status says why not).
+    irf_fin = app_run.spc.irf_fin
+    if irf_fin !== nothing
+        app_run.spc.irf_fin = nothing
+        finish_irf_acquisition!(app_run, blocks, irf_fin)
+    end
+
+    # The counts bar: each channel's card count rate (CFD), continuously, in its channel's color.
+    for (series, rate) in zip(channel_series(app_run), spc_channel_rates(app_run.spc))
+        series.counts[] == rate || (series.counts[] = rate)
+    end
+
     if state.dirty
         for (slot, plot) in state.plots
             refresh_plot_slot!(app, app_run, plot)

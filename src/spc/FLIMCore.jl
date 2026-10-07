@@ -44,7 +44,7 @@ using .SPCLite: Decodeur, decoder!, ecrire_ini, lire_ini, comparer_parametres, e
                 SPC_TIME_OVER, SPC_COLTIM_OVER, SPC_CMD_STOP
 
 """Version de FLIMCore : à augmenter à chaque changement, pour `garde_version`."""
-const VERSION_CORE = 8
+const VERSION_CORE = 9
 
 include("reglages.jl")
 include("flux.jl")
@@ -68,7 +68,7 @@ export Moteur, demarrer_moteur, arreter_moteur, verifier, commander!, rendre!, r
        attendre_fin, afficher_etat
 export Resultat, ImageTrame, ImageSomme, HistoSingle, HistoClamp, Taux, Alerte, Fin, EtatCartes, EtatCarte,
        EtatClamp, CompteursCarte
-export Commande, Imagerie, Single, Clamp, Arret, Verifier, Deverrouiller
+export Commande, Imagerie, Single, Clamp, Arret, Verifier, Deverrouiller, RAISON_CIBLE_ATTEINTE
 export garde_version
 
 """

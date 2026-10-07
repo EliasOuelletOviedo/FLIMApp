@@ -7,7 +7,9 @@ running.
 
 - CONNECT/DISCONNECT starts or stops the engine (FLIMCore), which opens and
   checks the cards on its own thread; CHECK redoes the check; IMAGE and
-  SINGLE start or stop a measurement; UNLOCK takes over cards left locked
+  SINGLE start or stop a measurement; IRF acquires the IRF (1 s Singles on
+  both channels, summed until each maximum passes 2^15, then imported and
+  loaded: `spc_toggle_irf!`); UNLOCK takes over cards left locked
   (state -6) after a confirming second click — SPCM must be closed.
 - Per card: the intensity image and the mean arrival time (first moment,
   no IRF correction: a preview, not a fit), then the decays (solid:
@@ -80,10 +82,11 @@ function build_spc_figure(view::SpcView)
     check_button = button(2, "CHECK")
     image_button = button(3, "IMAGE")
     single_button = button(4, "SINGLE")
-    unlock_button = button(5, "UNLOCK")
-    Label(controls[1, 6], view.status; merge(LABEL_ATTRS, Dict{Symbol, Any}(
+    irf_button = button(5, "IRF")
+    unlock_button = button(6, "UNLOCK")
+    Label(controls[1, 7], view.status; merge(LABEL_ATTRS, Dict{Symbol, Any}(
         :halign => :left, :justification => :left, :tellwidth => false, :word_wrap => true))...)
-    colsize!(controls, 6, Relative(0.6))
+    colsize!(controls, 7, Relative(0.55))
 
     # Images: one row per card
     image_attrs = merge(AXIS_IMAGE_ATTRS, Dict{Symbol, Any}(:width => nothing, :height => nothing,
@@ -162,11 +165,14 @@ function build_spc_figure(view::SpcView)
     on(single_button.clicks) do _
         spc_toggle_single!(view)
     end
+    on(irf_button.clicks) do _
+        spc_toggle_irf!(view)
+    end
     on(unlock_button.clicks) do _
         spc_unlock_pressed!(view)
     end
 
-    widgets = SpcWindowWidgets(connect_button, image_button, single_button, unlock_button,
+    widgets = SpcWindowWidgets(connect_button, image_button, single_button, irf_button, unlock_button,
                                SpcWindowAxes(image_axes, decay_axis, rates_axis, Dict{Int, Tuple{Int, Int}}(), 0.0))
     return fig, widgets, (width, height)
 end

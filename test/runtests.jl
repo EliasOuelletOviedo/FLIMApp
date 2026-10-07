@@ -216,8 +216,8 @@ end
     # ChannelSeries holds only the "latest frame" snapshot.
     frame = ChannelFrame([1.0, 2.0], [1.0, 2.0], 100.0, 3.0, 1.5)
     FLIMApp.publish_frame!(app_run.ch1, frame)
-    @test app_run.ch1.counts[] == 100.0
     @test app_run.ch1.histogram[] == [1.0, 2.0]
+    @test app_run.ch1.counts[] == 0.0                    # the counts bar is the cards' rate, not the frame's photons
 
     # RoiChannelSeries accumulates the per-frame time series.
     series1 = app_run.ch1_rois[1]
@@ -252,7 +252,6 @@ end
     @test isempty(app_run.ch1_rois[1].photons)
     @test isempty(app_run.ch2_rois[1].lifetime)
     @test isempty(app_run.command1)
-    @test app_run.ch1.counts[] == 0.0
 end
 
 @testset "PI command" begin
@@ -1532,6 +1531,29 @@ include("test_flimcore.jl")
     @test length(card.decay[]) == 256 && any(p -> p[2] > 1, card.decay[])
     @test await(() -> occursin("SPC: imaging", view.status[]) && occursin("card 1: CFD", view.status[]))
     @test await(() -> !isempty(card.rates[]))
+    # The counts bar: each channel's card count rate, measuring or not; 1 (the bottom) once stale.
+    @test FLIMApp.spc_channel_rates(view) == (view.cards[0].last_rates.cfd, view.cards[1].last_rates.cfd)
+    @test all(>(1.0), FLIMApp.spc_channel_rates(view)) && FLIMApp.spc_channel_rates(view; max_age_s = -1) == (1.0, 1.0)
+
+    # IRF: Singles on both channels at once, summed until each maximum passes the target; at its end
+    # the sum is to be imported (`irf_acquisition_csv`: its CSV), a stopped one isn't.
+    FLIMApp.spc_toggle_imaging!(view)           # STOP the imaging first
+    @test await(() -> FLIMApp.spc_state(view) == :pret)
+    view.settings.irf_temps_s, view.settings.irf_maximum = 0.05, 500
+    FLIMApp.spc_toggle_irf!(view)
+    @test view.irf_acquisition
+    @test await(() -> view.irf_fin !== nothing)
+    @test !view.irf_acquisition && sort(collect(keys(view.irf_sums))) == [0, 1]
+    @test all(s -> maximum(s) > 500, values(view.irf_sums))
+    csv = FLIMApp.irf_acquisition_csv(view.irf_fin)
+    @test csv !== nothing && endswith(csv, ".csv")
+    stopped = FLIMCore.Fin(:single, "arrêtée", false, [csv], time())
+    @test FLIMApp.irf_acquisition_csv(stopped) === nothing
+    status = (info_label = (text = FLIMApp.Observable(""),),)
+    @test !FLIMApp.finish_irf_acquisition!(nothing, status, stopped) && occursin("IRF unchanged", status.info_label.text[])
+    view.irf_fin = nothing
+    FLIMApp.spc_toggle_imaging!(view)           # imaging again, as before
+    @test await(() -> FLIMApp.spc_state(view) == :imagerie)
 
     # Settings edited in the window are written back; invalid ones refused.
     @test FLIMApp.spc_edit_setting!(view, :binning_temps, 8)
