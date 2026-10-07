@@ -1,10 +1,14 @@
-# qc5_photons.jl — vrais photons sur la QC-104, avec le format établi par qc4.
+# qc5_photons.jl — vrais photons sur la QC-104, avec le format de format_fifo_qc104.jl.
 #
-# Il faut : format_fifo_qc104.jl (écrit par qc4_format_fifo.jl), le laser,
-# les détecteurs allumés (logiciel DCC), un échantillon fluorescent, les
-# réglages de reglages_qc.jl, et les branchements de qc4 :
+# Il faut : format_fifo_qc104.jl à côté de ce script, le laser, les détecteurs
+# allumés (logiciel DCC), un échantillon fluorescent sous le laser, lumières de
+# la pièce éteintes (leur lumière n'est pas liée au laser : elle aplatit le
+# déclin), les réglages de reglages_qc.jl, et les branchements de qc4 :
 #   CTR 1 OUT (PFI 13) → broches 12 (M0) et 10 (M3) ; P0.4-P0.7 → broches 2, 3, 4, 7 ;
 #   D GND → broche 5 ou 15. SPCM fermé.
+# Lumière : vise quelques milliers à quelques centaines de milliers de photons
+# par seconde par entrée. Moins de 1000 par seconde : le déclin sera trop maigre
+# pour juger du sens du microtemps.
 #
 # Déroulé : une acquisition FIFO pendant que la 6321 envoie 200 impulsions de
 # 1 ms à 100 Hz (M0 sur le front montant, M3 sur le front descendant, comme
@@ -13,16 +17,17 @@
 #
 # Réussi si : 200 M0 et 200 M3 ; M3 - M0 = 1 ms et période de 10 ms à
 # 0,1 % près (horloges NI et B&H) ; tic de 2,048 ns ; des photons sur IN1 et
-# IN2 avec un déclin propre (resultats/qc/q5_declins.svg) ; routage lu =
-# code écrit, ou son complément, pour plus de 99 % des photons ; mêmes
-# comptes que la DLL.
+# IN2 avec un déclin propre (resultats/qc/q5_declins.svg) dont la montée est
+# raide et la descente lente (sens du microtemps) ; routage lu = code écrit,
+# ou son complément, pour plus de 99 % des photons ; chaque photon et chaque
+# marqueur identique à ceux de la DLL (temps, microtemps, routage, entrée).
 
 Base.exit_on_sigint(false)
 isdefined(Main, :DAQmxLite) || include("DAQmxLite.jl")
 using .DAQmxLite
 isdefined(Main, :SPCLite) || include("SPCLite.jl")
 using .SPCLite
-(isdefined(SPCLite, :VERSION_LITE) && SPCLite.VERSION_LITE >= 9) ||
+(isdefined(SPCLite, :VERSION_LITE) && SPCLite.VERSION_LITE >= 12) ||
     error("Julia a gardé une ancienne version de SPCLite.jl : redémarre Julia, puis relance ce script.")
 using Printf
 include("reglages_qc.jl")
@@ -30,7 +35,7 @@ isfile(joinpath(@__DIR__, "format_fifo_qc104.jl")) ||
     error("format_fifo_qc104.jl absent : lance d'abord qc4_format_fifo.jl.")
 include("format_fifo_qc104.jl")
 
-qc5 = (ni_present = true, carte = "X6321", compteur = "ctr1", sortie = "PFI13",
+qc5 = (ni_present = true, carte = "Dev1", compteur = "ctr1", sortie = "PFI13",
        lignes_routage = "port0/line4:7", code_region = 5,
        n = 200, frequence = 100.0, largeur_s = 0.001,
        routing_mode = 0x1900,      # M0 front montant, M3 front descendant
@@ -78,6 +83,82 @@ function svg_declins_qc5(chemin, t_ns, courbes, noms, titre)
     return chemin
 end
 
+"""
+Sens du microtemps d'après la forme du déclin (histogramme déjà orienté par
+le format) : un déclin de fluorescence monte vite et descend lentement quand
+le temps croît avec le canal. Largeurs à 20 % du pic, fond retiré, sur des
+groupes de `g` canaux. Rend (:direct | :inverse | :indetermine, montée, descente)
+en canaux.
+"""
+function sens_declin_qc5(h::AbstractVector{<:Integer}; g::Int = 16)
+    c = [sum(view(h, g * (k - 1) + 1:g * k)) for k in 1:length(h) ÷ g]
+    occ = findall(>(0), c)
+    length(occ) < 8 && return (:indetermine, 0, 0)
+    c = c[first(occ):last(occ)]                 # plage occupée (une période du laser)
+    fond = sort(c)[max(1, length(c) ÷ 10)]
+    s = c .- fond
+    p = argmax(s)
+    s[p] < 20 && return (:indetermine, 0, 0)    # trop peu de photons
+    seuil = 0.2 * s[p]
+    a = p
+    while a > 1 && s[a - 1] >= seuil
+        a -= 1
+    end
+    b = p
+    while b < length(s) && s[b + 1] >= seuil
+        b += 1
+    end
+    montee, descente = (p - a + 1) * g, (b - p + 1) * g
+    sens = descente >= 2 * montee ? :direct : montee >= 2 * descente ? :inverse : :indetermine
+    return (sens, montee, descente)
+end
+
+"""
+Compare, un par un, les photons et marqueurs de `dec` (garder_photons = true)
+à ceux de la DLL `ent`. Origine commune : la première entrée de la DLL. Rend
+`nothing` si tout est identique, sinon le premier écart.
+"""
+function comparer_dll_qc5(dec, ent, format)
+    ph = [e for e in ent if !est_marqueur(e) && (e.drapeaux & DRAPEAU_INVALIDE) == 0]
+    length(ph) == dec.photons || return "photons : $(dec.photons) décodés, $(length(ph)) pour la DLL"
+    for k in 1:4
+        nk = count(e -> (e.drapeaux & DRAPEAUX_MARQUEURS[k]) != 0, ent)
+        nk == length(dec.marqueurs[k]) ||
+            return "marqueurs M$(k - 1) : $(length(dec.marqueurs[k])) décodés, $nk pour la DLL"
+    end
+    iref = findfirst(e -> est_marqueur(e) || (e.drapeaux & DRAPEAU_INVALIDE) == 0, ent)
+    iref === nothing && return nothing
+    ref = ent[iref]
+    t0d = Int64(ref.mtime)
+    t0 = if est_marqueur(ref)
+        dec.marqueurs[findfirst(k -> (ref.drapeaux & DRAPEAUX_MARQUEURS[k]) != 0, 1:4)][1]
+    else
+        dec.t_photons[1]
+    end
+    nm = 1 << format.microtemps[2]
+    for (i, e) in enumerate(ph)
+        micro = format.micro_inverse ? nm - 1 - Int(e.micro) : Int(e.micro)
+        rout = Int(e.rout & 0x000f)
+        voie = Int(e.rout >> 4) + 1                  # la DLL rend rout_chan = routage | (entrée << 4)
+        t = Int64(e.mtime) - t0d
+        if dec.t_photons[i] - t0 != t || Int(dec.micro_photons[i]) != micro ||
+           Int(dec.routage_photons[i]) != rout || Int(dec.voie_photons[i]) != voie
+            return @sprintf("photon %d : décodé (t %d, micro %d, routage %d, IN%d), DLL (t %d, micro %d, routage %d, IN%d)",
+                            i, dec.t_photons[i] - t0, dec.micro_photons[i], dec.routage_photons[i],
+                            dec.voie_photons[i], t, micro, rout, voie)
+        end
+    end
+    for k in 1:4
+        dk = [Int64(e.mtime) - t0d for e in ent if (e.drapeaux & DRAPEAUX_MARQUEURS[k]) != 0]
+        nk = [t - t0 for t in dec.marqueurs[k]]
+        if dk != nk
+            j = findfirst(j -> nk[j] != dk[j], eachindex(nk))
+            return "marqueur M$(k - 1) n° $j : décodé à $(nk[j]) tics, DLL à $(dk[j]) tics"
+        end
+    end
+    return nothing
+end
+
 function test_qc5(r, reglages, format)
     dossier = joinpath(@__DIR__, "resultats", "qc")
     p = merge(parametres_qc(reglages), Dict{String,Any}(
@@ -103,7 +184,7 @@ function test_qc5(r, reglages, format)
         println("\nSYNC : ", get(MESSAGES_SYNC, s, string(s)))
         s == 1 || (println("ÉCHEC : il faut un SYNC correct (câble du laser, seuil SYNC dans reglages_qc.jl)."); return false)
 
-        dec = DecodeurFIFO(format)
+        dec = DecodeurFIFO(format; garder_photons = true)
         tampon = zeros(UInt16, 1 << 21)
         brut = UInt16[]
         deborde = false
@@ -202,7 +283,40 @@ function test_qc5(r, reglages, format)
             h = view(dec.micro, :, i)
             pic = argmax(h)
             moyen = sum(h .* t_canal) / sum(h)
-            @printf("  IN%d : pic à %.3f ns, temps moyen %.3f ns\n", i, t_canal[pic], moyen)
+            premier, dernier = findfirst(>(0), h), findlast(>(0), h)
+            @printf("  IN%d : pic à %.3f ns, temps moyen %.3f ns ; photons des canaux %d à %d (%.3f à %.3f ns)\n",
+                    i, t_canal[pic], moyen, premier - 1, dernier - 1, (premier - 1) * dt_ns, dernier * dt_ns)
+            if pic - premier <= 2
+                println("        le pic est sur le premier canal occupé : la montée du déclin est coupée. ",
+                        "Augmente decalage_ns de IN$i (pas de 0,512 ns) dans reglages_qc.jl.")
+            end
+        end
+        lb = get(lu, "tac_limit_low", NaN)
+        @printf("  limite basse de la fenêtre (tac_limit_low) : %s %% de la plage\n",
+                isnan(lb) ? "?" : @sprintf("%.3g", lb))
+        println("Sens du microtemps (largeurs à 20 % du pic) :")
+        sens_vus = Symbol[]
+        for i in actives
+            sens, montee, descente = sens_declin_qc5(view(dec.micro, :, i))
+            push!(sens_vus, sens)
+            if sens == :indetermine && montee == 0
+                @printf("  IN%d : trop peu de photons pour juger (%d)\n", i, dec.par_voie[i])
+            else
+                @printf("  IN%d : montée %.2f ns, descente %.2f ns → %s\n", i, montee * dt_ns, descente * dt_ns,
+                        sens == :direct ? "sens correct (le temps croît avec le canal)" :
+                        sens == :inverse ? "INVERSÉ" : "indéterminé (déclin trop court ou symétrique ?)")
+            end
+        end
+        if :inverse in sens_vus && :direct in sens_vus
+            println("  Sens contradictoire d'une entrée à l'autre : envoie-moi resultats/qc/q5_declins.csv.")
+            ok = false
+        elseif :inverse in sens_vus
+            println("  Le microtemps décroît avec le temps : dans format_fifo_qc104.jl, mets ",
+                    "micro_inverse = $(!format.micro_inverse), puis relance qc5.")
+            ok = false
+        elseif !(:direct in sens_vus)
+            println("  Sens non confirmé : relance avec plus de lumière (ou un colorant de vie plus longue).")
+            ok = false
         end
         for i in (1, 2)
             dec.par_voie[i] == 0 && (println("  IN$i : aucun photon (détecteur, câble, seuil ?)"); ok = false)
@@ -224,20 +338,24 @@ function test_qc5(r, reglages, format)
             end
         end
 
-        # Contrôle par la DLL sur les mêmes données
+        # Contrôle par la DLL sur les mêmes données, photon par photon
         spc = ecrire_spc(joinpath(dossier, "q5_photons.spc"), f.entete, brut)
+        println("\nDécodage de contrôle par la DLL (un appel par photon, patience)…")
         ent, _ = photons_dll(spc; type_fifo = f.type_fifo, type_flux = type_flux_fichier(f.type_flux),
                              quoi = 0x3f, max = 50_000_000)
         n_dll = count(e -> !est_marqueur(e) && (e.drapeaux & DRAPEAU_INVALIDE) == 0, ent)
         nm_dll = [count(e -> (e.drapeaux & DRAPEAUX_MARQUEURS[k]) != 0, ent) for k in 1:4]
         nm = length.(dec.marqueurs)
-        accord = n_dll == dec.photons && nm_dll == nm
-        @printf("\nDLL : %d photons, marqueurs %s ; SPCLite : %d photons, marqueurs %s  %s\n",
-                n_dll, string(nm_dll), dec.photons, string(nm), accord ? "identiques" : "DIFFÉRENTS")
-        ok &= accord
+        ecart = comparer_dll_qc5(dec, ent, format)
+        @printf("DLL : %d photons, marqueurs %s ; SPCLite : %d photons, marqueurs %s\n",
+                n_dll, string(nm_dll), dec.photons, string(nm))
+        println(ecart === nothing ?
+                "  identiques un à un (temps, microtemps, routage, entrée de chaque photon ; temps de chaque marqueur)" :
+                "  DIFFÉRENTS : $ecart")
+        ok &= ecart === nothing
 
         println()
-        println(ok ? "RÉUSSI : photons, déclins, marqueurs et routage conformes. Ouvre q5_declins.svg." :
+        println(ok ? "RÉUSSI : photons, déclins, marqueurs et routage conformes ; format_fifo_qc104.jl confirmé. Ouvre q5_declins.svg." :
                      "ÉCHEC partiel : voir les lignes ci-dessus ; colle la sortie dans la conversation.")
         return ok
     end
