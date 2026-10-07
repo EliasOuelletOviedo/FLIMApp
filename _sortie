@@ -1,51 +1,37 @@
-ERROR: Main.SPCLite.SPCError(-20, "SPC_start_measurement", "cannot arm SPC module (état 0x0803, SYNC correct ; réessayé une fois après SPC_stop_measurement)")
-Stacktrace:
- [1] WARNING: Detected access to binding `SPCLite.demarrer` in a world prior to its definition world.
-  Julia 1.12 has introduced more strict world age semantics for global bindings.
-  !!! This code may malfunction under Revise.
-  !!! This code will error in future versions of Julia.
-Hint: Add an appropriate `invokelatest` around the access to this binding.
-To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-demarrer(m::Int16)
-   @ Main.SPCLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:968
- [2] WARNING: Detected access to binding `Main.boucle_marqueurs` in a world prior to its definition world.
-  Julia 1.12 has introduced more strict world age semantics for global bindings.
-  !!! This code may malfunction under Revise.
-  !!! This code will error in future versions of Julia.
-Hint: Add an appropriate `invokelatest` around the access to this binding.
-To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-boucle_marqueurs(r::@NamedTuple{…}, m::Int16, f::@NamedTuple{…}, fichier::String, tic::Float64)
-   @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\Qc marqueurs direct.jl:95
- [3] (::var"#surveiller_marqueurs##4#surveiller_marqueurs##5"{…})(th::Ptr{…})
-   @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\Qc marqueurs direct.jl:148
- [4] WARNING: Detected access to binding `DAQmxLite.withtask` in a world prior to its definition world.
-  Julia 1.12 has introduced more strict world age semantics for global bindings.
-  !!! This code may malfunction under Revise.
-  !!! This code will error in future versions of Julia.
-Hint: Add an appropriate `invokelatest` around the access to this binding.
-To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-withtask(f::var"#surveiller_marqueurs##4#surveiller_marqueurs##5"{…}, name::String)
-   @ Main.DAQmxLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\DAQmxLite.jl:160
- [5] (::var"#surveiller_marqueurs##0#surveiller_marqueurs##1"{@NamedTuple{…}, String})(modules::Vector{Int16})
-   @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\Qc marqueurs direct.jl:141
- [6] WARNING: Detected access to binding `SPCLite.avec_spc_tous` in a world prior to its definition world.
-  Julia 1.12 has introduced more strict world age semantics for global bindings.
-  !!! This code may malfunction under Revise.
-  !!! This code will error in future versions of Julia.
-Hint: Add an appropriate `invokelatest` around the access to this binding.
-To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-avec_spc_tous(f::var"#surveiller_marqueurs##0#surveiller_marqueurs##1"{…}, ini::String; types::Tuple{…}, forcer::Bool)
-   @ Main.SPCLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:501
- [7] avec_spc_tous
-   @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:483 [inlined]
- [8] WARNING: Detected access to binding `Main.surveiller_marqueurs` in a world prior to its definition world.
-  Julia 1.12 has introduced more strict world age semantics for global bindings.
-  !!! This code may malfunction under Revise.
-  !!! This code will error in future versions of Julia.
-Hint: Add an appropriate `invokelatest` around the access to this binding.
-To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-surveiller_marqueurs(r::@NamedTuple{…}, reglages::Dict{…})
-   @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\Qc marqueurs direct.jl:127
- [9] top-level scope
-   @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\Qc marqueurs direct.jl:155
-Some type information was truncated. Use `show(err)` to see complete types.
+DLL : C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll
+SPC-QC-104 : module 2, n° de série 3T0089
+
+Acquisitions :
+  marqueurs :     64704 enregistrements en 0.5 s ; flux de type 11, mt_clock 2048131
+  in1       :    118976 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
+  in2       :    120992 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
+  controle  :    243008 enregistrements en 2.0 s ; flux de type 11, mt_clock 2048131
+
+Décodage par la DLL (arbitre) :
+  marqueurs :        0 photons valides, 0 invalides, marqueurs M0-M3 [2505, 0, 0, 2504] ; drapeaux vus 1000 8000 ; fin 2
+  in1       :       41 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
+  in2       :      131 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
+  controle  :      330 photons valides, 0 invalides, marqueurs M0-M3 [2002, 0, 0, 2002] ; drapeaux vus 0 1000 8000 ; fin 2
+  marqueurs : M0 tous les 97649.1 tics → tic de 2.0482 ns (2,048 ns attendu, écart +0.01 %)
+  controle  : M0 tous les 488245.5 tics → tic de 2.0481 ns (2,048 ns attendu, écart +0.01 %)
+
+Oracle des préfixes (1500 enregistrements par acquisition) :
+  marqueurs : 1500 enregistrements, 117 entrées (1383 silencieux)
+  in1       : 1500 enregistrements, 0 entrées (1500 silencieux)
+  in2       : 1500 enregistrements, 0 entrées (1500 silencieux)
+  controle  : 1500 enregistrements, 29 entrées (1471 silencieux)
+
+Empreinte des enregistrements (bit 31 à gauche ; 0/1 constant, · variable) :
+  marqueurs marqueurs     117  0100000000000000·00············0
+  marqueurs silencieux   1383  10000000000000000000000000000000
+  in1       silencieux   1500  10000000000000000000000000000000
+  in2       silencieux   1500  10000000000000000000000000000000
+  controle  photons         4  000·····1·······1011············
+  controle  marqueurs      25  0100000000000000·00············0
+  controle  silencieux   1471  10000000000000000000000000000000
+
+ÉCHEC : format non établi.
+  ordre poids faible d'abord : microtemps introuvable
+  ordre poids fort d'abord : microtemps introuvable
+Envoie-moi cette sortie et le dossier c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\format : les fichiers .spc et bloc_*.csv suffisent pour finir l'analyse à la main.
+false
