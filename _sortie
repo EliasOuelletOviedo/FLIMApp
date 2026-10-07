@@ -1,63 +1,51 @@
-DLL : C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll
-SPC-QC-104 : module 2, n° de série 3T0089
-
-Acquisitions :
-ERROR: SPC -20 dans SPC_start_measurement : cannot arm SPC module
+ERROR: Main.SPCLite.SPCError(-20, "SPC_start_measurement", "cannot arm SPC module (état 0x0803, SYNC correct ; réessayé une fois après SPC_stop_measurement)")
 Stacktrace:
-  [1] chk_spc
-    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:153 [inlined]
-  [2] demarrer
-    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:942 [inlined]
-  [3] WARNING: Detected access to binding `Main.acquerir_brut_qc4` in a world prior to its definition world.
+ [1] WARNING: Detected access to binding `SPCLite.demarrer` in a world prior to its definition world.
   Julia 1.12 has introduced more strict world age semantics for global bindings.
   !!! This code may malfunction under Revise.
   !!! This code will error in future versions of Julia.
 Hint: Add an appropriate `invokelatest` around the access to this binding.
 To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-acquerir_brut_qc4(m::Int16, duree_s::Float64)
-    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:81
-  [4] (::var"#une_acquisition_qc4##0#une_acquisition_qc4##1"{@NamedTuple{…}, Int16, @NamedTuple{…}})(th::Ptr{Nothing})
-    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:119
-  [5] WARNING: Detected access to binding `DAQmxLite.withtask` in a world prior to its definition world.
+demarrer(m::Int16)
+   @ Main.SPCLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:968
+ [2] WARNING: Detected access to binding `Main.boucle_marqueurs` in a world prior to its definition world.
   Julia 1.12 has introduced more strict world age semantics for global bindings.
   !!! This code may malfunction under Revise.
   !!! This code will error in future versions of Julia.
 Hint: Add an appropriate `invokelatest` around the access to this binding.
 To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-withtask(f::var"#une_acquisition_qc4##0#une_acquisition_qc4##1"{@NamedTuple{…}, Int16, @NamedTuple{…}}, name::String)
-    @ Main.DAQmxLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\DAQmxLite.jl:160
-  [6] WARNING: Detected access to binding `Main.une_acquisition_qc4` in a world prior to its definition world.
+boucle_marqueurs(r::@NamedTuple{…}, m::Int16, f::@NamedTuple{…}, fichier::String, tic::Float64)
+   @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\Qc marqueurs direct.jl:95
+ [3] (::var"#surveiller_marqueurs##4#surveiller_marqueurs##5"{…})(th::Ptr{…})
+   @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\Qc marqueurs direct.jl:148
+ [4] WARNING: Detected access to binding `DAQmxLite.withtask` in a world prior to its definition world.
   Julia 1.12 has introduced more strict world age semantics for global bindings.
   !!! This code may malfunction under Revise.
   !!! This code will error in future versions of Julia.
 Hint: Add an appropriate `invokelatest` around the access to this binding.
 To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-une_acquisition_qc4(r::@NamedTuple{…}, m::Int16, a::@NamedTuple{…}, th_routage::Ptr{…}, dossier::String)
-    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:111
-  [7] (::var"#test_qc4##8#test_qc4##9"{…})(a::@NamedTuple{…})
-    @ Main .\none:-1
-  [8] iterate
-    @ .\generator.jl:48 [inlined]
-  [9] collect(itr::Base.Generator{Vector{@NamedTuple{…}}, var"#test_qc4##8#test_qc4##9"{Ptr{…}, @NamedTuple{…}, String}})
-    @ Base .\array.jl:828
- [10] (::var"#test_qc4##6#test_qc4##7"{@NamedTuple{…}, String})(th::Ptr{Nothing})
-    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:560
- [11] withtask(f::var"#test_qc4##6#test_qc4##7"{@NamedTuple{…}, String}, name::String)
-    @ Main.DAQmxLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\DAQmxLite.jl:160
- [12] (::var"#test_qc4##0#test_qc4##1"{@NamedTuple{…}, String})(modules::Vector{Int16})
-    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:558
- [13] avec_spc_tous(f::var"#test_qc4##0#test_qc4##1"{@NamedTuple{…}, String}, ini::String; types::Tuple{Int64}, forcer::Bool)
-    @ Main.SPCLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:501
- [14] avec_spc_tous
-    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:483 [inlined]
- [15] WARNING: Detected access to binding `Main.test_qc4` in a world prior to its definition world.
+withtask(f::var"#surveiller_marqueurs##4#surveiller_marqueurs##5"{…}, name::String)
+   @ Main.DAQmxLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\DAQmxLite.jl:160
+ [5] (::var"#surveiller_marqueurs##0#surveiller_marqueurs##1"{@NamedTuple{…}, String})(modules::Vector{Int16})
+   @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\Qc marqueurs direct.jl:141
+ [6] WARNING: Detected access to binding `SPCLite.avec_spc_tous` in a world prior to its definition world.
   Julia 1.12 has introduced more strict world age semantics for global bindings.
   !!! This code may malfunction under Revise.
   !!! This code will error in future versions of Julia.
 Hint: Add an appropriate `invokelatest` around the access to this binding.
 To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
-test_qc4(r::@NamedTuple{…})
-    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:544
- [16] top-level scope
-    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc4_format_fifo.jl:726
+avec_spc_tous(f::var"#surveiller_marqueurs##0#surveiller_marqueurs##1"{…}, ini::String; types::Tuple{…}, forcer::Bool)
+   @ Main.SPCLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:501
+ [7] avec_spc_tous
+   @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:483 [inlined]
+ [8] WARNING: Detected access to binding `Main.surveiller_marqueurs` in a world prior to its definition world.
+  Julia 1.12 has introduced more strict world age semantics for global bindings.
+  !!! This code may malfunction under Revise.
+  !!! This code will error in future versions of Julia.
+Hint: Add an appropriate `invokelatest` around the access to this binding.
+To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
+surveiller_marqueurs(r::@NamedTuple{…}, reglages::Dict{…})
+   @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\Qc marqueurs direct.jl:127
+ [9] top-level scope
+   @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\Qc marqueurs direct.jl:155
 Some type information was truncated. Use `show(err)` to see complete types.
