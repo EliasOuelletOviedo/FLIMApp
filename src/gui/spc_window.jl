@@ -1,7 +1,7 @@
 """
 gui/spc_window.jl
 
-The SPC window (main thread only): the SPC-150N controls and live displays.
+The SPC window (main thread only): the SPC card's controls and live displays.
 Opened from the SPC button of the top bar; closing it leaves the engine
 running.
 

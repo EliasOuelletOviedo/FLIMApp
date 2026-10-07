@@ -1,15 +1,17 @@
 """
     FLIMCore
 
-Pilote des SPC-150N (plan « Intégration des SPC-150N dans le GUI »). Trois
+Pilote des cartes SPC de Becker & Hickl : la SPC-QC-104 (une carte, un
+détecteur par entrée), ou deux SPC-150N (une par détecteur). Trois
 couches, toutes sans affichage ni exécution au chargement :
 
 - fonctions pures tirées des scripts imagerie_photons.jl et
   histogrammes_single.jl (branche NI-PCIe-6321) : réglages (config/spc.toml),
   flux .spc, rangement des photons en pixels, en bloc ou trame par trame,
   fichiers de sortie ;
-- sources de photons derrière une même interface : les cartes (SPCLite),
-  le rejeu de fichiers .spc, une simulation ;
+- sources de photons derrière une même interface : la QC-104 (une carte
+  virtuelle par entrée, au flux d'une SPC-150N : source_qc.jl), les
+  SPC-150N (SPCLite), le rejeu de fichiers .spc, une simulation ;
 - le moteur : une tâche (`Threads.@spawn`), seule à appeler la DLL SPC, qui
   reçoit des commandes et publie ses résultats par deux `Channel`.
 
@@ -42,7 +44,7 @@ using .SPCLite: Decodeur, decoder!, ecrire_ini, lire_ini, comparer_parametres, e
                 SPC_TIME_OVER, SPC_COLTIM_OVER, SPC_CMD_STOP
 
 """Version de FLIMCore : à augmenter à chaque changement, pour `garde_version`."""
-const VERSION_CORE = 7
+const VERSION_CORE = 8
 
 include("reglages.jl")
 include("flux.jl")
@@ -50,15 +52,18 @@ include("rangement.jl")
 include("passes.jl")
 include("sorties.jl")
 include("sources.jl")
+include("source_qc.jl")
 include("moteur.jl")
 
 export SPCLite
 export Geometrie, REGLAGES_SCANNER, reglage_scanner, Reglages, lire_reglages, ecrire_reglages, reglages_depuis_dict, geometrie, geometrie!,
-       dossier_spc, parametres_imagerie, parametres_single, parametres_clamp, code_routage, code_ecrit, CODE_HORS_ROI, CODE_SANS_ROI, ROI_MAX, canal_serie
+       dossier_spc, parametres_imagerie, parametres_single, parametres_clamp, code_routage, code_ecrit, CODE_HORS_ROI, CODE_SANS_ROI, ROI_MAX, canal_serie,
+       parametres_base, temps_taux_s, est_qc104, source_materielle, voie_qc, serie_carte, nom_fichier_serie
 export ecrire_spc, lire_spc, flux_synthetique, EncodeurFifo, photon!, marqueur!
 export Passes, passes!, terminer_passes!, flux_passes_synthetique
 export ranger_photons, histogrammes_pixels, Rangeur, ranger!, terminer!, declin_total, temps_moyen, traiter, retraiter, mesurer_horloges, profil_trame
 export Source, SourceCartes, SourceRejeu, source_rejeu, source_simulation, source_session, source_depuis
+export SourceQC, CarteQC, QCDll, QCRejeu, source_qc_brut, EncodeurQC, photon_qc!, marqueur_qc!, avancer_qc!
 export Moteur, demarrer_moteur, arreter_moteur, verifier, commander!, rendre!, recevoir, etat_moteur,
        attendre_fin, afficher_etat
 export Resultat, ImageTrame, ImageSomme, HistoSingle, HistoClamp, Taux, Alerte, Fin, EtatCartes, EtatCarte,

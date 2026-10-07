@@ -154,10 +154,10 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
         end
 
         # Imported now (kept as ~/.flimapp/irf.csv): a file that isn't a
-        # Single's .sdt, or an IRF taken with other card or detector
-        # settings, is refused here, not at the next START.
+        # Single (the SPC window's CSV, or SPCM's .sdt), or an IRF taken with
+        # other card or detector settings, is refused here, not at the next START.
         try
-            irfs, _ = import_irf_sdt(filepath, app_run.spc.settings; applied = spc_applied_settings(app_run.spc))
+            irfs, _ = import_irf(filepath, app_run.spc.settings; applied = spc_applied_settings(app_run.spc))
             update_path_textbox!(blocks.irf_path_textbox, filepath)
             @info "IRF imported" path=filepath channels=length(irfs)
         catch e
@@ -236,7 +236,7 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
         end
     end
 
-    # SPC window: SPC-150N controls and live images (gui/spc_window.jl).
+    # SPC window: SPC card controls and live images (gui/spc_window.jl).
     on(blocks.spc_button.clicks) do _
         open_spc_window!(app_run, spc_window_screen)
     end

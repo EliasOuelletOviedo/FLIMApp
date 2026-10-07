@@ -67,7 +67,7 @@ it yourself after `using FLIMApp`.
 
 **Violation of this order will cause MethodError or undefined reference errors!**
 
-## SPC-150N engine (FLIMCore)
+## SPC engine (FLIMCore)
 
 `src/spc/FLIMCore.jl` is its own module (standard library only), included
 by FLIMApp and loadable alone (`include("src/spc/FLIMCore.jl")`, as the
@@ -87,18 +87,33 @@ Plan.pdf:
   (`trames_sautees`); recording and the saved sums are unaffected. Read
   frames go back with `FLIMCore.rendre!`.
 - **Photon sources** share one interface (`src/spc/sources.jl`): the
-  cards, a `.spc` replay, a simulation; the SPC-QC-104 will be another one.
+  SPC-QC-104 (`src/spc/source_qc.jl`), SPC-150N cards, a `.spc` replay, a
+  simulation. `SourceQC` makes one virtual card per channel of
+  `[verification] series` ("3T0089/IN1" → module 0): it reads the QC-104's
+  FIFO once (`_pomper!`), translates each record (`SPCLite.FORMAT_QC104`)
+  into FIFO_150 records on the card of its input (`_enregistrement_qc!`:
+  markers on every card, the TDC channel resampled onto `[qc] fenetre_ns`
+  with a uniform draw within the channel, ADC = 4095 − channel), and queues
+  them per card (`lire_mots!`). The rest of the engine sees two SPC-150N.
+  Single is emulated in FIFO (`lire_etat` arms until the collect time,
+  `lire_histo`). The hardware behind is a `CarteQC`: `QCDll` (the DLL;
+  `SPCLite.selectionner_modules!` keeps only type 104) or `QCRejeu` (a raw
+  stream, for the tests and qc4/qc5's files, `source_qc_brut`). Rates: while
+  measuring, counted in the stream; at the check, `mesurer_taux!` counts
+  0.5 s of FIFO; between measurements, `SPC_read_rates` through `[qc] taux`.
+  What the translation set aside is reported at the end of each
+  measurement (`bilan_source!`, SPC-10).
 - `ranger_photons` is imagerie_photons.jl's block processing, unchanged;
   the `Rangeur` does the same frame by frame, and the tests check both give
   identical results, to the bit.
 - **Realtime (`Clamp`)**: FIFO mode with routing, no software deadline. A
   6321 counter clocked by the AO sample clock (`channels.passes`, out on
-  PFI13) is high during each scan; its rising edge is the cards' M0 (start
-  of pass, `routing_mode` 0x1100), and each pass lasts `Clamp.scan_s` after
-  it. M0s must follow the slot cadence (scan + pause, `echantillon_s` +
-  100 ppm): one off it is a glitch, ignored; a gap of several slots counts
-  missing M0s. With `[clamp] fin_par_m3 = true`, the falling edge of the
-  same signal on M3 ends the pass instead (0x1900). The NI writes the
+  PFI13) is high during each scan; its rising edge is the card's M0 (start
+  of pass) and its falling edge M3 (end; `[clamp] fin_par_m3 = true`, the
+  default, `routing_mode` 0x1900). With `fin_par_m3 = false` (M0 only,
+  0x1100), each pass lasts `Clamp.scan_s` after M0, and M0s must follow
+  the slot cadence (scan + pause, `echantillon_s` + 100 ppm): one off it is
+  a glitch, ignored; a gap of several slots counts missing M0s. The NI writes the
   ROI's routing code during the scan and the reserved code
   (`CODE_HORS_ROI`) during moves, pauses and the entry: those photons are
   thrown away when decoding (no CNTE line). The engine reads each card's

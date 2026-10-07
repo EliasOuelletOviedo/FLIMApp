@@ -534,7 +534,7 @@ function _boucle_moteur(m::Moteur)
         m.source === nothing && (m.source = source_depuis(ctx.reglages))
         src = m.source
         _modules!(ctx, ouvrir!(src, ctx.reglages))
-        _signaler_modules!(m, ctx)
+        _signaler_modules!(m, ctx, src)
         _executer!(m, src, ctx, Verifier())      # une erreur ici laisse le moteur en marche
         _etat!(m, :pret)
         prochain_taux = time()
@@ -577,9 +577,12 @@ function _modules!(ctx::Contexte, o)
     return ctx
 end
 
-function _signaler_modules!(m::Moteur, ctx::Contexte)
+function _signaler_modules!(m::Moteur, ctx::Contexte, src::Source)
+    message = message_ouverture(src)
     isempty(ctx.detectes) &&
-        publier!(m, Alerte(:erreur, -1, "aucune carte SPC détectée (SPC_init : $(ctx.code_init))"))
+        publier!(m, Alerte(:erreur, -1, "aucune carte SPC détectée (SPC_init : $(ctx.code_init))" *
+                                        (isempty(message) ? "" : " : $message")))
+    isempty(ctx.detectes) || isempty(message) || publier!(m, Alerte(:erreur, -1, message))
     for k in ctx.detectes
         e = ctx.etats[k]
         e == 0 && continue
@@ -675,6 +678,17 @@ function _surveiller!(m::Moteur, ctx::Contexte, k::Int, s::Int, v, seuil::Float6
     return nothing
 end
 
+"""Ce que la source a écarté pendant la mesure (`bilan_source!`), en alerte."""
+function _publier_bilan!(m::Moteur, src::Source)
+    texte = try
+        bilan_source!(src)
+    catch e
+        "bilan de la source : " * _texte_erreur(e)
+    end
+    isempty(texte) || publier!(m, Alerte(:avertissement, -1, texte))
+    return nothing
+end
+
 """Une alerte par réglage que la carte n'a pas pris tel quel."""
 function _signaler_tableau!(m::Moteur, k::Int, parametres, lus)
     for l in comparer_parametres(parametres, lus)
@@ -760,19 +774,28 @@ function _verifier!(m::Moteur, src::Source, ctx::Contexte, reponse)
         end
     end
 
-    # CFD : des coups, laser allumé, sinon les détecteurs sont éteints.
+    # CFD : des coups, laser allumé, sinon les détecteurs sont éteints. La
+    # QC-104 compte les photons de chaque entrée dans son flux (`mesurer_taux!`) :
+    # le sens de ses compteurs de taux n'est pas documenté ; ils sont comparés au
+    # comptage, pour corriger [qc] taux.
     prets = [c for c in cartes if c.pret]
     foreach(c -> effacer_taux!(src, c.carte), prets)
-    isempty(prets) || !est_materiel(src) || sleep(Float64(get(r.spc, "rate_count_time", 1.0)) + 0.15)
+    isempty(prets) || !est_materiel(src) || sleep(temps_taux_s(r) + 0.15)
+    comptes = isempty(prets) ? nothing : mesurer_taux!(src, [c.carte for c in prets], 0.5)
     for c in prets
         v = lire_taux(src, c.carte)
-        c.cfd = v.code >= 0 ? v.cfd : NaN
-        ctx.cfd_ok[c.carte] = v.code >= 0 && v.cfd >= r.seuil_cfd
-        if v.code < 0
+        cfd = comptes === nothing ? (v.code >= 0 ? v.cfd : NaN) : comptes[c.carte]
+        c.cfd = cfd
+        ctx.cfd_ok[c.carte] = isfinite(cfd) && cfd >= r.seuil_cfd
+        if !isfinite(cfd)
             push!(problemes, "module $(c.carte) : taux pas prêts ($(v.code))")
-        elseif v.cfd < r.seuil_cfd
-            push!(problemes, @sprintf("module %d : CFD %.3g /s sous le seuil (%.3g /s) : détecteurs éteints ? « Enable outputs » dans le logiciel DCC",
-                                      c.carte, v.cfd, r.seuil_cfd))
+        elseif cfd < r.seuil_cfd
+            push!(problemes, @sprintf("module %d (%s) : %s %.3g /s sous le seuil (%.3g /s) : détecteur éteint ? « Enable outputs » dans le logiciel DCC",
+                                      c.carte, c.serie, comptes === nothing ? "CFD" : "photons comptés", cfd, r.seuil_cfd))
+        end
+        if comptes !== nothing && v.code >= 0 && max(cfd, v.cfd) > 1000 && !(0.5 <= v.cfd / max(cfd, 1.0) <= 2.0)
+            publier!(m, Alerte(:avertissement, c.carte, @sprintf("module %d (%s) : la carte affiche %.3g /s pour cette entrée, le flux en compte %.3g /s : [qc] taux de config/spc.toml à corriger (scripts qc3_entrees.jl) — le taux affiché pendant les mesures, lui, vient du flux",
+                                                              c.carte, c.serie, v.cfd, cfd)))
         end
     end
 
@@ -791,7 +814,7 @@ function _deverrouiller!(m::Moteur, src::Source, ctx::Contexte)
         forcer!(src, v)
         publier!(m, Alerte(:avertissement, -1, "modules $v repris de force (SPCM doit être fermé)"))
         _modules!(ctx, etat_modules(src))
-        _signaler_modules!(m, ctx)
+        _signaler_modules!(m, ctx, src)
     end
     _verifier!(m, src, ctx, nothing)
     return nothing
@@ -924,6 +947,7 @@ function _imagerie!(m::Moteur, src::Source, ctx::Contexte, c::Imagerie)
             publier!(m, Alerte(:erreur, a.carte, "fichiers du module $(a.carte) : " * _texte_erreur(e)))
         end
     end
+    _publier_bilan!(m, src)
     publier!(m, Fin(:imagerie, raison, erreur, fichiers, time()))
     _etat!(m, :pret)
     return nothing
@@ -1132,10 +1156,17 @@ function _single!(m::Moteur, src::Source, ctx::Contexte, c::Single)
             end
         end
     end
+    _publier_bilan!(m, src)
     publier!(m, Fin(:single, raison, erreur, fichiers, time()))
     _etat!(m, :pret)
     return nothing
 end
+
+"""Le type de carte d'après le n° de série d'un canal : « 3T0089/IN1 » est une entrée de la QC-104."""
+_nom_carte(serie::AbstractString) = voie_qc(serie) === nothing ? "SPC-150N" : "SPC-QC-104, entrée $(voie_qc(serie).entree),"
+
+"""Nom de fichier tiré d'un n° de série de canal : « 3T0089/IN1 » → « 3T0089_IN1 »."""
+nom_fichier_serie(serie::AbstractString) = replace(String(serie), r"[/\\:]" => "_")
 
 """CSV, SVG et paramètres relus d'une série Single, comme histogrammes_single.jl."""
 function _fichiers_single(prefixe, k, H, fenetre, canaux, serie, lus, parametres, etats, durees, c::Single, r::Reglages, debut)
@@ -1144,7 +1175,8 @@ function _fichiers_single(prefixe, k, H, fenetre, canaux, serie, lus, parametres
     valeur(cle) = haskey(lus, cle) ? @sprintf("%g", lus[cle]) : string(parametres[cle])
     entete = String[
         "FLIMCore, Single, $(Dates.format(debut, "yyyy-mm-dd HH:MM:SS"))",
-        "module $k, SPC-150N n° de série $serie",
+        "module $k, $(_nom_carte(serie)) n° de série $serie",
+        "serie = $serie",
         @sprintf("fenêtre TAC %.4f ns, %d canaux de %.4f ps ; temps_ns = centre du canal", fenetre, canaux, dt_ns * 1e3),
         "$N histogramme(s) de $(c.temps_s) s, chacun repart de zéro" *
             (r.inverser ? " ; courbes inversées (inverser = true)" : ""),
@@ -1275,7 +1307,7 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
         preparer_passes!(src, modules, codes, c.scan_s, c.pause_s)
         for (canal, k) in enumerate(modules)
             serie = get(ctx.series, k, "")
-            nom = isempty(serie) ? "module$k" : serie
+            nom = isempty(serie) ? "module$k" : nom_fichier_serie(serie)
             lus = configurer!(src, k, parametres, joinpath(dossier, "$(nom)_parametres.ini"))
             _signaler_tableau!(m, k, parametres, lus)
             info = infos_fifo(src, k)
@@ -1391,6 +1423,7 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
         @error "Fichiers du Realtime" exception = (e, catch_backtrace())
         publier!(m, Alerte(:erreur, -1, "fichiers du Realtime : " * _texte_erreur(e)))
     end
+    _publier_bilan!(m, src)
     publier!(m, Fin(:clamp, "$raison après $passes passe(s)", erreur, fichiers, time()))
     _etat!(m, :pret)
     return nothing

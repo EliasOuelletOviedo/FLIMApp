@@ -1,9 +1,10 @@
-# reglages.jl — le fichier de réglages des SPC-150N (config/spc.toml).
+# reglages.jl — le fichier de réglages des cartes SPC (config/spc.toml).
 #
 # Un seul fichier, relu par le moteur à chaque démarrage de mesure ; le GUI
 # peut l'éditer et le réécrire (`ecrire_reglages`, qui garde les
-# commentaires). Il remplace reglages_spc.jl : la section [spc_module]
-# reprend ses clés, celles du manuel de la DLL SPCM.
+# commentaires). La SPC-QC-104 (source "qc104") prend ses réglages dans
+# [qc], en noms clairs comme reglages_qc.jl ; les SPC-150N (source
+# "cartes") dans [spc_module], les clés du manuel de la DLL SPCM.
 
 """
 Les réglages du scanner du banc, reconnus à leur nombre de lignes par trame
@@ -100,14 +101,27 @@ une copie) à chaque mesure.
 Base.@kwdef mutable struct Reglages
     fichier::String = ""
     # [source]
-    source::String = "cartes"
+    source::String = "qc104"
     rejeu::Vector{String} = String[]
     vitesse::Float64 = 1.0
     connexion_au_demarrage::Bool = true
-    # [spc_module]
+    # [spc_module] (SPC-150N)
     spc::Dict{String,Any} = copy(SPC_DEFAUT)
+    # [qc] (SPC-QC-104 ; quadruplets : IN1, IN2, IN3, SYNC) : les valeurs de SPCM du banc
+    # (celles des IRF du 2026-10-07, irf_16x_750nm_ch1/ch2.sdt)
+    qc_seuil_mV::Vector{Float64} = [-139.22, -139.22, -139.22, -70.59]
+    qc_zc_mV::Vector{Float64} = [12.85, 12.85, 12.85, -6.8]
+    qc_decalage_ns::Vector{Float64} = [0.512, 1.536, 0.0, 0.0]
+    qc_plage_tdc_ns::Float64 = 16.384
+    qc_fenetre_ns::Float64 = 12.5
+    qc_diviseur_sync::Int = 1
+    qc_retard_routage_ns::Int = 0
+    qc_limite_basse_pct::Float64 = 5.0
+    qc_photon_unique::Bool = false
+    qc_temps_taux_s::Float64 = 0.25
+    qc_taux::Vector{Int} = [2, 3, 4, 1]
     # [verification]
-    series::Vector{String} = ["3N0317", "3N0318"]
+    series::Vector{String} = ["3T0089/IN1", "3T0089/IN2"]
     seuil_cfd::Float64 = 100.0
     # [imagerie]
     modules_imagerie::Vector{Int} = [0, 1]
@@ -134,7 +148,7 @@ Base.@kwdef mutable struct Reglages
     # [clamp]
     canaux_clamp::Int = 256
     inverser_routage::Bool = true
-    fin_par_m3::Bool = false
+    fin_par_m3::Bool = true
     # [enregistrement]
     dossier::String = ""
     flux_brut::Bool = true
@@ -147,11 +161,22 @@ Clés du fichier, dans l'ordre où `ecrire_reglages` les écrit : (section,
 clé, champ de `Reglages`, commentaire). [spc_module] et [dcc] sont libres.
 """
 const CLES_REGLAGES = [
-    ("source", "type", :source, "\"cartes\" (les SPC-150N), \"rejeu\" (fichiers .spc ci-dessous) ou \"simulation\""),
+    ("source", "type", :source, "\"qc104\" (la SPC-QC-104), \"cartes\" (les SPC-150N), \"rejeu\" (fichiers .spc ci-dessous) ou \"simulation\""),
     ("source", "rejeu", :rejeu, "fichiers .spc à rejouer, un par carte (écrits par l'imagerie, avec leur _acquisition.ini)"),
     ("source", "vitesse", :vitesse, "rejeu et simulation : 1 = temps réel ; 0 = le plus vite possible"),
     ("source", "connexion_au_demarrage", :connexion_au_demarrage, "le GUI lance le moteur et vérifie les cartes à l'ouverture"),
-    ("verification", "series", :series, "n° de série du canal 1 puis du canal 2 : identifient les cartes, quel que soit leur n° de module"),
+    ("qc", "seuil_mV", :qc_seuil_mV, "seuils des CFD, IN1, IN2, IN3, SYNC (-500 à 0 mV) : ceux de SPCM (System Parameters de la QC-104)"),
+    ("qc", "zc_mV", :qc_zc_mV, "niveaux de zéro des CFD, IN1, IN2, IN3, SYNC (-96 à 96 mV)"),
+    ("qc", "decalage_ns", :qc_decalage_ns, "décalage du temps par entrée, IN1, IN2, IN3, SYNC (0 à 32,256 ns, pas de 0,512) : place la montée du déclin au début de la fenêtre"),
+    ("qc", "plage_tdc_ns", :qc_plage_tdc_ns, "plage du TDC (tac_range), 4096 canaux en FIFO : 16,384 ns = 4 ps par canal"),
+    ("qc", "fenetre_ns", :qc_fenetre_ns, "fenêtre des déclins de FLIMApp, la période du laser : les 4096 canaux du TDC y sont rééchantillonnés (12,5 ns, comme la SPC-150N)"),
+    ("qc", "diviseur_sync", :qc_diviseur_sync, "1, 2 ou 4 : à 1, chaque impulsion du laser sert de référence"),
+    ("qc", "retard_routage_ns", :qc_retard_routage_ns, "lecture du routage après le photon (-57 à 65 ns, pas de 8,192)"),
+    ("qc", "limite_basse_pct", :qc_limite_basse_pct, "« Limit Low » de SPCM, % de la plage du TDC coupés au début (la DLL met 10 % sans cette clé)"),
+    ("qc", "photon_unique", :qc_photon_unique, "true : un photon par période du laser ; false : détection multiphoton"),
+    ("qc", "temps_taux_s", :qc_temps_taux_s, "s, intégration des compteurs de taux (rate_count_time)"),
+    ("qc", "taux", :qc_taux, "quelle valeur de SPC_read_rates (1 à 8) est IN1, IN2, IN3, SYNC : à confirmer avec qc3_entrees.jl (la vérification compare au FIFO)"),
+    ("verification", "series", :series, "canal 1 puis canal 2 : \"<n° de série>/IN<entrée>\" pour la QC-104 (3T0089/IN1), le n° de série de chaque carte pour les SPC-150N"),
     ("verification", "seuil_cfd", :seuil_cfd, "/s : en dessous, détecteurs éteints (Enable outputs dans le logiciel DCC ?)"),
     ("imagerie", "modules", :modules_imagerie, "cartes enregistrées"),
     ("imagerie", "duree_s", :duree_s, "0 : en continu jusqu'à « Arrêter »"),
@@ -180,14 +205,17 @@ const CLES_REGLAGES = [
 ]
 
 const EN_TETE_REGLAGES = """
-# Réglages des SPC-150N pour FLIMCore (src/spc/FLIMCore.jl), relus à chaque
+# Réglages des cartes SPC pour FLIMCore (src/spc/FLIMCore.jl), relus à chaque
 # démarrage de mesure. Le GUI réécrit ce fichier quand tu changes un réglage
 # dans la fenêtre SPC : les commentaires sont regénérés, garde tes notes
 # ailleurs.
 #
-# [spc_module] remplace reglages_spc.jl : recopie les valeurs de SPCM
-# (panneau « System Parameters ») qui te donnent un beau déclin. Plages :
-# manuel de la DLL SPCM, section [spc_module]. Une clé inconnue de la DLL
+# SPC-QC-104 ([source] type = "qc104") : réglages dans [qc], en noms clairs
+# (ceux de reglages_qc.jl ; recopie les valeurs de SPCM qui te donnent un
+# beau déclin sur chaque entrée). Chaque canal est une entrée de la carte,
+# « n° de série/IN<entrée> » dans [verification] series.
+# SPC-150N ([source] type = "cartes") : [spc_module], les clés du manuel de
+# la DLL SPCM (inutilisé avec la QC-104). Une clé que la carte ne prend pas
 # est signalée par le tableau « demandé → appliqué ».
 """
 
@@ -211,6 +239,7 @@ _valeur_champ(::Type{T}, v) where {T} = convert(T, v)
 _valeur_champ(::Type{Vector{NTuple{3,Int}}}, v) = NTuple{3,Int}[(Int(x[1]), Int(x[2]), Int(x[3])) for x in v if length(x) == 3 || error("3 nombres")]
 _valeur_champ(::Type{Vector{String}}, v::AbstractVector) = String[String(x) for x in v]
 _valeur_champ(::Type{Vector{Int}}, v::AbstractVector) = Int[Int(x) for x in v]
+_valeur_champ(::Type{Vector{Float64}}, v::AbstractVector) = Float64[Float64(x) for x in v]
 _valeur_champ(::Type{Float64}, v::Real) = Float64(v)
 _valeur_champ(::Type{Int}, v::Real) = (isinteger(v) ? Int(v) : error("entier attendu, lu $v"))
 
@@ -263,8 +292,9 @@ end
 
 """Lève une erreur lisible pour une valeur hors plage."""
 function valider_reglages(r::Reglages)
-    r.source in ("cartes", "rejeu", "simulation") ||
-        error("réglages SPC : [source] type = \"cartes\", \"rejeu\" ou \"simulation\", pas \"$(r.source)\"")
+    r.source in ("qc104", "cartes", "rejeu", "simulation") ||
+        error("réglages SPC : [source] type = \"qc104\", \"cartes\", \"rejeu\" ou \"simulation\", pas \"$(r.source)\"")
+    est_qc104(r) && _valider_qc(r)
     r.vitesse >= 0 || error("réglages SPC : [source] vitesse doit être positive ou nulle")
     all(m -> 0 <= m <= 7, vcat(r.modules_imagerie, r.modules_single)) ||
         error("réglages SPC : numéros de modules de 0 à 7")
@@ -288,6 +318,33 @@ function valider_reglages(r::Reglages)
     r.resolution_adc == 8 ||
         error("réglages SPC : [single] resolution_adc : 8 bits, des histogrammes de 256 canaux comme ceux du Realtime et de l'IRF")
     r.canaux_clamp in (64, 128, 256, 512, 1024, 4096) || error("réglages SPC : [clamp] canaux : 64 à 4096, un diviseur de 4096")
+    return r
+end
+
+"""La [qc] et les canaux de la QC-104 : erreur lisible pour tout ce que la carte ne prendrait pas."""
+function _valider_qc(r::Reglages)
+    for (nom, v) in (("seuil_mV", r.qc_seuil_mV), ("zc_mV", r.qc_zc_mV), ("decalage_ns", r.qc_decalage_ns))
+        length(v) == 4 || error("réglages SPC : [qc] $nom : 4 valeurs, IN1, IN2, IN3, SYNC")
+    end
+    isempty(r.series) && error("réglages SPC : [verification] series : au moins un canal, \"<n° de série>/IN1\"")
+    voies = [voie_qc(s) for s in r.series]
+    for (i, v) in enumerate(voies)
+        v === nothing && error("réglages SPC : [verification] series : canal $i = \"$(r.series[i])\" ; avec la QC-104, " *
+                               "\"<n° de série>/IN<entrée>\", par exemple \"3T0089/IN1\" (entrées 1 à 3)")
+    end
+    length(unique(v.serie for v in voies)) == 1 ||
+        error("réglages SPC : [verification] series : tous les canaux sur la même QC-104 ($(join(r.series, ", ")))")
+    allunique(v.entree for v in voies) || error("réglages SPC : [verification] series : deux canaux sur la même entrée ($(join(r.series, ", ")))")
+    0 < r.qc_fenetre_ns <= r.qc_plage_tdc_ns ||
+        error("réglages SPC : [qc] fenetre_ns ($(r.qc_fenetre_ns)) : positive et pas plus longue que plage_tdc_ns ($(r.qc_plage_tdc_ns))")
+    r.qc_temps_taux_s > 0 || error("réglages SPC : [qc] temps_taux_s doit être positif")
+    (length(r.qc_taux) == 4 && all(k -> 1 <= k <= 8, r.qc_taux) && allunique(r.qc_taux)) ||
+        error("réglages SPC : [qc] taux : 4 indices différents de 1 à 8 (valeurs de SPC_read_rates de IN1, IN2, IN3, SYNC)")
+    try
+        parametres_base(r)                                   # plages vérifiées par SPCLite.parametres_qc
+    catch e
+        error("réglages SPC : [qc] " * sprint(showerror, e))
+    end
     return r
 end
 
@@ -355,6 +412,57 @@ copier_reglages(r::Reglages) = deepcopy(r)
 # Paramètres envoyés aux cartes (fichiers .ini de la DLL)
 # ---------------------------------------------------------------------
 
+"""La source est-elle la SPC-QC-104 ?"""
+est_qc104(r::Reglages) = r.source == "qc104"
+
+"""Vraies cartes (SPC-QC-104 ou SPC-150N), par la DLL SPCM ?"""
+source_materielle(r::Reglages) = r.source in ("qc104", "cartes")
+
+"""
+    voie_qc(serie) -> (serie, entree) ou nothing
+
+Le canal de la QC-104 que désigne un n° de série de [verification] series :
+« 3T0089/IN2 » → la carte 3T0089, son entrée IN2.
+"""
+function voie_qc(serie::AbstractString)
+    m = match(r"^(.+)/IN([1-3])$", strip(serie))
+    m === nothing && return nothing
+    return (serie = String(m[1]), entree = parse(Int, m[2]))
+end
+
+"""
+    serie_carte(serie) -> String
+
+Le n° de série de la carte physique d'un canal : « 3T0089 » pour
+« 3T0089/IN1 » (QC-104), le n° lui-même pour une SPC-150N.
+"""
+serie_carte(serie::AbstractString) = (v = voie_qc(serie); v === nothing ? String(serie) : v.serie)
+
+"""
+    parametres_base(r) -> Dict
+
+Les réglages de la DLL communs à toutes les mesures. SPC-150N : [spc_module]
+tel quel. QC-104 : [qc] traduit par `SPCLite.parametres_qc` (les clés de la
+SPC-150 y ont un autre sens : cfd_limit_high est le seuil de IN2…), avec
+les entrées des canaux de [verification] series actives et routées, et le
+SYNC actif ; les autres entrées coupées.
+"""
+function parametres_base(r::Reglages)
+    est_qc104(r) || return copy(r.spc)
+    e = Set(v.entree for v in filter(!isnothing, voie_qc.(r.series)))
+    p = SPCLite.parametres_qc(Dict{String,Any}(
+        "seuil_mV" => r.qc_seuil_mV, "zc_mV" => r.qc_zc_mV, "decalage_ns" => r.qc_decalage_ns,
+        "entrees_actives" => (1 in e, 2 in e, 3 in e, true), "routage_entrees" => (1 in e, 2 in e, 3 in e),
+        "photon_unique" => r.qc_photon_unique, "plage_tdc_ns" => r.qc_plage_tdc_ns,
+        "diviseur_sync" => r.qc_diviseur_sync, "retard_routage_ns" => r.qc_retard_routage_ns,
+        "limite_basse_pct" => r.qc_limite_basse_pct))
+    p["rate_count_time"] = r.qc_temps_taux_s
+    return p
+end
+
+"""Temps d'intégration des compteurs de taux (s) : rate_count_time, de [qc] ou de [spc_module]."""
+temps_taux_s(r::Reglages) = est_qc104(r) ? r.qc_temps_taux_s : Float64(get(r.spc, "rate_count_time", 1.0))
+
 """Valeur de routing_mode pour les marqueurs M1 (ligne) et M2 (trame), fronts compris."""
 function routage_marqueurs(g::Geometrie)
     return Int(0x0600 |                                        # marqueurs M1 et M2
@@ -366,28 +474,31 @@ end
     parametres_imagerie(r, g) -> (parametres, imposes)
 
 Paramètres du mode FIFO avec les horloges du scanner, comme
-imagerie_photons.jl : les réglages de [spc_module], plus ceux que l'imagerie
-impose (`imposes`, affichés à part dans le tableau « demandé → appliqué »).
+imagerie_photons.jl : les réglages de la carte (`parametres_base`), plus
+ceux que l'imagerie impose (`imposes`, affichés à part dans le tableau
+« demandé → appliqué »).
 """
 function parametres_imagerie(r::Reglages, g::Geometrie)
     imposes = Dict{String,Any}(
         "mode" => 1, "adc_resolution" => 12, "stop_on_time" => 0,
         "routing_mode" => routage_marqueurs(g), "macro_time_clk" => 0)
-    return merge(r.spc, imposes), imposes
+    return merge(parametres_base(r), imposes), imposes
 end
 
 """
     parametres_single(r, temps_s) -> (parametres, imposes)
 
 Paramètres du mode histogramme (mode 0, « Single » de SPCM), comme
-histogrammes_single.jl.
+histogrammes_single.jl. La QC-104 l'émule en FIFO (`SourceQC`) : un
+histogramme par entrée, rééchantillonné sur [qc] fenetre_ns.
 """
 function parametres_single(r::Reglages, temps_s::Real = r.temps_collecte_s)
+    base = parametres_base(r)
     imposes = Dict{String,Any}(
         "mode" => 0, "adc_resolution" => r.resolution_adc, "collect_time" => Float64(temps_s),
         "stop_on_time" => 1, "stop_on_ovfl" => r.arret_debordement ? 1 : 0,
-        "dead_time_comp" => get(r.spc, "dead_time_comp", 1))
-    return merge(r.spc, imposes), imposes
+        "dead_time_comp" => get(base, "dead_time_comp", 1))
+    return merge(base, imposes), imposes
 end
 
 """
@@ -432,10 +543,11 @@ code_ecrit(code::Integer, inverser::Bool) = UInt8(inverser ? (~code & 0x0f) : (c
 
 Mode FIFO du Realtime : chaque photon porte son temps et son code de
 routage ; les passes sont délimitées par le signal de passe (compteur de la
-6321, cadencé par l'horloge de l'AO, sur PFI13) branché sur M0, front
+6321, cadencé par l'horloge de l'AO, sur PFI13) branché sur M0 (broche 12
+de la QC-104), front
 montant : le début de chaque passe. Sa fin : le scan programmé plus tard
 (M0 seul), ou, avec `fin_par_m3`, le front descendant du même signal câblé
-aussi sur M3. Les marqueurs M1 et M2 (horloges du scanner) sont coupés —
+aussi sur M3 (broche 10 de la QC-104). Les marqueurs M1 et M2 (horloges du scanner) sont coupés —
 sauf avec `tous_marqueurs`, pour le test du signal de passe (voir sur
 quelle entrée il arrive), fronts montants.
 """
@@ -446,5 +558,5 @@ function parametres_clamp(r::Reglages; tous_marqueurs::Bool = false, fin_par_m3:
     imposes = Dict{String,Any}(
         "mode" => 1, "adc_resolution" => 12, "stop_on_time" => 0, "macro_time_clk" => 0,
         "routing_mode" => Int(marqueurs))    # M0 front montant (M3 front descendant, si enregistré)
-    return merge(r.spc, imposes), imposes
+    return merge(parametres_base(r), imposes), imposes
 end

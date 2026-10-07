@@ -55,11 +55,11 @@ FLIMApp/
 │   ├── io/
 │   │   ├── DAQmx.jl            # Minimal NI-DAQmx bindings (ccall on nicaiu); used by daq.jl
 │   │   └── ImageJROI.jl        # WIP: ImageJ ROI reader (not yet wired in)
-│   ├── spc/                    # FLIMCore: SPC-150N engine (see "SPC-150N cards" below)
+│   ├── spc/                    # FLIMCore: SPC engine, SPC-QC-104 (see "SPC card" below)
 │   └── gui/spc_view.jl, gui/spc_window.jl   # its GUI side: top bar + SPC window
 ├── config/
 │   ├── bench.toml              # NI wiring, timing, limits, journal
-│   └── spc.toml                # SPC-150N settings (replaces reglages_spc.jl)
+│   └── spc.toml                # SPC card settings ([qc] for the QC-104, replaces reglages_qc.jl)
 ├── scripts/spc/                # imagerie.jl, single.jl: FLIMCore launchers (replace the bench scripts)
 ├── scripts/simulate_session.jl # a simulated session for Playback
 ├── DEBUGGING.md                # problem codes, debug log and report: what to check
@@ -130,17 +130,26 @@ The build takes tens of minutes and bundles Julia + all libraries
 
 ### Initial Setup
 
-1. **Load IRF**: On first run, you'll be prompted to select the IRF: the
-   `.sdt` of a Single measurement saved by SPCM (one decay, or two for two
-   channels, ordered by the cards' serial numbers). It is imported once —
+1. **Load IRF**: On first run, you'll be prompted to select the IRF: a
+   Single measurement of it. With the SPC-QC-104, either SPCM's `.sdt`
+   (one curve per input; one detector per file works too —
+   `irf_ch1.sdt` and `irf_ch2.sdt`, the other found by its number), its TDC
+   channels spread onto `[qc] fenetre_ns`; or the SPC window's Single
+   (SINGLE button, `<date>_module<k>.csv` in `<recording folder>/single/`),
+   resampled exactly as the Realtime decays — sharper than a 256-point
+   `.sdt` (64 ps channels; take 4096 points in SPCM to keep 4 ps). With
+   SPC-150N cards, SPCM's `.sdt` (one decay, or two for two channels,
+   ordered by the cards' serial numbers). It is imported once —
    median background removed, summed down to 256 channels — and kept as
    `~/.flimapp/irf.csv` (`time_ns,ch1[,ch2]`), with `irf.toml`, the
    settings it was taken with. Each channel is fitted against its own IRF
    (a single-channel IRF serves both). **An IRF taken with other settings is
-   refused**, at import and at every Realtime START: the card (serial
-   number), the TAC (range, gain, offset, limits), the CFD and SYNC
-   thresholds — read back from the cards at their last check, as
-   `[spc_module]` requests them otherwise — and the detector gains declared
+   refused**, at import and at every Realtime START: the card and input
+   (serial number, "3T0089/IN1"), its timing settings (QC-104: thresholds
+   and zero levels of the input and the SYNC, TDC offsets and range, the
+   window `fenetre_ns`; SPC-150N: TAC range, gain, offset, limits, CFD and
+   SYNC thresholds) — read back from the card at its last check, as
+   `config/spc.toml` requests them otherwise — and the detector gains declared
    in `[dcc]` (the transit time changes with the high voltage, which the
    app can't read: keep `[dcc]` up to date). The IRF button imports another
    one and loads it right away (at the next START during a run).
@@ -149,7 +158,7 @@ The build takes tens of minutes and bundles Julia + all libraries
    recorded (`[enregistrement] dossier` in `config/spc.toml`, rewritten by
    its button): the sessions in its `sessions/`, the SPC window's
    acquisitions next to them. The raw stream takes 4 bytes per photon and
-   per card: at 1 Mcps on two cards, about 8 MB/s, 29 GB/h. The free space
+   per channel: at 1 Mcps on two channels, about 8 MB/s, 29 GB/h. The free space
    is checked at start-up and shown in the status line (in the top bar's
    banner below an hour of recording); START refuses the Realtime mode
    below 10 minutes.
@@ -162,26 +171,51 @@ The build takes tens of minutes and bundles Julia + all libraries
    - **Binning**: Number of frames to sum together
    - **Plot selection**: Choose what quantities to display
 
-## SPC-150N cards (FLIMCore)
+## SPC card: SPC-QC-104 (FLIMCore)
 
-The two SPC-150N TCSPC cards are driven by **FLIMCore** (`src/spc/`), as laid
-out in Plan.pdf. One task (`Threads.@spawn`, the SPC engine) is the only
-code that calls the SPC DLL (`src/spc/SPCLite.jl`); the GUI sends it
-commands and reads its results through two `Channel`s, and never makes a
-`ccall`. The standalone DCC software keeps the detectors: the app never
-calls the DCC-100 DLL, and only sees the detectors through the CFD rate.
+The TCSPC card is driven by **FLIMCore** (`src/spc/`), as laid out in
+Plan.pdf. One task (`Threads.@spawn`, the SPC engine) is the only code that
+calls the SPC DLL (`src/spc/SPCLite.jl`); the GUI sends it commands and
+reads its results through two `Channel`s, and never makes a `ccall`. The
+standalone DCC software keeps the detectors: the app never calls the
+DCC-100 DLL, and only sees the detectors through their count rates.
+
+**One card, one detector per input.** The SPC-QC-104 (serial 3T0089) takes
+both detectors: channel 1 on IN1, channel 2 on IN2, the laser's SYNC on the
+SYNC input — `[verification] series = ["3T0089/IN1", "3T0089/IN2"]`. The
+engine reads the card's FIFO once and splits it into one *virtual card* per
+channel (`SourceQC`, `src/spc/source_qc.jl`), each with the stream of an
+SPC-150N: that input's photons, the markers and the macro time. Imaging,
+Single, the Realtime passes, the recorded sessions, Playback and the
+analysis are unchanged. The QC-104's FIFO format (`SPCLite.FORMAT_QC104`)
+was established on qc4/qc5's acquisitions and checked record by record
+against the DLL's own decoding (`test/data/qc104`). Its TDC has 4096
+channels over `[qc] plage_tdc_ns` (4 ps at 16.384 ns); they are resampled
+onto `[qc] fenetre_ns` (12.5 ns, the laser period: the analysis's window, as
+with the SPC-150N), each photon drawn within its 4 ps channel so that no
+comb appears. The Single is emulated in FIFO (the card's histogram memory
+layout for several inputs isn't documented). Two SPC-150N still work with
+`[source] type = "cartes"` and `[spc_module]`.
+
+**Wiring of the QC-104** (Micro Sub-D 15): PFI13 (CTR 1 OUT) → pin 12 (Marker
+0) and pin 10 (Marker 3); P0.4, P0.5, P0.6, P0.7 → pins 2, 3, 4, 7 (/R0 to
+/R3); D GND → pin 5 or 15; nothing on pins 1, 6, 11 (supplies). For imaging,
+the scanner's line and frame clocks go to Marker 1 and Marker 2.
 
 **Start-up and shutdown on the bench**
 
 1. Power the Magma and Simple-Tau chassis, then the PC.
 2. Open the **standalone DCC software** (not SPCM's DCC panel). Set M1 (C1 and
    C3 at 82 %, b0, cooling 5 V / 1.98 A) and click "Enable outputs". SPCM
-   must stay closed: it locks the SPC-150N.
+   must stay closed: it locks the SPC card.
 3. Launch the app (`scripts\launch.bat`). With `connexion_au_demarrage = true`
-   in `config/spc.toml`, the engine initializes the cards and checks them:
-   modules 0 and 1 ready, serial numbers 3N0317 and 3N0318, SYNC on both,
-   settings applied as requested, CFD above `seuil_cfd`. The top bar shows
-   the result; the **SPC** button opens the SPC window with the details.
+   in `config/spc.toml`, the engine initializes the card and checks it: the
+   QC-104 ready (other SPC cards still installed are left alone: the DLL
+   drives one type at a time), its serial number, SYNC, settings applied as
+   requested, and the photons of each input counted in the FIFO above
+   `seuil_cfd` (the card's rate counters are compared with that count: SPC-09
+   if `[qc] taux` attributes them wrongly). The top bar shows the result; the
+   **SPC** button opens the SPC window with the details.
 4. During measurements the engine rereads the rates every 0.5 s and raises
    an alert when SYNC is lost or the CFD rate collapses (overload shutdown in
    the DCC software).
@@ -197,8 +231,13 @@ arrival time images (refreshed at most 10 times a second, summing
 display and Single fields are written back to `config/spc.toml`.
 
 **Settings**: `config/spc.toml`, reread at every measurement start. Copy your
-SPCM values into `[spc_module]`. `[dcc]` records the DCC settings the app
-cannot read.
+SPCM values for the QC-104 into `[qc]` (thresholds, zero levels and offsets
+of IN1, IN2, IN3 and SYNC, TDC range: the names of reglages_qc.jl; the app
+translates them into the DLL's keys and turns on, with routing, the inputs
+of `[verification] series`). `[dcc]` records the DCC settings the app
+cannot read. At the end of each measurement, photons the translation set
+aside (beyond `fenetre_ns`, an input without a channel) are reported
+(SPC-10).
 
 **Files**: every acquisition goes to `~/FLIMApp_spc/` (`[enregistrement]
 dossier`): for imaging, per card, the raw FIFO stream (`.spc`), the
@@ -226,7 +265,7 @@ settings file.
 
 ## Realtime acquisition (START, mode Realtime)
 
-The photons come straight from the SPC-150N cards' FIFO; no file is read and
+The photons come straight from the SPC card's FIFO; no file is read and
 nothing depends on a software deadline. START requires the DAQ loop READY
 (the app tries CONNECT at launch) and the SPC engine ready, then runs three
 parts together until STOP or until one of them stops (DAQ fault, SPC error):
@@ -241,12 +280,12 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
     sequence and ROI pulses;
   - the **pass signal**: a 6321 counter (`channels.passes`, ctr1, out on
     PFI13 = CTR 1 OUT by default) clocked by the same sample clock, high
-    during each scan, wired to M0 of both cards with a common ground (D
-    GND, pin 15). Its rising edge is the start of a pass, and the pass lasts
-    the programmed scan (`[clamp] fin_par_m3 = false`, the default;
-    `routing_mode = 0x1100`, set by the engine). M3 isn't needed; with
-    `fin_par_m3 = true`, the same signal also wired to M3 ends each pass on
-    its falling edge instead (0x1900).
+    during each scan, wired to M0 and M3 of the QC-104 (pins 12 and 10)
+    with a common ground (D GND to pin 5 or 15). Its rising edge (M0) starts
+    a pass and its falling edge (M3) ends it (`[clamp] fin_par_m3 = true`,
+    the default; `routing_mode = 0x1900`, set by the engine). Without M3,
+    `fin_par_m3 = false`: the pass lasts the programmed scan after M0
+    (0x1100).
 - the **SPC engine** measures in FIFO mode (`[clamp]` in `config/spc.toml`,
   256 channels by default) and cuts each card's photon stream into passes
   at the markers the card itself time-stamped: a late read only fills the
@@ -256,11 +295,12 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
   and 100 ppm. With M0 only, each M0 must fall a whole number of slots
   (scan + pause, within one AO sample and 100 ppm) after the last good one:
   an M0 off that cadence is a glitch and is ignored, a gap of several slots
-  counts missing M0s (lost passes). The cards' passes are paired by their start
-  times (each card's clock starts at its own instant and drifts); a pass
-  without its partner on the other card is dropped. Cards are identified by
-  serial number at start-up (`[verification] series`: 3N0317 = channel 1,
-  3N0318 = channel 2), whatever their module numbers.
+  counts missing M0s (lost passes). The channels' passes are paired by
+  their start times — with the QC-104 they share the card's markers, so
+  they pair exactly (two SPC-150N each start their clock at their own
+  instant and drift); a pass without its partner is dropped. Channels are
+  identified at start-up by `[verification] series` ("3T0089/IN1" = channel
+  1, "3T0089/IN2" = channel 2), whatever the module numbers.
 - the **analysis worker** fits each pass, per ROI and per channel (binning
   window and Kalman observer per ROI and channel), and runs **one PI per
   ROI**: the DAQ loop writes each ROI's own commands during that ROI's
@@ -351,11 +391,12 @@ Everything is written during the run, into the session folder: a crash or
 a forgotten click loses nothing, and there is no save dialog.
 
 - **SPC acquisitions** (the recording folder, `~/FLIMApp_spc/` by default):
-  see "SPC-150N cards" above.
+  see "SPC card" above.
 - **Sessions** (`<recording folder>/sessions/<date>/`): `run.toml` (mode,
   code versions — FLIMApp version and git commit, FLIMCore, SPCLite, Julia —,
   ROIs with their routing codes and fitted channel, the pixel → galvo
-  calibration, `[spc_module]` and the declared `[dcc]`, the DAQ's sample
+  calibration, the card's settings as sent to the DLL (`spc_module`; QC-104:
+  `[qc]` too) and the declared `[dcc]`, the DAQ's sample
   rate and programmed scan, layout, protocol and controller settings),
   `irf.csv` and `irf.toml`, `log.txt`, `frames.csv` (one line per analyzed
   pass: pass number and card times, ROI, setpoint, lifetimes, Kalman
@@ -480,7 +521,7 @@ Save AppState on exit
 
 ## Configuration
 
-The SPC-150N settings, the Realtime histogram resolution, the routing
+The SPC card settings ([qc] for the QC-104), the Realtime histogram resolution, the routing
 inversion and the SPC data folder live in `config/spc.toml`; the NI wiring
 (pass counter) and timing in `config/bench.toml`.
 

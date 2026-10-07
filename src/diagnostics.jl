@@ -46,7 +46,7 @@ const PROBLEM_LIST = Problem[
             "Start Julia with -t 4,1 (scripts/launch.bat does): the DAQ loop, the journal, the analysis and the SPC engine each need a thread."),
     Problem("ENV-02", "NI-DAQmx driver not found: running offline",
             "Install NI-DAQmx (nicaiu.dll in System32 on the bench PC). Without it the app runs offline: Playback only."),
-    Problem("ENV-03", "SPC-150N DLL not found: running offline",
+    Problem("ENV-03", "SPC DLL (spcm64.dll) not found: running offline",
             "Install the Becker & Hickl TCSPC package (spcm64.dll), or set [source] type = \"simulation\" in config/spc.toml."),
     Problem("ENV-04", "Configuration file unreadable: defaults used",
             "Fix the file the message names (a typo, an unknown key, a value out of range); the message says which."),
@@ -73,23 +73,27 @@ const PROBLEM_LIST = Problem[
             "The message gives the step and the DAQmx code; RESET acknowledges it. The debug log has the full DAQmx message."),
     Problem("DAQ-09", "DAQ connection failed",
             "The message gives the step and the reason; RECONNECT once fixed."),
-    # --- SPC-150N cards and engine ---
+    # --- SPC card (SPC-QC-104, or SPC-150N) and engine ---
     Problem("SPC-01", "SPC cards: initialization failed",
             "SPCM must be closed; the cards must be seen by the PC (chassis powered before the PC); UNLOCK if a crashed session left them locked."),
     Problem("SPC-02", "SPC card identity: serial number or channel",
-            "[verification] series in config/spc.toml lists the serial of channel 1 then channel 2; the message says which card was found where."),
+            "[verification] series in config/spc.toml: channel 1 then channel 2, \"<serial>/IN<input>\" for the QC-104 (3T0089/IN1), each card's serial for SPC-150N; the message says which card or input was found where."),
     Problem("SPC-03", "No SYNC on a card",
-            "Laser on? SYNC cable to that card; sync_threshold / sync_zc_level in [spc_module]."),
-    Problem("SPC-04", "CFD rate too low on a card",
-            "Detectors on (DCC software: Enable outputs, overload shutdown?), light reaching them, cfd_limit_low in [spc_module]."),
+            "Laser on? SYNC cable (QC-104: the SYNC input); the 4th value of [qc] seuil_mV / zc_mV (SPC-150N: sync_threshold / sync_zc_level in [spc_module])."),
+    Problem("SPC-04", "Count rate too low on a channel",
+            "Detectors on (DCC software: Enable outputs, overload shutdown?), light reaching them, the detector cable on that input; [qc] seuil_mV / zc_mV (SPC-150N: cfd_limit_low in [spc_module])."),
     Problem("SPC-05", "A card setting was not applied as requested",
-            "The SPC window lists requested → applied; a key unknown to the DLL or out of range in [spc_module]."),
+            "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."),
     Problem("SPC-06", "SPC engine error",
             "The message gives the step and the DLL function with its code; the debug log has the stack trace."),
     Problem("SPC-07", "Photons lost: FIFO overflow (SPC_FOVFL or GAP records)",
             "The passes concerned are kept out of the PI. Count rate too high for the bus, or the engine reading too slowly (CPU load)."),
     Problem("SPC-08", "ADC comb visible on a decay",
-            "Differential nonlinearity of the card's ADC: check the decay in the SPC window; if strong, the card's ADC settings or the card itself."),
+            "Differential nonlinearity of the card's ADC (SPC-150N: dither_range); the QC-104's TDC channels are resampled onto [qc] fenetre_ns with a random draw, which should leave none."),
+    Problem("SPC-09", "QC-104 rate counters don't match the stream: [qc] taux",
+            "Which SPC_read_rates value is IN1, IN2, IN3, SYNC isn't documented: fix [qc] taux (qc3_entrees.jl tells). Only the display between measurements uses them; the check and the measurements count photons in the stream."),
+    Problem("SPC-10", "QC-104: photons or records set aside by the translation",
+            "Beyond [qc] fenetre_ns: the window shorter than the laser period, diviseur_sync > 1, or decalage_ns pushing the decay to its end. An input without a channel: [verification] series. Unknown records: the QC-104's FIFO format (SPCLite.FORMAT_QC104) needs another look."),
     Problem("IMG-01", "Imaging: no line or frame clock, no image",
             "Scanner running? Its line clock on M1 and frame clock on M2 of the cards; ligne_/trame_front_montant in [imagerie]."),
     Problem("IMG-02", "Scanner setting not in the table: image lines guessed",
@@ -98,9 +102,9 @@ const PROBLEM_LIST = Problem[
     Problem("PASS-01", "No photon on a card during the Realtime measurement",
             "Laser and detectors on, CFD rate in the top bar, CFD/SYNC thresholds; the 850 nm gate (P0.0) high during scans."),
     Problem("PASS-02", "Photons but no M0 marker (start of pass)",
-            "The pass signal (PFI13 = CTR 1 OUT) doesn't reach M0 of that card: wiring, common ground (D GND, pin 15). scripts/test_passes.jl shows where it arrives."),
+            "The pass signal (PFI13 = CTR 1 OUT) doesn't reach M0 (QC-104: pin 12 of the Micro Sub-D 15): wiring, common ground (D GND to pin 5 or 15). scripts/test_passes.jl shows where it arrives."),
     Problem("PASS-03", "M0 markers but no M3 marker (end of pass)",
-            "Only with [clamp] fin_par_m3 = true: M3 of that card isn't wired. Without access to M3, set fin_par_m3 = false (M0 only)."),
+            "Only with [clamp] fin_par_m3 = true: M3 isn't wired (QC-104: pin 10, the same PFI13 as pin 12). Without access to M3, set fin_par_m3 = false (M0 only)."),
     Problem("PASS-04", "Pass markers lost or extra",
             "M0 and M3 counts differ, or (M0 only) M0 missing or off the slot cadence (glitches, ignored): a marginal TTL on the marker inputs (one output feeds every card): ground, cable length, connector."),
     Problem("PASS-05", "Pass length M3 − M0 differs from the programmed scan",
@@ -115,7 +119,7 @@ const PROBLEM_LIST = Problem[
             "The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault)."),
     # --- Routing code (P0.4–P0.7 → R0–R3) ---
     Problem("ROUTE-01", "Photons in passes carry the reserved code 0: no routing code received",
-            "P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0. The debug report's \"Routing lines read back\" (or scripts/lignes_routage.jl) tells which: if the NI drives the code, the loss is after the BOB."),
+            "P0.4–P0.7 of the NI don't reach /R0–/R3 of the card (QC-104: pins 2, 3, 4, 7; cable, BOB), or channels.lines doesn't drive port 0, or (QC-104) the routing isn't enabled on that input (tdc_control, from [verification] series). The debug report's \"Routing lines read back\" (or scripts/lignes_routage.jl) tells which: if the NI drives the code, the loss is after the BOB."),
     Problem("ROUTE-02", "The cards read the inverted routing code",
             "Set inverser_routage the other way in config/spc.toml ([clamp])."),
     Problem("ROUTE-03", "A routing line looks stuck",
@@ -126,7 +130,7 @@ const PROBLEM_LIST = Problem[
             "See ROUTE-02 to ROUTE-04; the message lists the codes seen."),
     # --- Analysis ---
     Problem("FIT-01", "IRF missing, or taken with other settings",
-            "Import the .sdt of a Single taken with the current [spc_module] settings and [dcc] gains (IRF button); the log lists every difference."),
+            "Import a Single of the IRF taken with the current settings ([qc] or [spc_module]) and [dcc] gains (IRF button): SPCM's .sdt, or the SPC window's Single (its CSV). The log lists every difference."),
     Problem("FIT-02", "Lifetime fits failing",
             "Too few photons per pass, the IRF misaligned with the decays (other TAC settings), or a wrong number of lifetimes."),
     Problem("FIT-03", "The analysis can't keep up",
@@ -386,7 +390,9 @@ function alert_problem_id(text::AbstractString)::String
     t = lowercase(text)
     has(x) = occursin(x, t)
     has("sync") && (has("perdu") || has("état") || has("laser allumé")) && return "SPC-03"
-    has("cfd") && (has("chute") || has("sous le seuil")) && return "SPC-04"
+    has("[qc] taux") && return "SPC-09"
+    startswith(t, "qc-104 :") && return "SPC-10"
+    (has("cfd") || has("photons comptés")) && (has("chute") || has("sous le seuil")) && return "SPC-04"
     has("fifo débordé") && return "SPC-07"
     has("réglage non appliqué") && return "SPC-05"
     has("peigne") && return "SPC-08"

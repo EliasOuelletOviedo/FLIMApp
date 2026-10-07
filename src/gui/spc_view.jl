@@ -1,7 +1,7 @@
 """
 gui/spc_view.jl
 
-The GUI side of the SPC-150N engine (FLIMCore, src/spc/) — main thread
+The GUI side of the SPC engine (FLIMCore, src/spc/) — main thread
 only. The GUI never calls the SPC DLL: buttons send commands
 (`FLIMCore.commander!`), and the refresh tick (`spc_tick!`, called from
 gui/refresh.jl) drains `engine.resultats` without ever waiting:

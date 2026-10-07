@@ -54,7 +54,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 |---|---|---|
 | ENV-01 | Too few threads | Start Julia with -t 4,1 (scripts/launch.bat does): the DAQ loop, the journal, the analysis and the SPC engine each need a thread. |
 | ENV-02 | NI-DAQmx driver not found: running offline | Install NI-DAQmx (nicaiu.dll in System32 on the bench PC). Without it the app runs offline: Playback only. |
-| ENV-03 | SPC-150N DLL not found: running offline | Install the Becker & Hickl TCSPC package (spcm64.dll), or set [source] type = "simulation" in config/spc.toml. |
+| ENV-03 | SPC DLL (spcm64.dll) not found: running offline | Install the Becker & Hickl TCSPC package (spcm64.dll), or set [source] type = "simulation" in config/spc.toml. |
 | ENV-04 | Configuration file unreadable: defaults used | Fix the file the message names (a typo, an unknown key, a value out of range); the message says which. |
 | ENV-05 | Recording folder: little space left, or not writable | Free space, or pick another recording folder (second path field). The raw stream takes about 4 bytes per photon per card. |
 | ENV-06 | Unexpected error at start-up | The debug log has the stack trace; the app may run without the part that failed. |
@@ -73,18 +73,20 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 | DAQ-08 | DAQ error during a scan: outputs zeroed (FAULT) | The message gives the step and the DAQmx code; RESET acknowledges it. The debug log has the full DAQmx message. |
 | DAQ-09 | DAQ connection failed | The message gives the step and the reason; RECONNECT once fixed. |
 
-### SPC-150N cards and engine
+### SPC card (SPC-QC-104, or SPC-150N) and engine
 
 | Code | Problem | What to check |
 |---|---|---|
 | SPC-01 | SPC cards: initialization failed | SPCM must be closed; the cards must be seen by the PC (chassis powered before the PC); UNLOCK if a crashed session left them locked. |
-| SPC-02 | SPC card identity: serial number or channel | [verification] series in config/spc.toml lists the serial of channel 1 then channel 2; the message says which card was found where. |
-| SPC-03 | No SYNC on a card | Laser on? SYNC cable to that card; sync_threshold / sync_zc_level in [spc_module]. |
-| SPC-04 | CFD rate too low on a card | Detectors on (DCC software: Enable outputs, overload shutdown?), light reaching them, cfd_limit_low in [spc_module]. |
-| SPC-05 | A card setting was not applied as requested | The SPC window lists requested → applied; a key unknown to the DLL or out of range in [spc_module]. |
+| SPC-02 | SPC card identity: serial number or channel | [verification] series in config/spc.toml: channel 1 then channel 2, "<serial>/IN<input>" for the QC-104 (3T0089/IN1), each card's serial for SPC-150N; the message says which card or input was found where. |
+| SPC-03 | No SYNC on a card | Laser on? SYNC cable (QC-104: the SYNC input); the 4th value of [qc] seuil_mV / zc_mV (SPC-150N: sync_threshold / sync_zc_level in [spc_module]). |
+| SPC-04 | Count rate too low on a channel | Detectors on (DCC software: Enable outputs, overload shutdown?), light reaching them, the detector cable on that input; [qc] seuil_mV / zc_mV (SPC-150N: cfd_limit_low in [spc_module]). |
+| SPC-05 | A card setting was not applied as requested | The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N). |
 | SPC-06 | SPC engine error | The message gives the step and the DLL function with its code; the debug log has the stack trace. |
 | SPC-07 | Photons lost: FIFO overflow (SPC_FOVFL or GAP records) | The passes concerned are kept out of the PI. Count rate too high for the bus, or the engine reading too slowly (CPU load). |
-| SPC-08 | ADC comb visible on a decay | Differential nonlinearity of the card's ADC: check the decay in the SPC window; if strong, the card's ADC settings or the card itself. |
+| SPC-08 | ADC comb visible on a decay | Differential nonlinearity of the card's ADC (SPC-150N: dither_range); the QC-104's TDC channels are resampled onto [qc] fenetre_ns with a random draw, which should leave none. |
+| SPC-09 | QC-104 rate counters don't match the stream: [qc] taux | Which SPC_read_rates value is IN1, IN2, IN3, SYNC isn't documented: fix [qc] taux (qc3_entrees.jl tells). Only the display between measurements uses them; the check and the measurements count photons in the stream. |
+| SPC-10 | QC-104: photons or records set aside by the translation | Beyond [qc] fenetre_ns: the window shorter than the laser period, diviseur_sync > 1, or decalage_ns pushing the decay to its end. An input without a channel: [verification] series. Unknown records: the QC-104's FIFO format (SPCLite.FORMAT_QC104) needs another look. |
 
 ### Imaging
 
@@ -98,8 +100,8 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 | Code | Problem | What to check |
 |---|---|---|
 | PASS-01 | No photon on a card during the Realtime measurement | Laser and detectors on, CFD rate in the top bar, CFD/SYNC thresholds; the 850 nm gate (P0.0) high during scans. |
-| PASS-02 | Photons but no M0 marker (start of pass) | The pass signal (PFI13 = CTR 1 OUT) doesn't reach M0 of that card: wiring, common ground (D GND, pin 15). scripts/test_passes.jl shows where it arrives. |
-| PASS-03 | M0 markers but no M3 marker (end of pass) | Only with [clamp] fin_par_m3 = true: M3 of that card isn't wired. Without access to M3, set fin_par_m3 = false (M0 only). |
+| PASS-02 | Photons but no M0 marker (start of pass) | The pass signal (PFI13 = CTR 1 OUT) doesn't reach M0 (QC-104: pin 12 of the Micro Sub-D 15): wiring, common ground (D GND to pin 5 or 15). scripts/test_passes.jl shows where it arrives. |
+| PASS-03 | M0 markers but no M3 marker (end of pass) | Only with [clamp] fin_par_m3 = true: M3 isn't wired (QC-104: pin 10, the same PFI13 as pin 12). Without access to M3, set fin_par_m3 = false (M0 only). |
 | PASS-04 | Pass markers lost or extra | M0 and M3 counts differ, or (M0 only) M0 missing or off the slot cadence (glitches, ignored): a marginal TTL on the marker inputs (one output feeds every card): ground, cable length, connector. |
 | PASS-05 | Pass length M3 − M0 differs from the programmed scan | If it equals the pause, the edges are swapped (M0 must be the rising edge, M3 the falling one); otherwise check the pass counter's clock and the sample rate. |
 | PASS-06 | Passes don't pair between the two cards | One card misses markers the other gets: compare their M0 counts (Console panel, debug report). |
@@ -111,7 +113,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 
 | Code | Problem | What to check |
 |---|---|---|
-| ROUTE-01 | Photons in passes carry the reserved code 0: no routing code received | P0.4–P0.7 of the NI don't reach R0–R3 of the cards (cable, BOB), or channels.lines doesn't drive port 0. The debug report's "Routing lines read back" (or scripts/lignes_routage.jl) tells which: if the NI drives the code, the loss is after the BOB. |
+| ROUTE-01 | Photons in passes carry the reserved code 0: no routing code received | P0.4–P0.7 of the NI don't reach /R0–/R3 of the card (QC-104: pins 2, 3, 4, 7; cable, BOB), or channels.lines doesn't drive port 0, or (QC-104) the routing isn't enabled on that input (tdc_control, from [verification] series). The debug report's "Routing lines read back" (or scripts/lignes_routage.jl) tells which: if the NI drives the code, the loss is after the BOB. |
 | ROUTE-02 | The cards read the inverted routing code | Set inverser_routage the other way in config/spc.toml ([clamp]). |
 | ROUTE-03 | A routing line looks stuck | The message names the line (R<b> = P0.<4+b>) and whether it is never or always high: that wire, pin or connector. "Routing lines read back" (debug report) shows whether the NI drives it. |
 | ROUTE-04 | Photons carry routing codes the NI doesn't write | Lines swapped between NI and cards (bit order), or crosstalk; the message lists the codes seen and written. |
@@ -121,7 +123,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 
 | Code | Problem | What to check |
 |---|---|---|
-| FIT-01 | IRF missing, or taken with other settings | Import the .sdt of a Single taken with the current [spc_module] settings and [dcc] gains (IRF button); the log lists every difference. |
+| FIT-01 | IRF missing, or taken with other settings | Import a Single of the IRF taken with the current settings ([qc] or [spc_module]) and [dcc] gains (IRF button): SPCM's .sdt, or the SPC window's Single (its CSV). The log lists every difference. |
 | FIT-02 | Lifetime fits failing | Too few photons per pass, the IRF misaligned with the decays (other TAC settings), or a wrong number of lifetimes. |
 | FIT-03 | The analysis can't keep up | Passes pile up: fewer lifetimes, longer scans, or a slower pass rate. |
 | FIT-04 | Passes kept out of the PI | The reasons are counted: GAP or FIFO overflow → SPC-07, M3 − M0 → PASS-05. |

@@ -1,7 +1,7 @@
 """
 roi_popup.jl
 
-ROI popup: acquire an image with the SPC-150N (the "Image" button: 100
+ROI popup: acquire an image with the SPC card (the "Image" button: 100
 frames with the scanner clocks, FLIMCore's `Imagerie`, the same rangement as
 imagerie_photons.jl), draw ROIs on it by hand, import them from ImageJ
 .roi/.zip files (via ImageJROI.jl) or segment them with Cellpose, and fit
@@ -613,7 +613,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     channel_menu = Menu(buttons_layout[5, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ROI_IMAGE_CHANNELS, :default => "Channel 1"))...)
 
     # What the Image button did last (acquiring, size, photons, or why not).
-    popup_status = Observable("Image: $(ROI_IMAGE_FRAMES) frames from the SPC-150N (scanner running)")
+    popup_status = Observable("Image: $(ROI_IMAGE_FRAMES) frames from the SPC card (scanner running)")
     Label(buttons_layout[5, 2:4], popup_status; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :left, :tellwidth => false))...)
 
     image_plot = Ref{Any}(nothing)
@@ -866,7 +866,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         return Consume(false)
     end
 
-    # Image: ROI_IMAGE_FRAMES frames from the SPC-150N (FLIMCore's Imagerie,
+    # Image: ROI_IMAGE_FRAMES frames from the SPC card (FLIMCore's Imagerie,
     # keeping the raw stream). The engine acquires on its own thread; the
     # result comes back through the refresh tick into app_run.spc.roi_image,
     # listened to below (and released when this popup closes).

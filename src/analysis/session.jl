@@ -154,7 +154,10 @@ function session_info(; mode::AbstractString, rois::Vector{RoiCoordinates}, orde
             "fin_par_m3" => spc.fin_par_m3,
             "code_hors_roi" => FLIMCore.CODE_HORS_ROI,
             "code_sans_roi" => FLIMCore.CODE_SANS_ROI,
-            "spc_module" => Dict{String, Any}(spc.spc),
+            "spc_module" => Dict{String, Any}(FLIMCore.parametres_base(spc)),   # the DLL keys sent (QC-104: [qc] translated)
+            "qc" => FLIMCore.est_qc104(spc) ? Dict{String, Any}("plage_tdc_ns" => spc.qc_plage_tdc_ns, "fenetre_ns" => spc.qc_fenetre_ns,
+                                                                "seuil_mV" => spc.qc_seuil_mV, "zc_mV" => spc.qc_zc_mV,
+                                                                "decalage_ns" => spc.qc_decalage_ns) : Dict{String, Any}(),
             "dcc" => Dict{String, Any}(spc.dcc)
         ),
         "daq" => daq,
@@ -376,7 +379,7 @@ sessions_root(spc::FLIMCore.Reglages)::String = joinpath(FLIMCore.dossier_spc(sp
 """The raw stream: 4 bytes per photon and per card (FIFO_150 records)."""
 const BYTES_PER_PHOTON = 4
 
-"""Count rate the free-space estimate assumes, per card (1 Mcps: 8 MB/s on two cards, about 29 GB/h)."""
+"""Count rate the free-space estimate assumes, per channel (1 Mcps: 8 MB/s on two channels, about 29 GB/h)."""
 const NOMINAL_RATE_CPS = 1e6
 
 """Below this much recording time, START refuses the Realtime mode; below `RECORDING_WARN_S`, a warning."""
@@ -388,7 +391,8 @@ const RECORDING_WARN_S = 60 * 60
 
 Free space where the sessions go (the recording folder, or the nearest
 existing folder above it), and how long it lasts at `NOMINAL_RATE_CPS` per
-card of [verification] series (`BYTES_PER_PHOTON` per photon). `text` for
+channel of [verification] series (`BYTES_PER_PHOTON` per photon: one
+stream per channel, an input of the QC-104 or an SPC-150N). `text` for
 the GUI; `free_bytes` is -1 when it can't be read.
 """
 function recording_space(spc::FLIMCore.Reglages)
@@ -405,7 +409,7 @@ function recording_space(spc::FLIMCore.Reglages)
     rate = BYTES_PER_PHOTON * NOMINAL_RATE_CPS * max(1, length(spc.series))
     seconds = free / rate
     text = "$(round(free / 1e9; digits = 1)) GB free ≈ $(round(seconds / 3600; digits = 1)) h " *
-           "at $(round(Int, NOMINAL_RATE_CPS / 1e6)) Mcps × $(max(1, length(spc.series))) card(s)"
+           "at $(round(Int, NOMINAL_RATE_CPS / 1e6)) Mcps × $(max(1, length(spc.series))) channel(s)"
     return free, seconds, text
 end
 

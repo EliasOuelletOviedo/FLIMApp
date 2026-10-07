@@ -29,7 +29,7 @@ using Libdl
 # Files are grouped by the thread that runs them (plan.md §8): gui/ runs on
 # the main thread only, analysis/ on the analysis worker, loop/ on the DAQ
 # loop (the only code that touches the NI cards), spc/ on the SPC engine
-# (the only code that touches the SPC-150N cards), journal.jl on the journal
+# (the only code that touches the SPC card), journal.jl on the journal
 # thread. Files at the top level are pure or shared definitions; the threads
 # share data only through exchange.jl — and, for the SPC engine, through
 # FLIMCore's two channels (commands and results).
@@ -45,7 +45,7 @@ include("bench_config.jl")
 # Settings structs, AppState, per-file results
 include("data_types.jl")
 
-# FLIMCore: the SPC-150N engine (its own thread, the only task that calls the
+# FLIMCore: the SPC engine — SPC-QC-104 or SPC-150N — (its own thread, the only task that calls the
 # SPC DLL), its photon sources (cards, .spc replay, simulation) and the pure
 # functions of the bench scripts. Its own module, standard library only
 # (Plan.pdf); the routing limits it defines are shared with the DAQ loop.
@@ -278,7 +278,7 @@ Load the IRF of each channel (`load_irfs`: `~/.flimapp/irf.csv` and the
 record of its settings, imported from a Single .sdt) into the fit contexts
 — `RUNTIME[]` for channel 1, `RUNTIME_CH2[]` for channel 2 when the IRF has
 two channels. `spc`: the SPC settings an import is checked against
-(`import_irf_sdt`). Falls back to `nothing` fields when loading fails.
+(`import_irf`). Falls back to `nothing` fields when loading fails.
 
 Doesn't touch the contexts' FFT plans — those already have a valid
 256-point default, and `ensure_fft_plans` (called from

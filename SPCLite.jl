@@ -32,14 +32,6 @@ Références :
 - format FIFO des SPC-130/140/15x/16x/830 : mêmes règles que libtcspc
   (bh_spc.hpp) et le lecteur Bio-Formats des fichiers .spc.
 
-Copie de SPCLite.jl (VERSION_LITE 12) intégrée à FLIMApp pour FLIMCore
-(src/spc/FLIMCore.jl), avec deux différences : la DLL est cherchée au
-premier appel (`chemin_dll`) au lieu du chargement du module, et le format
-FIFO de la QC-104 est ici (`FORMAT_QC104`), établi sur les acquisitions de
-qc4/qc5 (2026-10-07). Seule la tâche du moteur de FLIMCore appelle ces
-fonctions ; `selectionner_modules!` y choisit les cartes d'un type, comme
-`avec_spc_tous`, pour toute la vie du moteur.
-
 Les structures SPCdata et SPC_EEP_Data ne sont jamais recopiées en Julia :
 la DLL les remplit dans un tampon d'octets opaque, puis écrit elle-même
 les paramètres dans un fichier .ini qu'on relit. C'est ce qui rend ce
@@ -55,10 +47,9 @@ using Libdl, Printf
 """Version de ce fichier : les scripts s'arrêtent si Julia en a chargé une plus ancienne."""
 const VERSION_LITE = 12
 
-export SPCError, chk_spc, message_erreur, chemin_dll, dll_disponible
+export SPCError, chk_spc, message_erreur, DLL_SPCM
 export ecrire_ini, lire_ini, avec_spc, avec_spc_tous, initialiser, liberer, liberer_tous
-export modules_detectes, modules_prets, forcer_module, forcer_modules, prendre_modules, chercher_bh,
-       selectionner_modules!, oublier_selection!
+export modules_detectes, modules_prets, forcer_module, forcer_modules, prendre_modules, chercher_bh
 export etat_init, info_module, type_module, eeprom, mode_dll, explication_init
 export TYPE_QC104, TYPES_SPC150, nom_module, est_qc, types_presents
 export lire_parametres, appliquer_ini, sync_etat, effacer_taux, taux, taux_bruts
@@ -68,7 +59,7 @@ export demarrer, arreter, etat_mesure, lire_fifo!, fifo_init, remplissage_fifo, 
 export largeur_canal_s
 export configurer_memoire, definir_page, effacer_memoire, lire_bloc
 export Decodeur, decoder!, reinitialiser!, PERIODE_MT
-export FormatFIFO, FORMAT_SPC150, FORMAT_QC104, DecodeurFIFO, ecrire_format, copie_format
+export FormatFIFO, FORMAT_SPC150, DecodeurFIFO, ecrire_format, copie_format
 export PhotonDLL, ecrire_spc, photons_dll, type_flux_fichier
 export DRAPEAU_INVALIDE, DRAPEAUX_MARQUEURS, est_marqueur
 export SPC_OVERFL, SPC_OVERFLOW, SPC_TIME_OVER, SPC_COLTIM_OVER, SPC_CMD_STOP, SPC_HFILL_NRDY
@@ -120,49 +111,14 @@ function _trouver_dll()
         spcm64.dll introuvable. Chemins essayés :
           $(join(candidats, "\n  "))
         Installe le TCSPC Package 64 bits en cochant « SPCM-DLL », ou indique
-        le chemin avant le premier appel à la DLL :
+        le chemin avant de charger SPCLite :
           ENV["SPCM_DLL"] = raw"C:\\chemin\\vers\\spcm64.dll"
         Pour trouver le fichier, dans PowerShell :
           Get-ChildItem 'C:\\Program Files (x86)\\BH' -Recurse -Filter spcm64.dll""")
 end
 
-# La DLL est cherchée au premier appel, pas au chargement du module : FLIMApp
-# se charge (et se précompile) sur une machine sans cartes ni TCSPC Package,
-# et seule la première fonction qui touche une carte échoue, avec le message
-# de _trouver_dll. Chaque fonction de la DLL est résolue une fois (dlsym) puis
-# appelée par son pointeur.
-const _CHEMIN_DLL = Ref{String}("")
-const _POIGNEE_DLL = Ref{Ptr{Cvoid}}(C_NULL)
-const _FONCTIONS_DLL = Dict{Symbol,Ptr{Cvoid}}()
-const _VERROU_DLL = ReentrantLock()
-
-"""Chemin complet de spcm64.dll, cherché au premier appel. Lève une erreur si absente."""
-function chemin_dll()
-    lock(_VERROU_DLL) do
-        isempty(_CHEMIN_DLL[]) && (_CHEMIN_DLL[] = _trouver_dll())
-        return _CHEMIN_DLL[]
-    end
-end
-
-"""`true` si spcm64.dll est trouvée (sans lever d'erreur)."""
-function dll_disponible()
-    try
-        chemin_dll()
-        return true
-    catch
-        return false
-    end
-end
-
-"""Pointeur de la fonction `nom` de la DLL, résolu au premier appel puis gardé."""
-function _f(nom::Symbol)
-    lock(_VERROU_DLL) do
-        get!(_FONCTIONS_DLL, nom) do
-            _POIGNEE_DLL[] == C_NULL && (_POIGNEE_DLL[] = Libdl.dlopen(chemin_dll()))
-            Libdl.dlsym(_POIGNEE_DLL[], nom)
-        end
-    end
-end
+"""Chemin complet de la DLL chargée (fixé au chargement du module)."""
+const DLL_SPCM = _trouver_dll()
 
 # =====================================================================
 # Erreurs
@@ -178,7 +134,7 @@ Base.showerror(io::IO, e::SPCError) =
 
 function _chaine_erreur(id::Integer)
     buf = zeros(UInt8, 512)
-    r = ccall(_f(:SPC_get_error_string), Int16,
+    r = ccall((:SPC_get_error_string, DLL_SPCM), Int16,
               (Int16, Ptr{UInt8}, Int16), Int16(id), buf, Int16(length(buf) - 1))
     r < 0 && return ""
     return GC.@preserve buf unsafe_string(pointer(buf))
@@ -337,13 +293,13 @@ end
 
 """Appelle SPC_init avec le chemin absolu de `ini`. Ne lève pas : renvoie le code."""
 initialiser(ini::AbstractString) =
-    Int(ccall(_f(:SPC_init), Int16, (Cstring,), abspath(ini)))
+    Int(ccall((:SPC_init, DLL_SPCM), Int16, (Cstring,), abspath(ini)))
 
 """Mode de la DLL : 0 = matériel, 151 = simulation d'une SPC-150N, etc."""
-mode_dll() = Int(ccall(_f(:SPC_get_mode), Int16, ()))
+mode_dll() = Int(ccall((:SPC_get_mode, DLL_SPCM), Int16, ()))
 
 _set_mode(mode, force, table::Vector{Int32}) =
-    Int(ccall(_f(:SPC_set_mode), Int16, (Int16, Int16, Ptr{Int32}),
+    Int(ccall((:SPC_set_mode, DLL_SPCM), Int16, (Int16, Int16, Ptr{Int32}),
               Int16(mode), Int16(force), table))
 
 function _table_in_use(modules)
@@ -446,12 +402,12 @@ déverrouillé, mais SPC_close est quand même appelé.
 """
 function liberer_tous(modules)
     for m in modules
-        try; ccall(_f(:SPC_stop_measurement), Int16, (Int16,), Int16(m)); catch; end
+        try; ccall((:SPC_stop_measurement, DLL_SPCM), Int16, (Int16,), Int16(m)); catch; end
     end
     if !isempty(modules)
         try; _set_mode(0, 0, zeros(Int32, 32)); catch; end   # in_use = 0 : déverrouille
     end
-    try; ccall(_f(:SPC_close), Int16, ()); catch; end
+    try; ccall((:SPC_close, DLL_SPCM), Int16, ()); catch; end
     return nothing
 end
 
@@ -512,27 +468,6 @@ function _prendre_si_utile(voulus, autres, forcer::Bool)
     end
     return nothing
 end
-
-"""
-    selectionner_modules!(types; forcer=false) -> (voulus, autres)
-
-Après `initialiser`, comme `avec_spc_tous` mais sans fermer : garde les
-cartes détectées de `types` pour cette session (les autres sont rendues ;
-`modules_prets` et `liberer` ne voient plus qu'elles) et renvoie leurs
-numéros et ceux des autres cartes détectées. `voulus` peut être vide. Pour
-un moteur qui tient les cartes longtemps (FLIMCore) ; `liberer` puis
-`_SELECTION[] = nothing` à la fin.
-"""
-function selectionner_modules!(types; forcer::Bool = false)
-    detectes = modules_detectes()
-    voulus, autres = _choisir(detectes, types)
-    isempty(voulus) || _prendre_si_utile(voulus, autres, forcer)
-    _SELECTION[] = voulus
-    return Int.(voulus), Int.(autres)
-end
-
-"""Oublie la sélection de `selectionner_modules!` (après `liberer`)."""
-oublier_selection!() = (_SELECTION[] = nothing; nothing)
 
 """
     avec_spc_tous(f, ini; types=nothing, forcer=false)
@@ -620,10 +555,10 @@ end
 # =====================================================================
 
 """État d'initialisation du module (0 = prêt ; voir MESSAGES_INIT)."""
-etat_init(m::Integer) = Int(ccall(_f(:SPC_get_init_status), Int16, (Int16,), Int16(m)))
+etat_init(m::Integer) = Int(ccall((:SPC_get_init_status, DLL_SPCM), Int16, (Int16,), Int16(m)))
 
 """Type du module (151 = SPC-150N, 104 = SPC-QC-104) ; valeur < 0 = erreur. Lit le matériel : module prêt seulement."""
-type_module(m::Integer) = Int(ccall(_f(:SPC_test_id), Int16, (Int16,), Int16(m)))
+type_module(m::Integer) = Int(ccall((:SPC_test_id, DLL_SPCM), Int16, (Int16,), Int16(m)))
 
 """
     info_module(m) -> (type, bus, slot, utilise, init, adresse)
@@ -633,7 +568,7 @@ Lit les structures internes de la DLL : sans risque pour les modules 0 à 7.
 """
 function info_module(m::Integer)
     buf = zeros(Int16, 16)            # 6 short utiles, marge
-    chk_spc(ccall(_f(:SPC_get_module_info), Int16, (Int16, Ptr{Int16}),
+    chk_spc(ccall((:SPC_get_module_info, DLL_SPCM), Int16, (Int16, Ptr{Int16}),
                   Int16(m), buf), "SPC_get_module_info")
     return (type = Int(buf[1]), bus = Int(buf[2]), slot = Int(buf[3]),
             utilise = Int(buf[4]), init = Int(buf[5]),
@@ -649,7 +584,7 @@ module prêt seulement.
 """
 function eeprom(m::Integer)
     buf = zeros(UInt8, 1024)          # 3 × char[16] puis les réglages d'usine
-    chk_spc(ccall(_f(:SPC_get_eeprom_data), Int16, (Int16, Ptr{UInt8}),
+    chk_spc(ccall((:SPC_get_eeprom_data, DLL_SPCM), Int16, (Int16, Ptr{UInt8}),
                   Int16(m), buf), "SPC_get_eeprom_data")
     function champ(i)
         b = buf[16i + 1:16i + 16]
@@ -675,10 +610,10 @@ les clés gardent les noms de la DLL : `relire_qc` les traduit.
 function lire_parametres(m::Integer;
                          fichier::AbstractString = joinpath(tempdir(), "spc_relu_$(m).ini"))
     buf = zeros(UInt8, TAILLE_SPCDATA)
-    chk_spc(ccall(_f(:SPC_get_parameters), Int16, (Int16, Ptr{UInt8}),
+    chk_spc(ccall((:SPC_get_parameters, DLL_SPCM), Int16, (Int16, Ptr{UInt8}),
                   Int16(m), buf), "SPC_get_parameters")
     isfile(fichier) && rm(fichier)
-    chk_spc(ccall(_f(:SPC_save_parameters_to_inifile), Int16,
+    chk_spc(ccall((:SPC_save_parameters_to_inifile, DLL_SPCM), Int16,
                   (Ptr{UInt8}, Cstring, Ptr{UInt8}, Cint),
                   buf, abspath(fichier), C_NULL, Cint(0)),
             "SPC_save_parameters_to_inifile")
@@ -774,10 +709,10 @@ paramètres absents du fichier reprennent leur valeur par défaut.
 """
 function appliquer_ini(m::Integer, ini::AbstractString)
     buf = zeros(UInt8, TAILLE_SPCDATA)
-    chk_spc(ccall(_f(:SPC_read_parameters_from_inifile), Int16,
+    chk_spc(ccall((:SPC_read_parameters_from_inifile, DLL_SPCM), Int16,
                   (Ptr{UInt8}, Cstring), buf, abspath(ini)),
             "SPC_read_parameters_from_inifile")
-    chk_spc(ccall(_f(:SPC_set_parameters), Int16, (Int16, Ptr{UInt8}),
+    chk_spc(ccall((:SPC_set_parameters, DLL_SPCM), Int16, (Int16, Ptr{UInt8}),
                   Int16(m), buf), "SPC_set_parameters")
     return nothing
 end
@@ -978,14 +913,14 @@ end
 """0 pas de SYNC, 1 correct, 2 ou 3 surcharge (voir MESSAGES_SYNC)."""
 function sync_etat(m::Integer)
     s = Ref{Int16}(0)
-    chk_spc(ccall(_f(:SPC_get_sync_state), Int16, (Int16, Ptr{Int16}),
+    chk_spc(ccall((:SPC_get_sync_state, DLL_SPCM), Int16, (Int16, Ptr{Int16}),
                   Int16(m), s), "SPC_get_sync_state")
     return Int(s[])
 end
 
 """Remet les compteurs de taux à zéro ; obligatoire avant le premier `taux`."""
 effacer_taux(m::Integer) =
-    chk_spc(ccall(_f(:SPC_clear_rates), Int16, (Int16,), Int16(m)), "SPC_clear_rates")
+    chk_spc(ccall((:SPC_clear_rates, DLL_SPCM), Int16, (Int16,), Int16(m)), "SPC_clear_rates")
 
 """
     taux(m) -> (code, sync, cfd, tac, adc)
@@ -997,7 +932,7 @@ voir `taux_bruts` et qc3_entrees.jl.
 """
 function taux(m::Integer)
     v = zeros(Float32, 16)            # rate_values : 4 float ; marge
-    r = Int(ccall(_f(:SPC_read_rates), Int16, (Int16, Ptr{Float32}), Int16(m), v))
+    r = Int(ccall((:SPC_read_rates, DLL_SPCM), Int16, (Int16, Ptr{Float32}), Int16(m), v))
     return (code = r, sync = Float64(v[1]), cfd = Float64(v[2]),
             tac = Float64(v[3]), adc = Float64(v[4]))
 end
@@ -1011,7 +946,7 @@ davantage pour les 4 entrées de la QC-104.
 """
 function taux_bruts(m::Integer)
     v = zeros(Float32, 16)
-    r = Int(ccall(_f(:SPC_read_rates), Int16, (Int16, Ptr{Float32}), Int16(m), v))
+    r = Int(ccall((:SPC_read_rates, DLL_SPCM), Int16, (Int16, Ptr{Float32}), Int16(m), v))
     return (code = r, valeurs = Float64.(v[1:8]))
 end
 
@@ -1019,7 +954,7 @@ end
 # Mesure FIFO
 # =====================================================================
 
-_start(m) = Int(ccall(_f(:SPC_start_measurement), Int16, (Int16,), Int16(m)))
+_start(m) = Int(ccall((:SPC_start_measurement, DLL_SPCM), Int16, (Int16,), Int16(m)))
 
 """
 Démarre la mesure. Si la carte refuse de s'armer (code -20, « cannot arm »,
@@ -1029,7 +964,7 @@ fois. En cas d'échec, l'erreur donne les bits d'état et l'état du SYNC.
 function demarrer(m::Integer)
     r = _start(m)
     if r == -20
-        try; ccall(_f(:SPC_stop_measurement), Int16, (Int16,), Int16(m)); catch; end
+        try; ccall((:SPC_stop_measurement, DLL_SPCM), Int16, (Int16,), Int16(m)); catch; end
         sleep(0.1)
         r = _start(m)
     end
@@ -1052,13 +987,13 @@ function demarrer(m::Integer)
 end
 
 """Arrête la mesure. En mode FIFO, l'arrêt vide le FIFO : lire avant d'arrêter."""
-arreter(m::Integer) = chk_spc(ccall(_f(:SPC_stop_measurement), Int16, (Int16,),
+arreter(m::Integer) = chk_spc(ccall((:SPC_stop_measurement, DLL_SPCM), Int16, (Int16,),
                                     Int16(m)), "SPC_stop_measurement")
 
 """Bits d'état de la mesure (SPC_ARMED, SPC_FOVFL, SPC_FEMPTY…)."""
 function etat_mesure(m::Integer)
     s = Ref{Int16}(0)
-    chk_spc(ccall(_f(:SPC_test_state), Int16, (Int16, Ptr{Int16}),
+    chk_spc(ccall((:SPC_test_state, DLL_SPCM), Int16, (Int16, Ptr{Int16}),
                   Int16(m), s), "SPC_test_state")
     return reinterpret(UInt16, s[])
 end
@@ -1074,7 +1009,7 @@ le premier mot d'un fichier .spc. À appeler une fois le mode FIFO réglé.
 """
 function fifo_init(m::Integer)
     ft = Ref{Int16}(0); st = Ref{Int16}(0); mt = Ref{Cint}(0); h = Ref{Cuint}(0)
-    chk_spc(ccall(_f(:SPC_get_fifo_init_vars), Int16,
+    chk_spc(ccall((:SPC_get_fifo_init_vars, DLL_SPCM), Int16,
                   (Int16, Ptr{Int16}, Ptr{Int16}, Ptr{Cint}, Ptr{Cuint}),
                   Int16(m), ft, st, mt, h), "SPC_get_fifo_init_vars")
     return (type_fifo = Int(ft[]), type_flux = Int(st[]),
@@ -1126,7 +1061,7 @@ long (32 bits sous Windows) puis block_length, lus dans un tampon opaque.
 """
 function configurer_memoire(m::Integer, resolution_adc::Integer, bits_routage::Integer = 0)
     b = zeros(UInt8, 64)
-    chk_spc(ccall(_f(:SPC_configure_memory), Int16, (Int16, Int16, Int16, Ptr{UInt8}),
+    chk_spc(ccall((:SPC_configure_memory, DLL_SPCM), Int16, (Int16, Int16, Int16, Ptr{UInt8}),
                   Int16(m), Int16(resolution_adc), Int16(bits_routage), b), "SPC_configure_memory")
     long(o) = Int(reinterpret(Int32, b[o + 1:o + 4])[1])
     return (blocs = long(0), blocs_par_trame = long(4), trames_par_page = long(8),
@@ -1135,7 +1070,7 @@ end
 
 """Page de mémoire où la prochaine mesure s'enregistre."""
 definir_page(m::Integer, page::Integer) =
-    chk_spc(ccall(_f(:SPC_set_page), Int16, (Int16, Clong), Int16(m), Clong(page)),
+    chk_spc(ccall((:SPC_set_page, DLL_SPCM), Int16, (Int16, Clong), Int16(m), Clong(page)),
             "SPC_set_page")
 
 """
@@ -1145,7 +1080,7 @@ Remplit de zéros un bloc (-1 : tous) d'une page (-1 : toutes), puis attend
 que la carte ait fini (bit SPC_HFILL_NRDY).
 """
 function effacer_memoire(m::Integer; bloc::Integer = -1, page::Integer = 0, delai_max_s = 5.0)
-    r = chk_spc(ccall(_f(:SPC_fill_memory), Int16, (Int16, Clong, Clong, UInt16),
+    r = chk_spc(ccall((:SPC_fill_memory, DLL_SPCM), Int16, (Int16, Clong, Clong, UInt16),
                       Int16(m), Clong(bloc), Clong(page), 0x0000), "SPC_fill_memory")
     t0 = time()
     while r > 0 && (etat_mesure(m) & SPC_HFILL_NRDY) != 0
@@ -1162,7 +1097,7 @@ Lit une courbe de `n` canaux dans la mémoire de la carte, sans réduction.
 """
 function lire_bloc(m::Integer, n::Integer; bloc::Integer = 0, page::Integer = 0)
     d = zeros(UInt16, n)
-    chk_spc(ccall(_f(:SPC_read_data_block), Int16,
+    chk_spc(ccall((:SPC_read_data_block, DLL_SPCM), Int16,
                   (Int16, Clong, Clong, Int16, Int16, Int16, Ptr{UInt16}),
                   Int16(m), Clong(bloc), Clong(page), Int16(1), Int16(0), Int16(n - 1), d),
             "SPC_read_data_block")
@@ -1172,7 +1107,7 @@ end
 """Remplissage du FIFO de la carte, de 0 à 1."""
 function remplissage_fifo(m::Integer)
     u = Ref{Float32}(0)
-    chk_spc(ccall(_f(:SPC_get_fifo_usage), Int16, (Int16, Ptr{Float32}),
+    chk_spc(ccall((:SPC_get_fifo_usage, DLL_SPCM), Int16, (Int16, Ptr{Float32}),
                   Int16(m), u), "SPC_get_fifo_usage")
     return Float64(u[])
 end
@@ -1187,7 +1122,7 @@ macrotemps, et lit au plus 12 Mo par appel (notes de version 5.1.0).
 """
 function lire_fifo!(m::Integer, tampon::Vector{UInt16})
     n = Ref{Culong}(length(tampon) - isodd(length(tampon)))
-    chk_spc(ccall(_f(:SPC_read_fifo), Int16, (Int16, Ptr{Culong}, Ptr{UInt16}),
+    chk_spc(ccall((:SPC_read_fifo, DLL_SPCM), Int16, (Int16, Ptr{Culong}, Ptr{UInt16}),
                   Int16(m), n, tampon), "SPC_read_fifo")
     return Int(n[])
 end
@@ -1378,32 +1313,6 @@ const FORMAT_SPC150 = FormatFIFO(
     masque_marqueur = 0x90000000, valeur_marqueur = 0x90000000, bits_marqueurs = (12, 13, 14, 15),
     masque_photon = 0x10000000, valeur_photon = 0x00000000,
     verification = "format publié (libtcspc, Bio-Formats), testé sur les SPC-150N du banc")
-
-"""
-Format FIFO de la SPC-QC-104 (flux de type 11, FIFO_TDC, mode 1), établi le
-2026-10-07 sur les acquisitions de qc4/qc5 (marqueurs, in1, in2, controle :
-241 photons, 4507 M0, 4506 M3, 538 165 débordements) : comptes, entrées,
-routage et macrotemps identiques au décodage de la DLL (`photons_dll`), et
-la période des M0 retrouvée (97 649,1 et 488 245,5 tics). Un enregistrement :
-
-    bit 31 seul      un débordement du macrotemps (0x80000000 : un par
-                     enregistrement ; la DLL les rend un à un, sans regrouper)
-    bit 30           marqueur : M0 à M3 sur les bits 12 à 15, macrotemps 0-11
-    bits 31-30 à 0   photon : macrotemps 0-11, routage 12-15, microtemps
-                     16-27 (canal du TDC, croissant avec le temps depuis le
-                     SYNC), entrée 28-29 (0 = IN1, 1 = IN2, 2 = IN3)
-
-Le routage se lit comme sur la SPC-150N (rout_chan de la DLL = entrée × 16 +
-routage). Pas de bit de perte connu : un FIFO plein se voit par SPC_FOVFL.
-"""
-const FORMAT_QC104 = FormatFIFO(
-    nom = "SPC-QC-104 (FIFO_TDC, type 11)",
-    macrotemps = (0, 12), microtemps = (16, 12), micro_inverse = false,
-    routage = (12, 4), voie = (28, 2), valeurs_voie = (0, 1, 2, 3),
-    masque_debord = 0xc0000000, valeur_debord = 0x80000000, compte = (0, 0),
-    masque_marqueur = 0xc0000000, valeur_marqueur = 0x40000000, bits_marqueurs = (12, 13, 14, 15),
-    masque_photon = 0xc0000000, valeur_photon = 0x00000000,
-    verification = "qc4/qc5 du 2026-10-06 (marqueurs, in1, in2, controle.spc) : identique au décodage de la DLL")
 
 function Base.show(io::IO, f::FormatFIFO)
     print(io, "FormatFIFO(", repr(f.nom), ")")
@@ -1679,7 +1588,7 @@ renvoyée par le dernier SPC_get_photon (fin du fichier ou erreur).
 """
 function photons_dll(chemin::AbstractString; type_fifo::Integer, type_flux::Integer,
                      quoi::Integer = 0x3f, max::Integer = 10^7)
-    h = Int(ccall(_f(:SPC_init_phot_stream), Int16, (Int16, Cstring, Int16, Int16, Int16),
+    h = Int(ccall((:SPC_init_phot_stream, DLL_SPCM), Int16, (Int16, Cstring, Int16, Int16, Int16),
                   Int16(type_fifo), abspath(chemin), Int16(1), Int16(type_flux), Int16(quoi)))
     h < 0 && throw(SPCError(h, "SPC_init_phot_stream", message_erreur(h)))
     sortie = PhotonDLL[]
@@ -1688,7 +1597,7 @@ function photons_dll(chemin::AbstractString; type_fifo::Integer, type_flux::Inte
     try
         while length(sortie) < max
             fill!(buf, 0x00)
-            r = Int(ccall(_f(:SPC_get_photon), Int16, (Int16, Ptr{UInt8}), Int16(h), buf))
+            r = Int(ccall((:SPC_get_photon, DLL_SPCM), Int16, (Int16, Ptr{UInt8}), Int16(h), buf))
             if r != 0
                 code_fin = r
                 break
@@ -1698,7 +1607,7 @@ function photons_dll(chemin::AbstractString; type_fifo::Integer, type_flux::Inte
                                     ntuple(i -> buf[i], 16)))
         end
     finally
-        ccall(_f(:SPC_close_phot_stream), Int16, (Int16,), Int16(h))
+        ccall((:SPC_close_phot_stream, DLL_SPCM), Int16, (Int16,), Int16(h))
     end
     return sortie, code_fin
 end

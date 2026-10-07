@@ -21,7 +21,10 @@ flux_test(; trames = 8, graine = 1) = FLIMCore.flux_synthetique(trames = trames,
 source_test(mots; modules = (0,), kw...) =
     FLIMCore.SourceRejeu(Dict(m => FLIMCore.FluxRejeu(copy(mots), 0x00000001, TIC_TEST, 12.5) for m in modules); kw...)
 
-reglages_test(; kw...) = FLIMCore.Reglages(; dossier = mktempdir(), seuil_cfd = 10.0, kw...)
+# Les tests du moteur sur flux FIFO_150 : deux SPC-150N (n° de série), M0 seul sauf mention ;
+# la QC-104 a les siens (« SPC-QC-104 »).
+reglages_test(; kw...) = FLIMCore.Reglages(; dossier = mktempdir(), seuil_cfd = 10.0, source = "simulation",
+                                           series = ["3N0317", "3N0318"], fin_par_m3 = false, kw...)
 
 """
 La géométrie automatique (toute la ligne, toutes les lignes, sans marge) :
@@ -63,11 +66,11 @@ attendre_etat(m, e; delai = 30.0) = timedwait(() -> FLIMCore.etat_moteur(m) == e
         end
         @test err isa ErrorException && occursin("spcm64.dll introuvable", err.msg)
     end
-    @test FLIMCore.SPCLite.VERSION_LITE == 8
+    @test FLIMCore.SPCLite.VERSION_LITE == 12
 end
 
 @testset "réglages SPC (config/spc.toml)" begin
-    r = FLIMCore.Reglages(lignes_par_image = 256, series = ["A", "B"], rejeu = [raw"C:\données\a.spc"])
+    r = FLIMCore.Reglages(source = "cartes", lignes_par_image = 256, series = ["A", "B"], rejeu = [raw"C:\données\a.spc"])
     r.spc["cfd_limit_low"] = -80.0
     r.dcc["note"] = "gain \"haut\""
     chemin = joinpath(mktempdir(), "spc.toml")
@@ -94,9 +97,13 @@ end
     d = FLIMCore.lire_reglages(livre)
     @test all(f -> f == :fichier || getfield(d, f) == getfield(FLIMCore.Reglages(), f), fieldnames(FLIMCore.Reglages))
 
-    # Paramètres imposés par chaque mesure, par-dessus [spc_module].
+    # Paramètres imposés par chaque mesure, par-dessus ceux de la carte : la QC-104 du banc ([qc]
+    # traduit), ou [spc_module] pour les SPC-150N.
+    @test d.source == "qc104" && d.series == ["3T0089/IN1", "3T0089/IN2"] && d.fin_par_m3
     p, imposes = FLIMCore.parametres_imagerie(d, FLIMCore.Geometrie(ligne_front_montant = false))
-    @test p["mode"] == 1 && p["routing_mode"] == 0x4600 && p["tac_range"] == d.spc["tac_range"] && haskey(imposes, "macro_time_clk")
+    @test p["mode"] == 1 && p["routing_mode"] == 0x4600 && p["tac_range"] == d.qc_plage_tdc_ns && haskey(imposes, "macro_time_clk")
+    @test p["cfd_limit_low"] == d.qc_seuil_mV[1] && p["cfd_limit_high"] == d.qc_seuil_mV[2] && p["sync_threshold"] == d.qc_seuil_mV[4]
+    @test FLIMCore.parametres_imagerie(FLIMCore.Reglages(source = "cartes"), FLIMCore.Geometrie())[1]["tac_range"] == d.spc["tac_range"]
     p, _ = FLIMCore.parametres_single(d, 2.5)
     @test p["mode"] == 0 && p["collect_time"] == 2.5 && p["stop_on_ovfl"] == 1
 end
@@ -390,9 +397,9 @@ end
     @test FLIMCore.code_ecrit(3, true) == 0x0c && FLIMCore.code_ecrit(3, false) == 0x03
     @test FLIMCore.code_ecrit(FLIMCore.CODE_HORS_ROI, true) == 0x0f       # la carte lit 0 : code réservé
     @test FLIMCore.CODE_SANS_ROI == 1 != FLIMCore.CODE_HORS_ROI
-    p, _ = FLIMCore.parametres_clamp(FLIMCore.Reglages())
-    @test p["mode"] == 1 && p["routing_mode"] == 0x1100                  # M0 seul, front montant (fin_par_m3 = false)
-    @test FLIMCore.parametres_clamp(FLIMCore.Reglages(fin_par_m3 = true))[1]["routing_mode"] == 0x1900   # M0 et M3, M3 descendant
+    p, _ = FLIMCore.parametres_clamp(FLIMCore.Reglages(fin_par_m3 = false))
+    @test p["mode"] == 1 && p["routing_mode"] == 0x1100                  # M0 seul, front montant
+    @test FLIMCore.parametres_clamp(FLIMCore.Reglages())[1]["routing_mode"] == 0x1900   # défaut : M0 et M3, M3 descendant
     @test FLIMCore.parametres_clamp(FLIMCore.Reglages(); tous_marqueurs = true)[1]["routing_mode"] == 0x7F00   # test : M0–M3
 
     # Photons pile sur M0 : dans la passe ; pile sur M3 : dehors ; entre deux passes : hors passe.
@@ -696,6 +703,249 @@ end
         @test process_exited(p)
         @test readlines(trace) == ["ouvrir", "fermer"]
     end
+end
+
+
+# ---------------------------------------------------------------------
+# SPC-QC-104
+# ---------------------------------------------------------------------
+
+"""Les enregistrements d'une acquisition de qc4 (mots bruts) et leur décodage par la DLL de B&H."""
+function oracle_qc(nom)
+    lignes = readlines(joinpath(@__DIR__, "data", "qc104", "bloc_$(nom).csv"))[2:end]
+    mots, entrees = UInt16[], NamedTuple[]
+    for l in lignes
+        c = split(l, ",")
+        w = parse(UInt32, c[2]; base = 16)
+        push!(mots, UInt16(w & 0xffff), UInt16(w >> 16))
+        c[3] == "1" && push!(entrees, (mtime = parse(Int64, c[4]), micro = parse(Int, c[5]), rout = parse(Int, c[6]),
+                                       drapeaux = parse(UInt16, c[7]; base = 16)))
+    end
+    return mots, entrees
+end
+
+"""
+Flux brut de la QC-104 à partir de flux FIFO_150 (un par entrée, tic de
+25 ns, fenêtre de 12,5 ns) : leurs photons sur IN1, IN2…, les marqueurs du
+premier, le temps en tics de 2,048 ns, le microtemps en canaux du TDC
+(`plage_ns` / 4096).
+"""
+function vers_qc(flux; plage_ns = 16.384, fenetre_ns = 12.5)
+    ev = Tuple{Int64,Int,Int,Int,Int}[]               # (t, 0 marqueur / 1 photon, entrée, canal ou bits, routage)
+    t_qc(t) = round(Int64, t * TIC_TEST / 2.048e-9)
+    for (i, mots) in enumerate(flux)
+        d = FLIMCore.SPCLite.decoder!(FLIMCore.SPCLite.Decodeur(garder_photons = true), mots)
+        if i == 1
+            for (b, bits) in ((1, 0b0001), (4, 0b1000)), t in d.marqueurs[b]
+                push!(ev, (t_qc(t), 0, 0, bits, 0))
+            end
+        end
+        for (t, adc, r) in zip(d.t_photons, d.adc_photons, d.routage_photons)
+            push!(ev, (t_qc(t), 1, i, floor(Int, (4095 - adc) * fenetre_ns / plage_ns), r))
+        end
+    end
+    sort!(ev; by = e -> (e[1], e[2]))
+    e = FLIMCore.EncodeurQC()
+    for (t, genre, i, c, r) in ev
+        genre == 0 ? FLIMCore.marqueur_qc!(e, t, c) : FLIMCore.photon_qc!(e, t, c; entree = i, routage = r)
+    end
+    FLIMCore.avancer_qc!(e, ev[end][1] + 10_000)
+    return e.mots
+end
+
+reglages_qc(; kw...) = FLIMCore.Reglages(; dossier = mktempdir(), seuil_cfd = 10.0, kw...)
+
+@testset "SPC-QC-104 : format FIFO, d'après la DLL" begin
+    # Chaque enregistrement de qc4 décodé comme la DLL (l'arbitre) : temps, microtemps, routage, entrée, marqueurs.
+    for nom in ("controle", "marqueurs")
+        mots, oracle = oracle_qc(nom)
+        d = FLIMCore.SPCLite.decoder!(FLIMCore.SPCLite.DecodeurFIFO(FLIMCore.SPCLite.FORMAT_QC104; garder_photons = true), mots)
+        photons = [o for o in oracle if o.drapeaux & 0xf000 == 0]
+        @test d.photons == length(photons) && d.inattendus == 0
+        # rout_chan de la DLL = entrée × 16 + routage ; son macrotemps compte un débordement de plus.
+        @test [(t + 4096, Int(m), (Int(v) - 1) * 16 + Int(r)) for (t, m, r, v) in
+               zip(d.t_photons, d.micro_photons, d.routage_photons, d.voie_photons)] == [(o.mtime, o.micro, o.rout) for o in photons]
+        for (k, drapeau) in ((1, 0x1000), (4, 0x8000))
+            @test d.marqueurs[k] .+ 4096 == [o.mtime for o in oracle if o.drapeaux & drapeau != 0]
+        end
+    end
+    mots, _ = oracle_qc("controle")
+    d = FLIMCore.SPCLite.decoder!(FLIMCore.SPCLite.DecodeurFIFO(FLIMCore.SPCLite.FORMAT_QC104), mots)
+    @test d.par_voie == [3, 1, 0, 0] && length.(d.marqueurs) == [13, 0, 0, 12]
+end
+
+@testset "SPC-QC-104 : réglages" begin
+    r = FLIMCore.Reglages()
+    @test r.source == "qc104" && FLIMCore.est_qc104(r) && FLIMCore.source_materielle(r) && r.fin_par_m3
+    @test FLIMCore.voie_qc("3T0089/IN2") == (serie = "3T0089", entree = 2) && FLIMCore.voie_qc("3N0317") === nothing
+    @test FLIMCore.serie_carte("3T0089/IN1") == "3T0089" && FLIMCore.serie_carte("3N0317") == "3N0317"
+    @test FLIMCore.nom_fichier_serie("3T0089/IN1") == "3T0089_IN1"
+    # [qc] traduit : IN1, IN2 (les canaux) et le SYNC actifs, routage sur IN1 et IN2 ; les clés de la SPC-150 ont un autre sens.
+    p = FLIMCore.parametres_base(FLIMCore.Reglages(qc_seuil_mV = [-60.0, -55.0, -50.0, -70.0], qc_decalage_ns = [1.024, 0.0, 0.0, 0.512]))
+    @test p["tdc_control"] == FLIMCore.SPCLite.controle_tdc((true, true, false, true), (true, true, false), false)
+    @test p["cfd_limit_low"] == -60.0 && p["cfd_limit_high"] == -55.0 && p["sync_threshold"] == -70.0
+    @test p["tdc_offset1"] == 1.024 && p["tdc_offset4"] == 0.512 && p["tac_range"] == 16.384 && p["tac_limit_low"] == 5.0
+    @test !haskey(p, "tac_gain")                                     # pas de clé de la SPC-150N
+    @test FLIMCore.parametres_base(FLIMCore.Reglages(series = ["3T0089/IN3"]))["tdc_control"] ==
+          FLIMCore.SPCLite.controle_tdc((false, false, true, true), (false, false, true), false)
+    @test FLIMCore.temps_taux_s(r) == r.qc_temps_taux_s
+    # Ce que la carte ne prendrait pas est refusé, lisiblement.
+    lire(d) = FLIMCore.reglages_depuis_dict(d)
+    @test_throws ErrorException lire(Dict("verification" => Dict("series" => ["3N0317", "3N0318"])))      # pas des entrées
+    @test_throws ErrorException lire(Dict("verification" => Dict("series" => ["3T0089/IN1", "3T0089/IN1"])))
+    @test_throws ErrorException lire(Dict("verification" => Dict("series" => ["3T0089/IN1", "3T0090/IN2"])))
+    @test_throws ErrorException lire(Dict("qc" => Dict("seuil_mV" => [-50.0, -50.0, -50.0])))
+    @test_throws ErrorException lire(Dict("qc" => Dict("seuil_mV" => [-50.0, -600.0, -50.0, -50.0])))
+    @test_throws ErrorException lire(Dict("qc" => Dict("fenetre_ns" => 20.0)))                             # plus longue que la plage
+    @test_throws ErrorException lire(Dict("qc" => Dict("taux" => [1, 1, 2, 3])))
+    @test lire(Dict("source" => Dict("type" => "cartes"), "verification" => Dict("series" => ["3N0317", "3N0318"]))).source == "cartes"
+    # Écrit puis relu à l'identique, [qc] compris.
+    r2 = FLIMCore.Reglages(qc_seuil_mV = [-61.5, -52.0, -50.0, -70.9], qc_taux = [1, 2, 3, 4], qc_fenetre_ns = 12.48)
+    chemin = joinpath(mktempdir(), "spc.toml")
+    FLIMCore.ecrire_reglages(chemin, r2)
+    relu = FLIMCore.lire_reglages(chemin)
+    @test all(f -> f == :fichier || getfield(relu, f) == getfield(r2, f), fieldnames(FLIMCore.Reglages))
+end
+
+@testset "SPC-QC-104 : traduction en cartes virtuelles" begin
+    # Les enregistrements de qc4, fenêtre = plage (pas de rééchantillonnage) : chaque carte virtuelle
+    # a les photons de son entrée, ADC = 4095 − canal du TDC, et tous les marqueurs, aux mêmes temps.
+    mots, oracle = oracle_qc("controle")
+    r = reglages_qc(qc_fenetre_ns = 16.384)
+    s = FLIMCore.SourceQC(FLIMCore.QCRejeu(mots))
+    o = FLIMCore.ouvrir!(s, r)
+    @test o.detectes == o.prets == [0, 1] && FLIMCore.identifier(s, 1) == (type = 104, serie = "3T0089/IN2")
+    FLIMCore.configurer!(s, 0, FLIMCore.parametres_clamp(r)[1], joinpath(r.dossier, "p.ini"))
+    foreach(k -> FLIMCore.lancer!(s, k), (0, 1))
+    tampon = zeros(UInt16, 1 << 16)
+    flux = [tampon[1:FLIMCore.lire_mots!(s, k, tampon)] for k in (0, 1)]
+    @test FLIMCore.epuisee(s, 0) && FLIMCore.epuisee(s, 1)
+    foreach(k -> FLIMCore.stopper!(s, k), (0, 1))
+    photons = [o for o in oracle if o.drapeaux & 0xf000 == 0]
+    for (k, f) in enumerate(flux)
+        d = FLIMCore.SPCLite.decoder!(FLIMCore.SPCLite.Decodeur(garder_photons = true), f)
+        mien = [o for o in photons if o.rout >> 4 == k - 1]
+        @test d.photons == length(mien) && d.inattendus == 0
+        @test [(t + 4096, 4095 - Int(a), Int(rt)) for (t, a, rt) in zip(d.t_photons, d.adc_photons, d.routage_photons)] ==
+              [(o.mtime, o.micro, o.rout & 0xf) for o in mien]
+        @test d.marqueurs[1] .+ 4096 == [o.mtime for o in oracle if o.drapeaux & 0x1000 != 0]
+        @test d.marqueurs[4] .+ 4096 == [o.mtime for o in oracle if o.drapeaux & 0x8000 != 0]
+        @test d.base == 4096 * 1471                             # le temps avance avec les débordements, sans photon
+    end
+    @test s.inattendus == s.desordre == s.hors_fenetre == s.autres_entrees == 0
+    FLIMCore.fermer!(s)
+
+    # Rééchantillonnage sur la période du laser : pas de peigne. Des photons uniformes dans les
+    # 3052 canaux du TDC (12,5 ns sur 16,384) remplissent les 256 canaux de l'analyse à plat.
+    e = FLIMCore.EncodeurQC()
+    alea = FLIMCore.Alea(7)
+    for t in 1:400_000
+        FLIMCore.photon_qc!(e, 3t, floor(Int, FLIMCore._uniforme!(alea) * 3125 * 0.9999); entree = 2)
+    end
+    FLIMCore.photon_qc!(e, 3 * 400_001, 3500; entree = 2)          # au-delà de 12,5 ns
+    FLIMCore.photon_qc!(e, 3 * 400_002, 100; entree = 3)           # entrée sans canal
+    s = FLIMCore.SourceQC(FLIMCore.QCRejeu(e.mots))
+    r = reglages_qc()
+    FLIMCore.ouvrir!(s, r)
+    FLIMCore.configurer!(s, 1, FLIMCore.parametres_clamp(r)[1], joinpath(r.dossier, "p.ini"))
+    FLIMCore.lancer!(s, 1)
+    tampon = zeros(UInt16, 1 << 22)
+    d = FLIMCore.SPCLite.decoder!(FLIMCore.SPCLite.Decodeur(), tampon, FLIMCore.lire_mots!(s, 1, tampon))
+    h = [sum(reverse(d.adc)[16(k - 1) + 1:16k]) for k in 1:256]
+    @test d.photons == 400_000 && s.hors_fenetre == 1 && s.autres_entrees == 1
+    @test maximum(abs.(h .- 1562.5)) < 5 * sqrt(1562.5)            # Poisson seul, pas de ±4 %
+    # Ce qui a été écarté est dit à la fin de la mesure (SPC-10), une fois.
+    bilan = FLIMCore.bilan_source!(s)
+    @test occursin("1 photon(s) au-delà de [qc] fenetre_ns", bilan) && occursin("1 photon(s) d'une entrée sans canal", bilan)
+    @test FLIMCore.bilan_source!(s) == ""
+end
+
+"""Un Realtime à travers la QC-104 imaginaire : (histogrammes, EtatClamp final, alertes, fichiers)."""
+function realtime_qc(mots, r, c)
+    m = FLIMCore.demarrer_moteur(r; source = FLIMCore.SourceQC(FLIMCore.QCRejeu(mots; taux = [8e7, 0, 0, 0, 0, 0, 0, 0])))
+    @test attendre_etat(m, :pret)
+    FLIMCore.commander!(m, c)
+    alertes, final = String[], Ref{Any}(nothing)
+    fin = jusqu_a_fin(m, :clamp; garder = x -> (x isa FLIMCore.Alerte && push!(alertes, x.texte);
+                                                 x isa FLIMCore.EtatClamp && x.fin && (final[] = x)))
+    histos = FLIMCore.HistoClamp[]
+    while isready(m.histogrammes)
+        push!(histos, take!(m.histogrammes))
+    end
+    FLIMCore.arreter_moteur(m)
+    return histos, final[], alertes, fin
+end
+
+@testset "SPC-QC-104 : Realtime, session enregistrée et rejouée, Single, vérification" begin
+    flux = [FLIMCore.flux_passes_synthetique(codes = [1, 2], passes = 6, scan_s = 0.02, pause_s = 0.005, graine = g,
+                                             photons_par_s = 3e5, tau_ns = (code, t) -> 1.5 + g) for g in (1, 2)]
+    mots = vers_qc(flux)
+    dossier = mktempdir()
+    r = reglages_qc()
+    histos, final, alertes, fin = realtime_qc(mots, r, FLIMCore.Clamp(rois = [1, 2], scan_s = 0.02, pause_s = 0.005,
+                                                                        echantillon_s = 1e-4, dossier = dossier))
+    @test !fin.erreur && length(histos) == 6 && all(h -> isempty(h.motifs), histos)
+    @test all(h -> h.series == ["3T0089/IN1", "3T0089/IN2"] && h.dt_ns ≈ 12.5 / 256, histos)
+    @test [argmax(vec(sum(h.histogrammes[1]; dims = 1))) - 1 for h in histos] == [1, 2, 1, 2, 1, 2]
+    @test all(h -> isapprox(h.t_fin_s - h.t_debut_s, 0.02; atol = 1e-6), histos)   # M3 − M0 : le scan
+    @test final.fin_par_m3 && [c.serie for c in final.cartes] == ["3T0089/IN1", "3T0089/IN2"]
+    @test all(c -> c.marqueurs[1] == c.marqueurs[4] == 6 && c.passes == 6, final.cartes)
+    # Chaque entrée garde son déclin (τ = 2,5 ns sur IN1, 3,5 ns sur IN2) : même temps moyen qu'avant le
+    # passage par les canaux de 4 ps du TDC et le rééchantillonnage.
+    moyen(v) = sum(((0:length(v) - 1) .+ 0.5) .* (12.5 / length(v)) .* v) / sum(v)
+    for k in 1:2
+        avant = reverse(FLIMCore.SPCLite.decoder!(FLIMCore.SPCLite.Decodeur(), flux[k]).adc)
+        @test isapprox(moyen(vec(sum(sum(h.histogrammes[k] for h in histos); dims = 2))), moyen(avant); atol = 0.02)
+    end
+    # La session : un flux FIFO_150 par entrée (noms sans « / »), que Playback rejoue à l'identique.
+    @test sort(filter(f -> endswith(f, ".spc"), readdir(dossier))) == ["3T0089_IN1.spc", "3T0089_IN2.spc"]
+    @test FLIMCore.lire_ini_textes(joinpath(dossier, "3T0089_IN1_acquisition.ini"); section = "clamp")["serie"] == "3T0089/IN1"
+    mkpath(joinpath(dossier, "session", "spc"))
+    for f in readdir(dossier)
+        isfile(joinpath(dossier, f)) && cp(joinpath(dossier, f), joinpath(dossier, "session", "spc", f))
+    end
+    m = FLIMCore.demarrer_moteur(reglages_test(); source = FLIMCore.source_session(joinpath(dossier, "session"); vitesse = 0))
+    @test attendre_etat(m, :pret)
+    FLIMCore.commander!(m, FLIMCore.Clamp(rois = [1, 2], scan_s = 0.02, pause_s = 0.005, fin_par_m3 = true))
+    jusqu_a_fin(m, :clamp)
+    rejoues = FLIMCore.HistoClamp[]
+    while isready(m.histogrammes)
+        push!(rejoues, take!(m.histogrammes))
+    end
+    FLIMCore.arreter_moteur(m)
+    @test [h.histogrammes for h in rejoues] == [h.histogrammes for h in histos] && rejoues[1].series == ["3T0089/IN1", "3T0089/IN2"]
+
+    # M0 seul (fin_par_m3 = false) : mêmes passes.
+    h0, _, _, _ = realtime_qc(mots, reglages_qc(fin_par_m3 = false),
+                              FLIMCore.Clamp(rois = [1, 2], scan_s = 0.02, pause_s = 0.005, echantillon_s = 1e-4))
+    @test length(h0) == 6 && sum(sum(h.histogrammes[1]) for h in h0) == sum(sum(h.histogrammes[1]) for h in histos)
+
+    # Vérification : taux comptés dans le flux ; les compteurs de la carte, mal attribués par [qc] taux, signalés.
+    m = FLIMCore.demarrer_moteur(reglages_qc(); source = FLIMCore.SourceQC(FLIMCore.QCRejeu(mots; taux = [8e7, 1e3, 5e6, 0, 0, 0, 0, 0])))
+    @test attendre_etat(m, :pret)
+    etat = FLIMCore.verifier(m)
+    @test etat.ok && [(c.carte, c.canal, c.serie, c.type) for c in etat.cartes] == [(0, 1, "3T0089/IN1", 104), (1, 2, "3T0089/IN2", 104)]
+    @test all(c -> c.cfd > 1e4, etat.cartes)                                       # comptés dans le flux
+
+    # Single émulé : un histogramme par entrée, 256 canaux sur la fenêtre, CSV avec le n° de série du canal.
+    FLIMCore.commander!(m, FLIMCore.Single(0.05, 2))
+    hs = FLIMCore.HistoSingle[]
+    fin = jusqu_a_fin(m, :single; garder = x -> x isa FLIMCore.HistoSingle && push!(hs, x))
+    FLIMCore.arreter_moteur(m)
+    @test !fin.erreur && length(hs) == 4 && all(h -> length(h.histogramme) == 256 && h.dt_ns ≈ 12.5 / 256, hs)
+    @test all(h -> FLIMCore.texte_fin_single(h.etat) == "temps écoulé", hs)
+    @test sum(Int, hs[1].histogramme) > 1000 && sum(Int, hs[2].histogramme) > 1000
+    csv = only(filter(f -> endswith(f, "_module0.csv"), fin.fichiers))
+    @test any(l -> l == "# serie = 3T0089/IN1", readlines(csv))
+    @test any(l -> occursin("SPC-QC-104, entrée 1", l), readlines(csv))
+end
+
+@testset "SPC-QC-104 : messages d'ouverture" begin
+    # Une autre QC-104 que celle de [verification] series : signalé, avec les deux n° de série.
+    s = FLIMCore.SourceQC(FLIMCore.QCRejeu(UInt16[0x0000, 0x8000]; serie = "3T0099"))
+    FLIMCore.ouvrir!(s, reglages_qc())
+    @test occursin("3T0099", FLIMCore.message_ouverture(s)) && occursin("3T0089", FLIMCore.message_ouverture(s))
+    @test FLIMCore.identifier(s, 0).serie == "3T0099/IN1"
 end
 
 end # @testset FLIMCore

@@ -8,9 +8,11 @@
 #     julia --project -t 4 scripts/test_passes.jl --sans-ni         # signal venu d'ailleurs
 #
 # Ce qu'il fait, comme un START du Realtime :
-#   1. les cartes SPC en Realtime (FIFO), mais avec les QUATRE marqueurs
+#   1. la carte SPC en Realtime (FIFO), mais avec les QUATRE marqueurs
 #      enregistrés (M0–M3) : on voit sur quelle entrée le signal arrive ; la
-#      fin des passes comme dans l'app ([clamp] fin_par_m3 : M0 seul par défaut) ;
+#      fin des passes comme dans l'app ([clamp] fin_par_m3). Avec la QC-104,
+#      une ligne par canal (une entrée de la carte : 3T0089/IN1, 3T0089/IN2) ;
+#      les marqueurs et le routage sont communs aux deux ;
 #   2. la NI écrit un code de routage fixe sur P0.4–P0.7 (`--code`, 1 à 15,
 #      inversé selon inverser_routage) — sans allumer les lasers, sauf avec
 #      `--laser` (P0.0 et P0.1 hauts) ;
@@ -25,6 +27,10 @@
 # en faut quelques-uns pendant les passes (le bruit des détecteurs suffit).
 # SPC_REGLAGES=<fichier> : d'autres réglages SPC (une copie en simulation
 # avec --sans-ni pour l'essayer sans le banc).
+#
+# Câblage de la QC-104 (Micro Sub-D 15) : PFI13 → broche 12 (M0) et broche 10
+# (M3) ; P0.4, P0.5, P0.6, P0.7 → broches 2, 3, 4, 7 (/R0 à /R3) ; D GND →
+# broche 5 ou 15 ; rien sur 1, 6, 11.
 
 using FLIMApp
 using Printf
@@ -85,7 +91,8 @@ function conclusion(c, attendues)
             push!(lignes, "aucun marqueur : rien n'arrive sur M0–M3 de cette carte.")
         else
             push!(lignes, "aucun marqueur sur M0–M3 alors que la NI génère le signal : il n'arrive pas à cette carte " *
-                          "(fil de $(F.pass_terminal_text(borne)), BOB-104, masse D GND broche 15). " *
+                          "(fil de $(F.pass_terminal_text(borne)), BOB-104, masse D GND" *
+                          (spc.source == "qc104" ? " → broche 5 ou 15 ; M0 = broche 12, M3 = broche 10 de la QC-104). " : " broche 15). ") *
                           "Essaie une autre sortie avec --borne /X6321/PFIx, ou mesure la borne à l'oscilloscope.")
         end
     elseif !spc.fin_par_m3
@@ -125,7 +132,8 @@ function conclusion(c, attendues)
         part = c.photons_par_code[lu + 1] / en_passe
         push!(lignes, lu == code ? @sprintf("routage : la carte lit le code %d écrit (%.0f %% des photons des passes).", code, 100part) :
                       lu == 15 - code ? "routage : la carte lit $lu, l'inverse du $code écrit : inverse inverser_routage dans config/spc.toml." :
-                      lu == 0 ? "routage : la carte lit 0 (rien sur R0–R3) : P0.4–P0.7 n'arrivent pas aux entrées de routage." :
+                      lu == 0 ? "routage : la carte lit 0 (rien sur R0–R3) : P0.4–P0.7 n'arrivent pas aux entrées de routage" *
+                                (spc.source == "qc104" ? " (broches 2, 3, 4, 7 de la QC-104)." : ".") :
                       "routage : la carte lit $lu au lieu de $code ($(string(lu; base = 2, pad = 4)) au lieu de $(string(code; base = 2, pad = 4))) : " *
                       "lignes échangées ou bloquées (R0 = P0.4 … R3 = P0.7).")
     end

@@ -1,7 +1,7 @@
 # sources.jl — les sources de photons, derrière une même interface : les
 # SPC-150N (SPCLite), le rejeu de fichiers .spc à vitesse réelle, une
-# simulation. Le moteur ne voit pas la différence ; la SPC-QC-104 viendra
-# ici, plus tard, comme une source de plus.
+# simulation ; la SPC-QC-104 dans source_qc.jl (une carte virtuelle par
+# entrée). Le moteur ne voit pas la différence.
 #
 # Seul le moteur appelle ces fonctions, et seulement sur des modules prêts
 # (renvoyés par `ouvrir!`) : sur un module absent ou non initialisé, la DLL
@@ -21,6 +21,9 @@
 #   effacer_page!(s, m) ; lire_histo(s, m, n; bloc)
 #   preparer_passes!(s, modules, codes, scan_s, pause_s)   simulation : les passes à fabriquer
 #   verrouilles(s), forcer!(s, modules)
+#   mesurer_taux!(s, modules, duree_s) -> Dict ou nothing   (QC-104 : photons comptés dans le flux)
+#   message_ouverture(s)     ce que `ouvrir!` a vu d'anormal ("" : rien)
+#   bilan_source!(s)         ce qu'elle a écarté pendant la mesure ("" : rien)
 
 abstract type Source end
 
@@ -28,6 +31,14 @@ abstract type Source end
 nom_source(::Source) = "source"
 est_materiel(::Source) = false
 epuisee(::Source, m) = false
+message_ouverture(::Source) = ""
+
+"""
+Ce que la source a dû écarter depuis le bilan précédent ("" : rien), publié
+à la fin de chaque mesure (QC-104 : photons hors de la fenêtre, d'une
+entrée sans canal, enregistrements inconnus).
+"""
+bilan_source!(::Source) = ""
 
 # ---------------------------------------------------------------------
 # Les SPC-150N
@@ -455,9 +466,10 @@ end
 """
     source_depuis(r::Reglages) -> Source
 
-La source que [source] type demande : "cartes", "rejeu" ou "simulation".
+La source que [source] type demande : "qc104", "cartes", "rejeu" ou "simulation".
 """
 function source_depuis(r::Reglages)
+    r.source == "qc104" && return SourceQC(QCDll())
     r.source == "cartes" && return SourceCartes()
     r.source == "rejeu" && return source_rejeu(r.rejeu; vitesse = r.vitesse)
     return source_simulation(sort!(unique(vcat(r.modules_imagerie, r.modules_single))); vitesse = r.vitesse, series = r.series)

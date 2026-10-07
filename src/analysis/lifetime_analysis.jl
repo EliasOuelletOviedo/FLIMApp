@@ -46,8 +46,35 @@ const IRF_CARD_SETTINGS = (
     ("sync_freq_div", mi -> Float64(mi.syn_fd)),
 )
 
+"""
+The SPC-QC-104 settings an IRF depends on, as the DLL names them
+(`FLIMCore.parametres_base`: cfd_limit_high is IN2's threshold…): the
+thresholds and zero levels of the inputs and of the SYNC, the TDC offsets
+(they shift the decay), the TDC range — and `fenetre_ns`, the window the
+TDC channels are resampled onto ([qc] fenetre_ns): the time axis.
+"""
+const IRF_QC_SETTINGS = ("cfd_limit_low", "cfd_limit_high", "cfd_zc_level", "sync_threshold",
+                         "tac_limit_high", "sync_holdoff", "cfd_holdoff", "sync_zc_level",
+                         "tdc_offset1", "tdc_offset2", "tdc_offset3", "tdc_offset4",
+                         "tac_range", "sync_freq_div", "fenetre_ns")
+
 """Integer settings, compared exactly; the others within 2 % or 0.5 (the DLL rounds them to its steps)."""
 const IRF_EXACT_SETTINGS = ("tac_gain", "sync_freq_div")
+
+"""
+The settings an IRF is compared on, as the current configuration requests
+them: the QC-104's ([qc], as `parametres_base` sends them, plus
+`fenetre_ns`), or [spc_module] for the SPC-150N.
+"""
+function irf_requested_settings(spc::FLIMCore.Reglages)::Dict{String, Float64}
+    if FLIMCore.est_qc104(spc)
+        base = FLIMCore.parametres_base(spc)
+        out = Dict{String, Float64}(k => Float64(base[k]) for k in IRF_QC_SETTINGS if haskey(base, k) && base[k] isa Real)
+        out["fenetre_ns"] = spc.qc_fenetre_ns
+        return out
+    end
+    return Dict{String, Float64}(k => Float64(v) for (k, v) in spc.spc if v isa Real)
+end
 
 same_card_setting(key, a::Real, b::Real) =
     key in IRF_EXACT_SETTINGS ? round(Int, a) == round(Int, b) : abs(a - b) <= max(0.5, 0.02 * abs(b))
@@ -115,11 +142,12 @@ end
     irf_mismatches(info, spc; applied=Dict{Int, Dict{String, Float64}}())::Vector{String}
 
 What differs between the settings an IRF was taken with (`info`, recorded by
-`import_irf_sdt`) and the ones the cards measure with: per channel, the
-card (serial number against [verification] series) and its TAC, CFD and
-SYNC settings (`IRF_CARD_SETTINGS`) — as read back from that channel's
-card when `applied[channel]` has them (the last check of the cards), as
-`spc` requests them ([spc_module]) otherwise —, and the detector gains
+`import_irf`) and the ones the cards measure with: per channel, the card
+(serial number against [verification] series: "3T0089/IN1" for an input of
+the QC-104) and its timing settings (`IRF_CARD_SETTINGS` for the SPC-150N,
+`IRF_QC_SETTINGS` for the QC-104) — as read back from that channel's card
+when `applied[channel]` has them (the last check of the cards), as `spc`
+requests them otherwise (`irf_requested_settings`) —, and the detector gains
 declared in [dcc]: the transit time changes with the high voltage, which
 the GUI can't read, so the declared values are compared. Empty: the IRF is
 valid. An IRF without its record is refused.
@@ -129,7 +157,7 @@ function irf_mismatches(info::AbstractDict, spc::FLIMCore.Reglages;
     isempty(info) && return ["the IRF has no record of the settings it was taken with: import its .sdt again"]
     fmt(x) = x isa Real ? string(round(Float64(x); sigdigits = 5)) : string(x)
     out = String[]
-    requested = Dict{String, Float64}(k => Float64(v) for (k, v) in spc.spc if v isa Real)
+    requested = irf_requested_settings(spc)
     for (c, channel) in enumerate(get(info, "channels", Any[]))
         serial = String(get(channel, "serial", ""))
         expected = c <= length(spc.series) ? spc.series[c] : ""
@@ -194,9 +222,10 @@ read_irf_info(path::AbstractString)::Dict{String, Any} = isfile(path) ? TOML.par
     load_irfs(spc; ask=true) -> (irfs, info)
 
 The IRF of each channel and the record of its settings: `irf_csv_path()`
-(and its .toml) when it exists, otherwise imported from the Single .sdt
-whose path is cached (`irf_filepath_cache()`) — or, with `ask`, picked in
-a dialog — through `import_irf_sdt`.
+(and its .toml) when it exists, otherwise imported from the Single (.sdt of
+SPCM, or .csv of the SPC window) whose path is cached
+(`irf_filepath_cache()`) — or, with `ask`, picked in a dialog — through
+`import_irf`.
 """
 function load_irfs(spc::FLIMCore.Reglages; ask::Bool = true)
     csv = irf_csv_path()
@@ -204,11 +233,94 @@ function load_irfs(spc::FLIMCore.Reglages; ask::Bool = true)
     cache_path = irf_filepath_cache()
     filepath = isfile(cache_path) ? strip(read(cache_path, String)) : ""
     if !isfile(filepath)
-        ask || error("no IRF yet: pick the .sdt of a Single measurement of the IRF")
-        filepath = pick_file(filterlist = "sdt")
+        ask || error("no IRF yet: pick the Single measurement of the IRF (.csv of the SPC window, or .sdt of SPCM)")
+        filepath = pick_file(filterlist = "csv,sdt")
         isempty(filepath) && error("no IRF file picked")
     end
-    return import_irf_sdt(filepath, spc)
+    return import_irf(filepath, spc)
+end
+
+"""
+    import_irf(filepath, spc; applied=Dict()) -> (irfs, info)
+
+Import an IRF from a Single measurement: the SPC window's (one CSV per
+channel, `import_irf_single`) or SPCM's .sdt (`import_irf_sdt`: for the
+QC-104, `read_sdt_irf_qc`), by the file's extension.
+"""
+import_irf(filepath::AbstractString, spc::FLIMCore.Reglages; applied::AbstractDict = Dict{Int, Dict{String, Float64}}()) =
+    endswith(lowercase(filepath), ".csv") ? import_irf_single(filepath, spc; applied) : import_irf_sdt(filepath, spc; applied)
+
+"""
+    read_single_irf(filepath; series) -> (irfs, channels)
+
+IRF from a Single of the SPC window: `<date>_module<k>.csv`, one per card
+(QC-104: per input), with `<date>_module<k>_parametres.ini` (the settings
+read back from the card) next to it. `filepath` is any of them: all the
+CSVs of that Single are read, ordered as `series` lists their serials
+("serie = …" in each CSV's header). Like `read_sdt_irf`: the median
+subtracted, negative counts clipped, summed down to
+`DEFAULT_HISTOGRAM_RESOLUTION` channels if finer; `channels` records each
+one's serial and the settings it was taken with (the keys of
+`IRF_CARD_SETTINGS` and `IRF_QC_SETTINGS`, plus `fenetre_ns`, the
+window).
+"""
+function read_single_irf(filepath::AbstractString; series::AbstractVector{<:AbstractString} = String[])
+    m = match(r"^(.*)_module\d+\.csv$", basename(filepath))
+    m === nothing && error("not a Single of the SPC window (<date>_module<k>.csv): $filepath")
+    dir = dirname(filepath)
+    files = sort([joinpath(dir, f) for f in readdir(dir) if occursin(Regex("^" * m[1] * "_module\\d+\\.csv\$"), f)])
+    keys_of_irf = union(first.(IRF_CARD_SETTINGS), IRF_QC_SETTINGS)
+    found = Dict{String, Tuple{Matrix{Float64}, Dict{String, Any}}}()
+    order = String[]
+    for f in files
+        serial, rows = "", Vector{Float64}[]
+        for line in eachline(f)
+            if startswith(line, "#")
+                h = match(r"^#\s*serie = (.*)$", line)
+                h === nothing || (serial = String(strip(h[1])))
+            elseif !startswith(line, "canal")
+                isempty(strip(line)) || push!(rows, parse.(Float64, split(line, ",")))
+            end
+        end
+        length(rows) >= 2 || error("Single CSV without data: $f")
+        bin_ns = rows[2][2] - rows[1][2]
+        counts = [r[end] for r in rows]                        # the "somme" column: every histogram of the series
+        counts .-= round(median(counts))
+        counts[counts .<= 0] .= 0
+        n, width, resolution = length(counts), bin_ns, DEFAULT_HISTOGRAM_RESOLUTION
+        if n > resolution && n % resolution == 0
+            group = n ÷ resolution
+            counts = [sum(@view counts[(k - 1) * group + 1:k * group]) for k in 1:resolution]
+            width *= group
+            n = resolution
+        end
+        sum(counts) > 0 || error("Single CSV: an empty IRF curve ($f)")
+        ini = replace(f, r"\.csv$" => "_parametres.ini")
+        read_back = isfile(ini) ? FLIMCore.SPCLite.lire_ini(ini) : Dict{String, Float64}()
+        settings = Dict{String, Any}(k => v for (k, v) in read_back if k in keys_of_irf)
+        settings["fenetre_ns"] = width * n
+        key = isempty(serial) ? basename(f) : serial
+        found[key] = (hcat(collect(0:n-1) .* width, counts), Dict{String, Any}("serial" => serial, "settings" => settings))
+        push!(order, key)
+    end
+    if !isempty(series) && all(in(order), series)
+        order = String.(series)
+    end
+    order = order[1:min(2, length(order))]
+    return [found[k][1] for k in order], [found[k][2] for k in order]
+end
+
+"""
+    import_irf_single(filepath, spc; applied=Dict()) -> (irfs, info)
+
+`import_irf_sdt` for a Single of the SPC window (`read_single_irf`): the
+way to take the IRF with the QC-104, whose TDC channels the app resamples
+onto [qc] fenetre_ns exactly as for the Realtime decays.
+"""
+function import_irf_single(filepath::AbstractString, spc::FLIMCore.Reglages;
+                           applied::AbstractDict = Dict{Int, Dict{String, Float64}}())
+    irfs, channels = read_single_irf(filepath; series = spc.series)
+    return save_imported_irf(irfs, channels, filepath, spc; applied)
 end
 
 """
@@ -221,7 +333,108 @@ Kept as `irf_csv_path()`, with the record of its settings next to it.
 """
 function import_irf_sdt(filepath::AbstractString, spc::FLIMCore.Reglages;
                         applied::AbstractDict = Dict{Int, Dict{String, Float64}}())
-    irfs, channels = read_sdt_irf(filepath; series = spc.series)
+    irfs, channels = FLIMCore.est_qc104(spc) ? read_sdt_irf_qc(filepath, spc) : read_sdt_irf(filepath; series = spc.series)
+    return save_imported_irf(irfs, channels, filepath, spc; applied)
+end
+
+"""
+    rebin_counts(counts, from_ns, to_ns, n) -> Vector{Float64}
+
+Counts in bins of `from_ns` (from 0) spread onto `n` bins of `to_ns` (from
+0) in proportion to their overlap; what falls beyond `n × to_ns` is
+dropped. Keeps the total within the new range.
+"""
+function rebin_counts(counts::AbstractVector{<:Real}, from_ns::Real, to_ns::Real, n::Integer)
+    out = zeros(Float64, n)
+    for (i, c) in enumerate(counts)
+        c == 0 && continue
+        a, b = (i - 1) * from_ns, i * from_ns
+        for j in floor(Int, a / to_ns) + 1:min(n, floor(Int, b / to_ns) + 1)
+            lo, hi = max(a, (j - 1) * to_ns), min(b, j * to_ns)
+            hi > lo && (out[j] += c * (hi - lo) / from_ns)
+        end
+    end
+    return out
+end
+
+"""The value of `SP_<key>` in a .sdt's setup text (what its measurement description lacks), NaN if absent."""
+function sdt_setup_value(setup::AbstractString, key::AbstractString)::Float64
+    m = match(Regex("\\[SP_" * key * ",[A-Z],([-+0-9.eE]+)\\]"), setup)
+    return m === nothing ? NaN : parse(Float64, m[1])
+end
+
+"""
+    read_sdt_irf_qc(filepath, spc) -> (irfs, channels)
+
+IRF of the SPC-QC-104 from SPCM Single(s) saved as .sdt: one block, one
+curve per input (IN1, IN2, IN3). Channel k takes the curve of its input
+([verification] series: "3T0089/IN2" → curve 2) from the picked file — or,
+when that curve is empty there, from the same name with its last number
+replaced by k (irf_ch1.sdt, irf_ch2.sdt: one detector per measurement).
+Its TDC channels (`tac_range / adc_resolution`: 64 ps for 256 points) are
+spread by overlap onto [qc] fenetre_ns in `DEFAULT_HISTOGRAM_RESOLUTION`
+channels, the Realtime decays' axis (`rebin_counts`); then, as in
+`read_sdt_irf`, the median is subtracted and negative counts clipped. A
+256-point Single blurs a sharp IRF over two 49 ps channels: 4096 points
+(4 ps) or the SPC window's Single keep it sharp. `channels`: the serial
+("3T0089/IN1") and the settings in the DLL's names (`IRF_QC_SETTINGS`; the
+zero levels of IN2 and IN3 and the TDC offsets from SPCM's setup text),
+plus `fenetre_ns`.
+"""
+function read_sdt_irf_qc(filepath::AbstractString, spc::FLIMCore.Reglages)
+    window, n = spc.qc_fenetre_ns, DEFAULT_HISTOGRAM_RESOLUTION
+    stem, ext = splitext(basename(filepath))
+    last_number = match(r"(\d+)(\D*)$", stem)
+    sibling(k) = last_number === nothing ? "" :
+                 joinpath(dirname(filepath), stem[1:last_number.offset - 1] * string(k) * last_number[2] * ext)
+    irfs = Matrix{Float64}[]
+    channels = Dict{String, Any}[]
+    for (k, serial) in enumerate(spc.series[1:min(2, length(spc.series))])
+        voie = FLIMCore.voie_qc(serial)
+        voie === nothing && error("[verification] series: \"$serial\" isn't an input of the QC-104 (\"3T0089/IN1\")")
+        found = nothing
+        for f in unique(filter(isfile, [String(filepath), sibling(k)]))
+            sdt = SdtFile.read_sdt(read(f), basename(f))
+            isempty(sdt.data) && continue
+            mi = sdt.measure_info[clamp(sdt.blocks[1].meas_desc_block_no + 1, 1, length(sdt.measure_info))]
+            occursin("QC", uppercase(String(mi.mod_type))) ||
+                error("$(basename(f)) was taken with a $(strip(String(mi.mod_type))), not the SPC-QC-104 ([source] type = \"qc104\")")
+            block = sdt.data[1]
+            n_adc = size(block, ndims(block))
+            curves = reshape(Float64.(block), :, n_adc)
+            size(curves, 1) >= voie.entree || continue
+            curve = vec(curves[voie.entree, :])
+            sum(curve) > 0 || continue
+            found = (f, mi, sdt.setup, curve, Float64(mi.tac_r) / max(Int(mi.tac_g), 1) / n_adc * 1e9)
+            break
+        end
+        found === nothing &&
+            error("no counts on IN$(voie.entree) (channel $k) in $(basename(filepath))" *
+                  (isempty(sibling(k)) ? "" : " nor in $(basename(sibling(k)))"))
+        f, mi, setup, curve, bin_ns = found
+        (isfinite(bin_ns) && bin_ns > 0) || error("$(basename(f)): TDC range $(mi.tac_r) s, $(length(curve)) points")
+        counts = rebin_counts(curve, bin_ns, window / n, n)
+        counts .-= round(median(counts))
+        counts[counts .<= 0] .= 0
+        sum(counts) > 0 || error("$(basename(f)): an empty IRF curve on IN$(voie.entree) within [qc] fenetre_ns")
+        push!(irfs, hcat(collect(0:n-1) .* (window / n), counts))
+        settings = Dict{String, Any}(
+            "cfd_limit_low" => mi.cfd_ll, "cfd_limit_high" => mi.cfd_lh, "cfd_zc_level" => mi.cfd_zc,
+            "sync_threshold" => mi.syn_th, "tac_limit_high" => mi.tac_lh, "sync_zc_level" => mi.syn_zc,
+            "sync_freq_div" => mi.syn_fd, "tac_range" => Float64(mi.tac_r) * 1e9,
+            "sync_holdoff" => sdt_setup_value(setup, "SYN_HF"), "cfd_holdoff" => sdt_setup_value(setup, "CFD_HF"),
+            "tdc_offset1" => sdt_setup_value(setup, "TDC_OF1"), "tdc_offset2" => sdt_setup_value(setup, "TDC_OF2"),
+            "tdc_offset3" => sdt_setup_value(setup, "TDC_OF3"), "tdc_offset4" => sdt_setup_value(setup, "TDC_OF4"),
+            "fenetre_ns" => window)
+        filter!(kv -> isfinite(Float64(kv[2])), settings)
+        push!(channels, Dict{String, Any}("serial" => String(serial), "settings" => Dict{String, Any}(k => Float64(v) for (k, v) in settings),
+                                          "file" => basename(f)))
+    end
+    return irfs, channels
+end
+
+"""Check an imported IRF against the current settings (`irf_mismatches`), then keep it as `irf_csv_path()` with its record."""
+function save_imported_irf(irfs, channels, filepath::AbstractString, spc::FLIMCore.Reglages; applied::AbstractDict)
     info = Dict{String, Any}("source" => String(filepath), "imported" => Dates.format(Dates.now(), dateformat"yyyy-mm-ddTHH:MM:SS"),
                              "channels" => channels, "dcc" => Dict{String, Any}(spc.dcc))
     mismatches = irf_mismatches(info, spc; applied)

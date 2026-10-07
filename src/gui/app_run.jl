@@ -269,7 +269,7 @@ Runtime state of the GUI thread. NOT serialized.
   ROIs were drawn on — see `roi_voltage_calibration_size` (roi_geometry.jl).
   Defaults to `(1024, 1024)`, the calibration reference.
 - `display::DisplayState`: refresh-tick bookkeeping and diagnostics
-- `spc::SpcView`: the SPC-150N engine handle, its settings (config/spc.toml)
+- `spc::SpcView`: the SPC engine handle, its settings (config/spc.toml)
   and what the SPC window shows (gui/spc_view.jl)
 - `offline::String`: why this computer can't acquire (`offline_reason`,
   app.jl), "" when it can: the Realtime mode is then refused and Playback

@@ -130,8 +130,8 @@ end
 Create one scan's tasks. `pass_ticks = (entry, scan, shift)` (samples) also
 creates the pass signal on `cfg.pass_counter`: counted on the shared sample
 clock, low during the entry, then high for each scan and low for each
-pause — wired to the SPC-150N's marker M0 (and M3 with `[clamp]
-fin_par_m3 = true`).
+pause — wired to the SPC card's marker M0 (QC-104: pin 12), and to M3
+(pin 10) with `[clamp] fin_par_m3 = true`.
 """
 function hw_prepare!(hw::NIHardware, buffer_samples::Integer; pass_ticks = nothing)
     cfg = hw.cfg

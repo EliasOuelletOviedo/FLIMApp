@@ -14,7 +14,7 @@ visiting order, visit `v = s ÷ R`:
 - shift (`shift_time`): half-cosine move toward the next ROI's center,
   gate low, the reserved routing code, command outputs at 0 V.
 
-The SPC-150N cards see two things from the NI:
+The SPC card (QC-104, or the SPC-150N) sees two things from the NI:
 
 - the routing code on P0.4–P0.7, written NOT-ed when `invert_routing`
   (active-low inputs) so the card reads the code itself: during each scan,

@@ -138,7 +138,7 @@ GUI's state at START (the loop never reads `AppState`/`AppRun` itself).
 galvos scan the ROIs only when `roi_active` and `rois` isn't empty;
 otherwise they stay at 0 V with the same scan/pause rhythm.
 `invert_routing` (`[clamp] inverser_routage` in config/spc.toml): write
-NOT(code) on P0.4–P0.7 so the SPC-150N, whose routing inputs are active
+NOT(code) on P0.4–P0.7 so the SPC card, whose routing inputs are active
 low, reads the code itself.
 """
 struct ScanRequest

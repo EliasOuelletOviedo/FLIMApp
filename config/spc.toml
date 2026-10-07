@@ -1,15 +1,18 @@
-# Réglages des SPC-150N pour FLIMCore (src/spc/FLIMCore.jl), relus à chaque
+# Réglages des cartes SPC pour FLIMCore (src/spc/FLIMCore.jl), relus à chaque
 # démarrage de mesure. Le GUI réécrit ce fichier quand tu changes un réglage
 # dans la fenêtre SPC : les commentaires sont regénérés, garde tes notes
 # ailleurs.
 #
-# [spc_module] remplace reglages_spc.jl : recopie les valeurs de SPCM
-# (panneau « System Parameters ») qui te donnent un beau déclin. Plages :
-# manuel de la DLL SPCM, section [spc_module]. Une clé inconnue de la DLL
+# SPC-QC-104 ([source] type = "qc104") : réglages dans [qc], en noms clairs
+# (ceux de reglages_qc.jl ; recopie les valeurs de SPCM qui te donnent un
+# beau déclin sur chaque entrée). Chaque canal est une entrée de la carte,
+# « n° de série/IN<entrée> » dans [verification] series.
+# SPC-150N ([source] type = "cartes") : [spc_module], les clés du manuel de
+# la DLL SPCM (inutilisé avec la QC-104). Une clé que la carte ne prend pas
 # est signalée par le tableau « demandé → appliqué ».
 
 [source]
-type = "cartes"                  # "cartes" (les SPC-150N), "rejeu" (fichiers .spc ci-dessous) ou "simulation"
+type = "qc104"                   # "qc104" (la SPC-QC-104), "cartes" (les SPC-150N), "rejeu" (fichiers .spc ci-dessous) ou "simulation"
 rejeu = []                       # fichiers .spc à rejouer, un par carte (écrits par l'imagerie, avec leur _acquisition.ini)
 vitesse = 1.0                    # rejeu et simulation : 1 = temps réel ; 0 = le plus vite possible
 connexion_au_demarrage = true    # le GUI lance le moteur et vérifie les cartes à l'ouverture
@@ -27,8 +30,21 @@ tac_limit_low = 5.1              # % de la fenêtre
 tac_offset = 3.33                # % (0 à 50 pour la SPC-150N)
 tac_range = 50.034               # ns (50 à 5000)
 
+[qc]
+seuil_mV = [-139.22, -139.22, -139.22, -70.59] # seuils des CFD, IN1, IN2, IN3, SYNC (-500 à 0 mV) : ceux de SPCM (System Parameters de la QC-104)
+zc_mV = [12.85, 12.85, 12.85, -6.8] # niveaux de zéro des CFD, IN1, IN2, IN3, SYNC (-96 à 96 mV)
+decalage_ns = [0.512, 1.536, 0.0, 0.0] # décalage du temps par entrée, IN1, IN2, IN3, SYNC (0 à 32,256 ns, pas de 0,512) : place la montée du déclin au début de la fenêtre
+plage_tdc_ns = 16.384            # plage du TDC (tac_range), 4096 canaux en FIFO : 16,384 ns = 4 ps par canal
+fenetre_ns = 12.5                # fenêtre des déclins de FLIMApp, la période du laser : les 4096 canaux du TDC y sont rééchantillonnés (12,5 ns, comme la SPC-150N)
+diviseur_sync = 1                # 1, 2 ou 4 : à 1, chaque impulsion du laser sert de référence
+retard_routage_ns = 0            # lecture du routage après le photon (-57 à 65 ns, pas de 8,192)
+limite_basse_pct = 5.0           # « Limit Low » de SPCM, % de la plage du TDC coupés au début (la DLL met 10 % sans cette clé)
+photon_unique = false            # true : un photon par période du laser ; false : détection multiphoton
+temps_taux_s = 0.25              # s, intégration des compteurs de taux (rate_count_time)
+taux = [2, 3, 4, 1]              # quelle valeur de SPC_read_rates (1 à 8) est IN1, IN2, IN3, SYNC : à confirmer avec qc3_entrees.jl (la vérification compare au FIFO)
+
 [verification]
-series = ["3N0317", "3N0318"]    # n° de série du canal 1 puis du canal 2 : identifient les cartes, quel que soit leur n° de module
+series = ["3T0089/IN1", "3T0089/IN2"] # canal 1 puis canal 2 : "<n° de série>/IN<entrée>" pour la QC-104 (3T0089/IN1), le n° de série de chaque carte pour les SPC-150N
 seuil_cfd = 100.0                # /s : en dessous, détecteurs éteints (Enable outputs dans le logiciel DCC ?)
 
 [imagerie]
@@ -58,7 +74,7 @@ inverser = false                 # déclin à l'envers (montée lente, chute bru
 
 [clamp]
 canaux = 256                     # canaux des déclins du Realtime (les 4096 du FIFO regroupés) : 256, la résolution de l'IRF
-fin_par_m3 = false               # false : M0 seul, chaque passe dure le scan programmé ; true : sa fin vient de M3 (le même signal de passe câblé aussi sur M3, front descendant)
+fin_par_m3 = true                # false : M0 seul, chaque passe dure le scan programmé ; true : sa fin vient de M3 (le même signal de passe câblé aussi sur M3, front descendant)
 inverser_routage = true          # la NI écrit NON(c) sur P0.4-P0.7 et la carte, aux entrées actives à 0 V, lit c
 
 [enregistrement]

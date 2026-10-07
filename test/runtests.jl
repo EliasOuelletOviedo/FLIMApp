@@ -528,6 +528,7 @@ end
         # This computer (no NI-DAQmx): offline — Realtime refused, Playback available.
         reason = FLIMApp.offline_reason(cfg, FLIMCore.Reglages())
         @test occursin("OFFLINE", reason) && occursin("NI-DAQmx", reason)
+        @test occursin("SPC DLL", reason) == !FLIMCore.SPCLite.dll_disponible()      # the QC-104 needs spcm64.dll too
         @test FLIMApp.offline_reason(test_bench_config(), FLIMCore.Reglages(source = "simulation")) == ""
     end
 end
@@ -1132,7 +1133,7 @@ end
     @test settings["tac_range"] ≈ 50 && settings["tac_gain"] == 4 && settings["cfd_limit_low"] == -50 && settings["sync_threshold"] == -60
 
     # Taken with the settings the cards measure with, or refused (and why).
-    spc(; kw...) = FLIMCore.Reglages(; spc = Dict{String, Any}("tac_range" => 50.0, "tac_gain" => 4, "cfd_limit_low" => -49.5,
+    spc(; kw...) = FLIMCore.Reglages(; source = "cartes", series = ["3N0317", "3N0318"], spc = Dict{String, Any}("tac_range" => 50.0, "tac_gain" => 4, "cfd_limit_low" => -49.5,
                                                                "sync_threshold" => -60.0),
                                      dcc = Dict{String, Any}("gain_c1_pourcent" => 82.0), kw...)
     info = Dict{String, Any}("channels" => channels, "dcc" => Dict{String, Any}("gain_c1_pourcent" => 82.0))
@@ -1175,6 +1176,55 @@ end
         end
     end
     @test_throws Exception FLIMApp.read_sdt_irf(joinpath(mktempdir(), "missing.sdt"))
+end
+
+@testset "IRF from a Single of the SPC window (SPC-QC-104)" begin
+    # A Single through the QC-104 (a recorded raw stream standing in for the card): one CSV per input,
+    # resampled onto [qc] fenetre_ns like the Realtime decays, with the settings read back next to it.
+    e = FLIMCore.EncodeurQC()
+    for t in 1:60_000
+        FLIMCore.photon_qc!(e, 40t, 250 + (t % 7) * 3 + (t % 2) * 40; entree = 1 + t % 2)     # a narrow peak on each input
+    end
+    spc = FLIMCore.Reglages(dossier = mktempdir(), seuil_cfd = 10.0)
+    engine = FLIMCore.demarrer_moteur(spc; source = FLIMCore.SourceQC(FLIMCore.QCRejeu(e.mots)))
+    @test timedwait(() -> FLIMCore.etat_moteur(engine) == :pret, 30.0) === :ok
+    FLIMCore.commander!(engine, FLIMCore.Single(0.05, 1))
+    fin = FLIMCore.attendre_fin(engine, :single; delai_s = 30, io = nothing)
+    FLIMCore.arreter_moteur(engine)
+    @test !fin.erreur
+    csv = only(filter(f -> endswith(f, "_module1.csv"), fin.fichiers))         # either channel's CSV finds the other
+    irfs, channels = FLIMApp.read_single_irf(csv; series = spc.series)
+    @test [c["serial"] for c in channels] == ["3T0089/IN1", "3T0089/IN2"] && length(irfs) == 2
+    @test all(irf -> size(irf) == (256, 2) && isapprox(irf[2, 1], 12.5 / 256; rtol = 1e-4) && sum(irf[:, 2]) > 0, irfs)
+    @test argmax(irfs[2][:, 2]) > argmax(irfs[1][:, 2])                        # IN2's peak 40 TDC channels later
+    @test all(c -> isapprox(c["settings"]["fenetre_ns"], 12.5; atol = 1e-3) && c["settings"]["cfd_limit_low"] == spc.qc_seuil_mV[1], channels)
+    info = Dict{String, Any}("channels" => channels, "dcc" => Dict{String, Any}(spc.dcc))
+    @test isempty(FLIMApp.irf_mismatches(info, spc))
+    other = deepcopy(spc); other.qc_seuil_mV[2] = -80.0                       # IN2's threshold: cfd_limit_high
+    @test any(m -> occursin("cfd_limit_high", m), FLIMApp.irf_mismatches(info, other))
+    window = deepcopy(spc); window.qc_fenetre_ns = 16.0                      # another time axis
+    @test any(m -> occursin("fenetre_ns", m), FLIMApp.irf_mismatches(info, window))
+    swapped = deepcopy(spc); swapped.series = ["3T0089/IN2", "3T0089/IN1"]
+    @test any(m -> occursin("channel 1 is card 3T0089/IN2", m), FLIMApp.irf_mismatches(info, swapped))
+    @test FLIMApp.alert_problem_id("QC-104 : 3 photon(s) au-delà de [qc] fenetre_ns (12.5 ns) jetés") == "SPC-10"
+    @test FLIMApp.alert_problem_id("module 1 (3T0089/IN2) : la carte affiche 2e5 /s … [qc] taux de config/spc.toml à corriger") == "SPC-09"
+    # SPCM's Singles of the QC-104 (.sdt, 256 points of 64 ps on 16.385 ns), one detector per file as taken
+    # at the bench: each channel takes its input's curve, from the picked file or the one named for its
+    # channel, spread onto the 12.5 ns window; recorded with the settings SPCM had (its setup text included).
+    sdt = joinpath(@__DIR__, "data", "qc104", "irf_16x_750nm_ch1.sdt")
+    bench = FLIMCore.lire_reglages(joinpath(@__DIR__, "..", "config", "spc.toml"))
+    irfs, channels = FLIMApp.read_sdt_irf_qc(sdt, bench)
+    @test [c["serial"] for c in channels] == ["3T0089/IN1", "3T0089/IN2"]
+    @test [c["file"] for c in channels] == ["irf_16x_750nm_ch1.sdt", "irf_16x_750nm_ch2.sdt"]
+    @test all(irf -> size(irf) == (256, 2) && irf[2, 1] ≈ 12.5 / 256, irfs)
+    @test [irf[argmax(irf[:, 2]), 1] for irf in irfs] ≈ [37, 43] .* (12.5 / 256)       # 1.81 and 2.10 ns
+    @test channels[2]["settings"]["tdc_offset2"] == 1.536 && isapprox(channels[1]["settings"]["sync_holdoff"], 12.85; atol = 1e-3)
+    info = Dict{String, Any}("channels" => channels, "dcc" => Dict{String, Any}(bench.dcc))
+    @test isempty(FLIMApp.irf_mismatches(info, bench))                         # config/spc.toml: the SPCM values
+    offsets = deepcopy(bench); offsets.qc_decalage_ns = zeros(4)
+    @test any(m -> occursin("tdc_offset2", m), FLIMApp.irf_mismatches(info, offsets))
+    @test FLIMApp.rebin_counts([4.0, 6.0, 8.0], 1.0, 1.5, 3) == [7.0, 11.0, 0.0]
+    @test FLIMApp.sdt_setup_value("#SP [SP_TDC_OF2,F,1.536]", "TDC_OF2") == 1.536 && isnan(FLIMApp.sdt_setup_value("", "X"))
 end
 
 @testset "MLE lifetime fit recovers a known lifetime" begin

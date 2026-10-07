@@ -10,7 +10,7 @@ Application start-up and shutdown (plan §2, §5, §6, §7):
   30 Hz refresh tick;
 - closing the window stops everything the way STOP does (the loop sees the
   stop flag within one readback block and zeroes every output), then
-  disconnects the cards, stops the SPC engine (which frees the SPC-150N)
+  disconnects the cards, stops the SPC engine (which frees the SPC card)
   and lets the journal write what's left.
 
 Launch with 4 worker threads and 1 interactive thread (scripts/launch.bat
@@ -60,7 +60,7 @@ function startup_checks!(app_run)
     end
     @info "Start-up" versions = code_versions() threads = "$(Threads.nthreads(:interactive)) interactive + $(Threads.nthreads(:default)) default" os = "$(Sys.KERNEL) $(Sys.MACHINE)" bench_config = "$(cfg.source) (backend $(cfg.backend))" spc_settings = "$(app_run.spc.settings_path) (source $(spc.source))" nidaqmx = ni spc_dll = spc_dll journal = journal_root(cfg) recording_folder = FLIMCore.dossier_spc(spc) debug_log = debug_log_path()
     cfg.backend == :ni && ni == "not found" && report_problem!("ENV-02", "nicaiu not found on this computer"; level = :info)
-    spc.source == "cartes" && !FLIMCore.SPCLite.dll_disponible() && report_problem!("ENV-03", spc_dll; level = :info)
+    FLIMCore.source_materielle(spc) && !FLIMCore.SPCLite.dll_disponible() && report_problem!("ENV-03", spc_dll; level = :info)
     if !irf_loaded()
         report_problem!("FIT-01", "no IRF loaded"; level = :info)
     else
@@ -90,8 +90,8 @@ end
     offline_reason(cfg, spc)::String
 
 Why this computer can't run the Realtime acquisition, "" if it can: the NI
-backend without the NI-DAQmx driver (nicaiu), or the SPC-150N cards as SPC
-source without their DLL — a laptop, typically. The app then starts
+backend without the NI-DAQmx driver (nicaiu), or the SPC cards (QC-104 or
+SPC-150N) as SPC source without their DLL — a laptop, typically. The app then starts
 offline: no connection attempt and no fault, a banner says so, START
 refuses the Realtime mode, and Playback stays available. (On the bench PC,
 a failed connection is not this: the DAQ label says so and RECONNECT
@@ -100,7 +100,7 @@ retries, see `connect_button_label`.)
 function offline_reason(cfg::BenchConfig, spc::FLIMCore.Reglages)::String
     missing_parts = String[]
     cfg.backend == :ni && isempty(Libdl.find_library(DAQmx.LIB)) && push!(missing_parts, "NI-DAQmx driver")
-    spc.source == "cartes" && !FLIMCore.SPCLite.dll_disponible() && push!(missing_parts, "SPC-150N DLL")
+    FLIMCore.source_materielle(spc) && !FLIMCore.SPCLite.dll_disponible() && push!(missing_parts, "SPC DLL (spcm64.dll)")
     isempty(missing_parts) && return ""
     return "OFFLINE (no $(join(missing_parts, ", no ")) on this computer): acquisition disabled, Playback available"
 end
@@ -162,7 +162,7 @@ end
 
 Window closed: stop the analysis and the scan (outputs to zero within one
 readback block), disconnect the cards, stop the DAQ loop and the SPC engine
-(which stops its measurement and frees the SPC-150N), then let the journal
+(which stops its measurement and frees the SPC card), then let the journal
 write everything queued and close. Returns immediately; the journal is
 released once the loop and the SPC engine have finished (5 s at most).
 """
@@ -253,8 +253,8 @@ function run_app(config_path::AbstractString = default_bench_config_path())
     (cfg.backend != :ni || !isempty(Libdl.find_library(DAQmx.LIB))) && send_command!(app_run.exchange, ConnectCommand())
 
     # Plan.pdf, start-up step 3: the GUI starts the SPC engine, which
-    # initializes and checks the SPC-150N on its own thread.
-    spc_cards_missing = app_run.spc.settings.source == "cartes" && !FLIMCore.SPCLite.dll_disponible()
+    # initializes and checks the SPC card on its own thread.
+    spc_cards_missing = FLIMCore.source_materielle(app_run.spc.settings) && !FLIMCore.SPCLite.dll_disponible()
     app_run.spc.settings.connexion_au_demarrage && !spc_cards_missing &&
         guarded_step(() -> spc_connect!(app_run.spc), "starting the SPC engine")
 
@@ -283,7 +283,7 @@ end
 Block until the window is closed, then until the DAQ loop, the SPC engine
 and the journal of the last `run_app` have finished (at most `timeout_s`) —
 for scripts and the compiled app, which would otherwise exit before the
-outputs are zeroed, the SPC-150N freed and the journal closed.
+outputs are zeroed, the SPC card freed and the journal closed.
 """
 function wait_for_window(fig; timeout_s::Real = 10.0)
     screen = GLMakie.Makie.getscreen(fig.scene)

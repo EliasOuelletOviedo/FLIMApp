@@ -28,11 +28,13 @@ readback_signals = ["galvo_x", "galvo_y", "command_1", "command_2",
 # Static digital line that opens the shutter while a scan runs (high =
 # open). Empty: no shutter. Keep it outside port 0, e.g. "X6321/port1/line0".
 shutter = ""
-# Pass signal for the SPC-150N: a counter clocked by the AO sample clock,
-# high during each scan, wired to M0 of both cards (rising edge: start of
-# pass), with a common ground (D GND on pin 15); the end of each pass is the
-# programmed scan later — or, with [clamp] fin_par_m3 = true in
-# config/spc.toml, the falling edge of the same signal wired to M3 too.
+# Pass signal for the SPC card: a counter clocked by the AO sample clock,
+# high during each scan, wired to M0 (rising edge: start of pass) — on the
+# SPC-QC-104's Micro Sub-D 15, pin 12 (Marker 0) — and, with [clamp]
+# fin_par_m3 = true in config/spc.toml, to M3 too (pin 10, falling edge: end
+# of pass; otherwise the end is the programmed scan after M0). Common
+# ground: D GND to pin 5 or 15. The routing code P0.4–P0.7 goes to pins 2,
+# 3, 4, 7 (/R0 to /R3); nothing on pins 1, 6, 11 (supplies).
 # Check the wiring with scripts/test_passes.jl. Empty: no pass signal.
 passes = "X6321/ctr1"
 passes_terminal = ""                    # output PFI; "" = the counter's default, PFI13 (CTR 1 OUT), validated by test_spc4
