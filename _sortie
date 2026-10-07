@@ -1,205 +1,4 @@
-[ Info: FLIM Application module loaded. Call run_app() to start.
-
-  1 dependency had output during precompilation:
-┌ FLIMApp
-│  [Output was shown above]
-└
-[ Info: ============================================================
-[ Info: FLIM Application Starting
-[ Info: ============================================================
-┌ Info: Bench config loaded
-│   source = "C:\\Users\\Admin\\Desktop\\FLIMApp_2\\FLIMApp\\config\\bench.toml"
-└   backend = :ni
-┌ Info: Loaded saved state
-└   theme = "dark"
-┌ Info: IRF loaded successfully
-│   channels = 2
-│   size = (256, 2)
-│   bin_size = 0.04886091184430619
-└   window_size = 12.51
-[ Info: Warming up lifetime-fitting code paths (one-time JIT compilation)...
-┌ Info: Warmup complete
-└   seconds = 3.6
-┌ Info: Start-up
-│   versions = Dict{String, Any} with 6 entries: …
-│   threads = "1 interactive + 4 default"
-│   os = "NT x86_64-w64-mingw32"
-│   bench_config = "C:\\Users\\Admin\\Desktop\\FLIMApp_2\\FLIMApp\\config\\bench.toml (backend ni)"
-│   spc_settings = "C:\\Users\\Admin\\Desktop\\FLIMApp_2\\FLIMApp\\config\\spc.toml (source qc104)"
-│   nidaqmx = "C:\\WINDOWS\\SYSTEM32\\nicaiu.DLL"
-│   spc_dll = "C:\\Program Files (x86)\\BH\\SPCM\\DLL\\spcm64.dll"
-│   journal = "C:\\Users\\Admin\\FLIMApp_journal"
-│   recording_folder = "C:\\Users\\Admin\\FLIMApp_spc"
-└   debug_log = "C:\\Users\\Admin\\FLIMApp_journal\\debug\\2026-10-07_151756_debug.log"
-┌ Warning: [FIT-01] IRF missing, or taken with other settings: channel 1: IRF from card 3N0317, but channel 1 is card 3T0089/IN1; channel 1: tac_range = 50.034 for the IRF, 16.384 now; channel 1: cfd_limit_high = 5.0196 for the IRF, -139.22 now; channel 1: tac_limit_high = 94.902 for the IRF, 12.85 now; channel 1: cfd_zc_level = 12.85 for the IRF, -139.22 now; channel 2: IRF from card 3N0318, but channel 2 is card 3T0089/IN2; channel 2: tac_range = 50.034 for the IRF, 16.384 now; channel 2: cfd_limit_high = 5.0196 for the IRF, -139.22 now; channel 2: tac_limit_high = 94.902 for the IRF, 12.85 now; channel 2: cfd_zc_level = 12.85 for the IRF, -139.22 now
-│   problem = "FIT-01"
-│   check = "Import a Single of the IRF taken with the current settings ([qc] or [spc_module]) and [dcc] gains (IRF button): SPCM's .sdt, or the SPC window's Single (its CSV). The log lists every difference."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-[ Info: Creating GUI...
-[ Info: NI-DAQmx 26.5.0; devices: S6110 (PCI-6110), X6321 (PCIe-6321); config needs X6321, S6110
-┌ Info: State saved
-└   path = "C:\\Users\\Admin\\.flimapp\\AppState.jls"
-┌ Warning: [SPC-05] A card setting was not applied as requested: SPC check: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-│   problem = "SPC-05"
-│   check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Warning: [SPC-05] A card setting was not applied as requested: SPC check: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-│   problem = "SPC-05"
-│   check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Info: SPC check
-│   source = "qc104"
-│   ok = false
-└   cards = "module 0: 3T0089/IN1 channel 1 ready, SYNC 1, CFD 7.6e+03; module 1: 3T0089/IN2 channel 2 ready, SYNC 1, CFD 4.96e+04"
-┌ Warning: [SPC-05] A card setting was not applied as requested: SPC engine: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-│   problem = "SPC-05"
-│   check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Warning: [SPC-05] A card setting was not applied as requested: SPC engine: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-│   problem = "SPC-05"
-│   check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-[ Info: Debug log: C:\Users\Admin\FLIMApp_journal\debug\2026-10-07_151756_debug.log
-[ Info: ============================================================
-[ Info: Application ready
-[ Info: ============================================================
-┌ Info: IRF imported
-│   path = "C:\\Users\\Admin\\Desktop\\FLIMApp_2\\FLIMApp\\irf_16x_750nm_ch1.sdt"
-└   channels = 2
-┌ Info: IRF loaded successfully
-│   channels = 2
-│   size = (256, 2)
-│   bin_size = 0.048828125
-└   window_size = 12.5
-[ Info: Starting acquisition
-┌ Info: Realtime run started
-│   session = "C:\\Users\\Admin\\FLIMApp_spc\\sessions\\2026-10-07_151944"
-│   rois = 0
-│   order = Int64[]
-│   roi_active = false
-│   scan_ms = 240
-└   shift_ms = 10
-┌ Warning: deadline of 250.0 ms leaves little room for garbage-collector pauses; longer slots or a larger timing.lead_slots (config/bench.toml) give more
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:280
-[ Info: Real-time worker started on thread 5
-┌ Warning: [SPC-05] A card setting was not applied as requested: SPC engine: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-│   problem = "SPC-05"
-│   check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Warning: [SPC-05] A card setting was not applied as requested: SPC engine: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-│   problem = "SPC-05"
-│   check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Error: [DAQ-08] DAQ error during a scan: outputs zeroed (FAULT): scan, slot 0, writing the entry and the first slots: DAQmx -89125: No registered trigger lines could be found between the devices in the route.
-│   problem = "DAQ-08"
-│   check = "The message gives the step and the DAQmx code; RESET acknowledges it. The debug log has the full DAQmx message."
-│   exception =
-│    scan, slot 0, writing the entry and the first slots: DAQmx -89125 : No registered trigger lines could be found between the devices in the route.
-│
-│    If you have a PXI chassis, identify the chassis correctly in MAX, and make sure it has been configured properly. If you are using PCI devices, make sure they are connected with a RTSI cable and that the RTSI cable is registered in MAX. Otherwise, make sure there is an available trigger line on the trigger bus shared between the devices.
-│
-│    Source Device: X6321
-│    Destination Device: S6110
-│
-│    Task Name: flimapp_commands
-│
-│    Status Code: -89125
-│    Stacktrace:
-│     [1] chk(code::Int32)
-│       @ FLIMApp.DAQmx C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:82
-│     [2] #write_analog#7
-│       @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:215 [inlined]
-│     [3] write_analog
-│       @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:211 [inlined]
-│     [4] hw_write!(hw::FLIMApp.NIHardware, buffers::FLIMApp.SlotBuffers)
-│       @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\hardware.jl:203
-│     [5] run_scan!(hw::FLIMApp.NIHardware, cfg::FLIMApp.BenchConfig, ex::FLIMApp.Exchange, request::FLIMApp.ScanRequest)
-│       @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:292
-│     [6] daq_loop(cfg::FLIMApp.BenchConfig, ex::FLIMApp.Exchange; hardware::FLIMApp.NIHardware)
-│       @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:58
-│     [7] daq_loop
-│       @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:31 [inlined]
-│     [8] (::FLIMApp.var"#start_background_threads!##0#start_background_threads!##1"{FLIMApp.Exchange, FLIMApp.BenchConfig})()
-│       @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\app.jl:115
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:224
-[ Info: Real-time worker finished
-┌ Warning: [SPC-10] QC-104: photons or records set aside by the translation: SPC engine: QC-104 : 94 photon(s) au-delà de [qc] fenetre_ns (12.5 ns) jetés : fenêtre plus courte que la période du laser, diviseur_sync > 1, ou decalage_ns qui pousse le déclin au bout
-│   problem = "SPC-10"
-│   check = "Beyond [qc] fenetre_ns: the window shorter than the laser period, diviseur_sync > 1, or decalage_ns pushing the decay to its end. An input without a channel: [verification] series. Unknown records: the QC-104's FIFO format (SPCLite.FORMAT_QC104) needs another look."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Warning: [PASS-09] No pass signal generated: the DAQ loop played no slot during the measurement: no M0 edge on any card in 1.8 s, and the DAQ loop played no slot
-│   problem = "PASS-09"
-│   check = "The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault)."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Info: Run debug report written
-└   path = "C:\\Users\\Admin\\FLIMApp_spc\\sessions\\2026-10-07_151944\\debug_report.txt"
-[ Info: NI-DAQmx 26.5.0; devices: S6110 (PCI-6110), X6321 (PCIe-6321); config needs X6321, S6110
-[ Info: Starting acquisition
-┌ Info: Realtime run started
-│   session = "C:\\Users\\Admin\\FLIMApp_spc\\sessions\\2026-10-07_152055"
-│   rois = 0
-│   order = Int64[]
-│   roi_active = false
-│   scan_ms = 240
-└   shift_ms = 10
-[ Info: Real-time worker started on thread 4
-┌ Warning: deadline of 250.0 ms leaves little room for garbage-collector pauses; longer slots or a larger timing.lead_slots (config/bench.toml) give more
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:280
-┌ Warning: [SPC-05] A card setting was not applied as requested: SPC engine: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-│   problem = "SPC-05"
-│   check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Warning: [SPC-05] A card setting was not applied as requested: SPC engine: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-│   problem = "SPC-05"
-│   check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Error: [DAQ-08] DAQ error during a scan: outputs zeroed (FAULT): scan, slot 0, writing the entry and the first slots: DAQmx -89125: No registered trigger lines could be found between the devices in the route.
-│   problem = "DAQ-08"
-│   check = "The message gives the step and the DAQmx code; RESET acknowledges it. The debug log has the full DAQmx message."
-│   exception =
-│    scan, slot 0, writing the entry and the first slots: DAQmx -89125 : No registered trigger lines could be found between the devices in the route.
-│
-│    If you have a PXI chassis, identify the chassis correctly in MAX, and make sure it has been configured properly. If you are using PCI devices, make sure they are connected with a RTSI cable and that the RTSI cable is registered in MAX. Otherwise, make sure there is an available trigger line on the trigger bus shared between the devices.
-│
-│    Source Device: X6321
-│    Destination Device: S6110
-│
-│    Task Name: flimapp_commands
-│
-│    Status Code: -89125
-│    Stacktrace:
-│     [1] chk(code::Int32)
-│       @ FLIMApp.DAQmx C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:82
-│     [2] #write_analog#7
-│       @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:215 [inlined]
-│     [3] write_analog
-│       @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:211 [inlined]
-│     [4] hw_write!(hw::FLIMApp.NIHardware, buffers::FLIMApp.SlotBuffers)
-│       @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\hardware.jl:203
-│     [5] run_scan!(hw::FLIMApp.NIHardware, cfg::FLIMApp.BenchConfig, ex::FLIMApp.Exchange, request::FLIMApp.ScanRequest)
-│       @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:292
-│     [6] daq_loop(cfg::FLIMApp.BenchConfig, ex::FLIMApp.Exchange; hardware::FLIMApp.NIHardware)
-│       @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:58
-│     [7] daq_loop
-│       @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:31 [inlined]
-│     [8] (::FLIMApp.var"#start_background_threads!##0#start_background_threads!##1"{FLIMApp.Exchange, FLIMApp.BenchConfig})()
-│       @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\app.jl:115
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:224
-[ Info: Real-time worker finished
-┌ Warning: [SPC-10] QC-104: photons or records set aside by the translation: SPC engine: QC-104 : 145 photon(s) au-delà de [qc] fenetre_ns (12.5 ns) jetés : fenêtre plus courte que la période du laser, diviseur_sync > 1, ou decalage_ns qui pousse le déclin au bout
-│   problem = "SPC-10"
-│   check = "Beyond [qc] fenetre_ns: the window shorter than the laser period, diviseur_sync > 1, or decalage_ns pushing the decay to its end. An input without a channel: [verification] series. Unknown records: the QC-104's FIFO format (SPCLite.FORMAT_QC104) needs another look."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Warning: [PASS-09] No pass signal generated: the DAQ loop played no slot during the measurement: no M0 edge on any card in 3.0 s, and the DAQ loop played no slot
-│   problem = "PASS-09"
-│   check = "The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault)."
-└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:230
-┌ Info: Run debug report written
-└   path = "C:\\Users\\Admin\\FLIMApp_spc\\sessions\\2026-10-07_152055\\debug_report.txt"
-
-
-
-FLIMApp debug report — 2026-10-07T15:20:58.744
+FLIMApp debug report — 2026-10-07T15:35:33.992
 Problem codes: DEBUGGING.md (what each one means, what to check).
 
 ==============================================================================
@@ -207,65 +6,52 @@ Versions and environment
 ==============================================================================
   flimapp                   0.1.0
   flimcore                  8
-  git_commit                d90673f
+  git_commit                4b75080
   git_dirty                 false
   julia                     1.13.1
   spclite                   12
   OS                        NT x86_64-w64-mingw32
   threads                   1 interactive + 4 default
   offline                   no
-  debug log                 C:\Users\Admin\FLIMApp_journal\debug\2026-10-07_151756_debug.log
+  debug log                 C:\Users\Admin\FLIMApp_journal\debug\2026-10-07_153414_debug.log
   journal                   C:\Users\Admin\FLIMApp_journal
   recording folder          C:\Users\Admin\FLIMApp_spc
-  free space                55.6 GB free ≈ 1.9 h at 1 Mcps × 2 channel(s)
-  memory peak               1715.0 MB
+  free space                57.9 GB free ≈ 2.0 h at 1 Mcps × 2 channel(s)
+  memory peak               1609.0 MB
 
 ==============================================================================
 Problems seen (latest first)
 ==============================================================================
-  15:20:58 [PASS-09] No pass signal generated: the DAQ loop played no slot during the measurement: no M0 edge on any card in 3.0 s, and the DAQ loop played no slot
-           check: The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault).
-  15:20:58 [SPC-10] QC-104: photons or records set aside by the translation: SPC engine: QC-104 : 145 photon(s) au-delà de [qc] fenetre_ns (12.5 ns) jetés : fenêtre plus courte que la période du laser, diviseur_sync > 1, ou decalage_ns qui pousse le déclin au bout
-           check: Beyond [qc] fenetre_ns: the window shorter than the laser period, diviseur_sync > 1, or decalage_ns pushing the decay to its end. An input without a channel: [verification] series. Unknown records: the QC-104's FIFO format (SPCLite.FORMAT_QC104) needs another look.
-  15:20:55 [DAQ-08] DAQ error during a scan: outputs zeroed (FAULT): scan, slot 0, writing the entry and the first slots: DAQmx -89125: No registered trigger lines could be found between the devices in the route.
-           check: The message gives the step and the DAQmx code; RESET acknowledges it. The debug log has the full DAQmx message.
-  15:20:55 [SPC-05] A card setting was not applied as requested: SPC engine: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1 (×2)
-           check: The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N).
-  15:20:55 [SPC-05] A card setting was not applied as requested: SPC engine: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1 (×2)
-           check: The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N).
-  15:19:49 [SPC-10] QC-104: photons or records set aside by the translation: SPC engine: QC-104 : 94 photon(s) au-delà de [qc] fenetre_ns (12.5 ns) jetés : fenêtre plus courte que la période du laser, diviseur_sync > 1, ou decalage_ns qui pousse le déclin au bout
-           check: Beyond [qc] fenetre_ns: the window shorter than the laser period, diviseur_sync > 1, or decalage_ns pushing the decay to its end. An input without a channel: [verification] series. Unknown records: the QC-104's FIFO format (SPCLite.FORMAT_QC104) needs another look.
-  15:18:38 [SPC-05] A card setting was not applied as requested: SPC engine: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-           check: The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N).
-  15:18:38 [SPC-05] A card setting was not applied as requested: SPC engine: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-           check: The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N).
-  15:18:36 [SPC-05] A card setting was not applied as requested: SPC check: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-           check: The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N).
-  15:18:36 [SPC-05] A card setting was not applied as requested: SPC check: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-           check: The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N).
-  15:18:04 [FIT-01] IRF missing, or taken with other settings: channel 1: IRF from card 3N0317, but channel 1 is card 3T0089/IN1; channel 1: tac_range = 50.034 for the IRF, 16.384 now; channel 1: cfd_limit_high = 5.0196 for the IRF, -139.22 now; channel 1: tac_limit_high = 94.902 for the IRF, 12.85 now; channel 1: cfd_zc_level = 12.85 for the IRF, -139.22 now; channel 2: IRF from card 3N0318, but channel 2 is card 3T0089/IN2; channel 2: tac_range = 50.034 for the IRF, 16.384 now; channel 2: cfd_limit_high = 5.0196 for the IRF, -139.22 now; channel 2: tac_limit_high = 94.902 for the IRF, 12.85 now; channel 2: cfd_zc_level = 12.85 for the IRF, -139.22 now
-           check: Import a Single of the IRF taken with the current settings ([qc] or [spc_module]) and [dcc] gains (IRF button): SPCM's .sdt, or the SPC window's Single (its CSV). The log lists every difference.
+  15:35:15 [PASS-08] Many photons with a ROI code outside the passes: card 1 (channel 2, 3T0089/IN2): 50217 ROI-coded photons outside the passes, 928705 inside
+           check: The routing code and the pass signal are offset in time; normally only a few photons at the edges.
+  15:35:15 [PASS-08] Many photons with a ROI code outside the passes: card 0 (channel 1, 3T0089/IN1): 16502 ROI-coded photons outside the passes, 305673 inside
+           check: The routing code and the pass signal are offset in time; normally only a few photons at the edges.
+  15:34:50 [SPC-09] QC-104 rate counters don't match the stream: [qc] taux: SPC engine: module 1 (3T0089/IN2) : la carte affiche 1.03e+06 /s pour cette entrée, le flux en compte 3.79e+05 /s : [qc] taux de config/spc.toml à corriger (scripts qc3_entrees.jl) — le taux affiché pendant les mesures, lui, vient du flux
+           check: Which SPC_read_rates value is IN1, IN2, IN3, SYNC isn't documented: fix [qc] taux (qc3_entrees.jl tells). Only the display between measurements uses them; the check and the measurements count photons in the stream.
+  15:34:50 [SPC-09] QC-104 rate counters don't match the stream: [qc] taux: SPC engine: module 0 (3T0089/IN1) : la carte affiche 3.38e+05 /s pour cette entrée, le flux en compte 1.25e+05 /s : [qc] taux de config/spc.toml à corriger (scripts qc3_entrees.jl) — le taux affiché pendant les mesures, lui, vient du flux
+           check: Which SPC_read_rates value is IN1, IN2, IN3, SYNC isn't documented: fix [qc] taux (qc3_entrees.jl tells). Only the display between measurements uses them; the check and the measurements count photons in the stream.
 
 ==============================================================================
 Run
 ==============================================================================
   mode                      Realtime
   running / open            false / false
-  run folder                C:\Users\Admin\FLIMApp_spc\sessions\2026-10-07_152055
+  run folder                C:\Users\Admin\FLIMApp_spc\sessions\2026-10-07_153511
   ROI visiting order        Int64[]
   ROIs                      
   image size                (1024, 1024)
-  frames shown              0 (lost by the display: 0)
+  frames shown              76 (lost by the display: 0)
 
 ==============================================================================
 DAQ loop
 ==============================================================================
-  state                     FAULT — [DAQ-08] DAQ error during a scan: outputs zeroed (FAULT): scan, slot 0, writing the entry and the first slots: DAQmx -89125: No registered trigger lines could be found between the devices in the route.
+  state                     ready — stopped
   bench config              C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\config\bench.toml (ni)
-  slots played              0
-  iteration max             0.0 ms
-  margin min                Inf ms of NaN ms
-  journal                   5 pending, 0 dropped
+  slots played              76
+  iteration max             0.31 ms
+  margin min                230.2 ms of 250.0 ms
+  last slot                 slot 75, ROI 0, visit 75, commands 0.44889382332129585 / 0.0 V
+  journal                   11 pending, 0 dropped
 
 ==============================================================================
 SPC engine
@@ -273,61 +59,47 @@ SPC engine
   state                     ready
   settings                  C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\config\spc.toml
   source                    qc104
-  check                     source qc104, 2 problem(s)
-    module 0: serial 3T0089/IN1, channel 1, ready, SYNC 1, CFD 7.6e+03 /s
-      setting rate_count_time: requested 0.25, applied 1.0 (ecart)
-    module 1: serial 3T0089/IN2, channel 2, ready, SYNC 1, CFD 4.96e+04 /s
-      setting rate_count_time: requested 0.25, applied 1.0 (ecart)
-    problem: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    problem: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    rates module 0: SYNC 8.01e+07 /s, CFD 3.66e+05 /s, TAC 3.66e+05 /s, ADC 3.66e+05 /s, FIFO 0 %, SYNC state 1
-    rates module 1: SYNC 8.01e+07 /s, CFD 1.18e+06 /s, TAC 1.18e+06 /s, ADC 1.18e+06 /s, FIFO 0 %, SYNC state 1
+  check                     source qc104, all passed
+    module 0: serial 3T0089/IN1, channel 1, ready, SYNC 1, CFD 1.25e+05 /s
+    module 1: serial 3T0089/IN2, channel 2, ready, SYNC 1, CFD 3.79e+05 /s
+    rates module 0: SYNC 8.01e+07 /s, CFD 3.35e+05 /s, TAC 3.35e+05 /s, ADC 3.35e+05 /s, FIFO 0 %, SYNC state 1
+    rates module 1: SYNC 8.01e+07 /s, CFD 1.02e+06 /s, TAC 1.02e+06 /s, ADC 1.02e+06 /s, FIFO 0 %, SYNC state 1
   alerts (oldest first):
-    15:18:28 avertissement module -1: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    15:18:28 avertissement module -1: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    15:19:47 avertissement module 0: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    15:19:47 avertissement module 1: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    15:19:49 info module 0: module 0 : 643333 photons d'une ROI hors des passes (décalage entre le code et le signal de passe ?)
-    15:19:49 info module 1: module 1 : 2079406 photons d'une ROI hors des passes (décalage entre le code et le signal de passe ?)
-    15:19:49 avertissement module -1: QC-104 : 94 photon(s) au-delà de [qc] fenetre_ns (12.5 ns) jetés : fenêtre plus courte que la période du laser, diviseur_sync > 1, ou decalage_ns qui pousse le déclin au bout
-    15:20:55 avertissement module 0: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    15:20:55 avertissement module 1: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    15:20:58 info module 0: module 0 : 1077617 photons d'une ROI hors des passes (décalage entre le code et le signal de passe ?)
-    15:20:58 info module 1: module 1 : 3470759 photons d'une ROI hors des passes (décalage entre le code et le signal de passe ?)
-    15:20:58 avertissement module -1: QC-104 : 145 photon(s) au-delà de [qc] fenetre_ns (12.5 ns) jetés : fenêtre plus courte que la période du laser, diviseur_sync > 1, ou decalage_ns qui pousse le déclin au bout
-  last measurement          clamp: arrêtée après 0 passe(s)
+    15:34:43 avertissement module 0: module 0 (3T0089/IN1) : la carte affiche 3.38e+05 /s pour cette entrée, le flux en compte 1.25e+05 /s : [qc] taux de config/spc.toml à corriger (scripts qc3_entrees.jl) — le taux affiché pendant les mesures, lui, vient du flux
+    15:34:43 avertissement module 1: module 1 (3T0089/IN2) : la carte affiche 1.03e+06 /s pour cette entrée, le flux en compte 3.79e+05 /s : [qc] taux de config/spc.toml à corriger (scripts qc3_entrees.jl) — le taux affiché pendant les mesures, lui, vient du flux
+    15:35:33 info module 0: module 0 : 18632 photons d'une ROI hors des passes (décalage entre le code et le signal de passe ?)
+    15:35:33 info module 1: module 1 : 57219 photons d'une ROI hors des passes (décalage entre le code et le signal de passe ?)
+  last measurement          clamp: arrêtée après 76 passe(s)
 
 ==============================================================================
 Realtime: what the cards received
 ==============================================================================
-  Realtime counters at 3.0 s (end): 0 pass(es) published, codes written [1], scan 240.000 ms, end of pass on M3
-    card 0 ch1 3T0089/IN1: photons 1077617, M0 0 M1 0 M2 0 M3 0, passes 0 (abandoned 0, off 0, unpaired 0, queued 0)
-      pass ?…? ms, M0 → M0 ?…? ms, thrown (code 0) 0, outside passes 1077617, GAP 0; in passes by code: none
-    card 1 ch2 3T0089/IN2: photons 3470759, M0 0 M1 0 M2 0 M3 0, passes 0 (abandoned 0, off 0, unpaired 0, queued 0)
-      pass ?…? ms, M0 → M0 ?…? ms, thrown (code 0) 0, outside passes 3470759, GAP 0; in passes by code: none
-  diagnosis: 
-    [PASS-02] Photons but no M0 marker (start of pass): card 0 (channel 1, 3T0089/IN1): 1077617 photons but no M0 edge in 3.0 s
-    [PASS-02] Photons but no M0 marker (start of pass): card 1 (channel 2, 3T0089/IN2): 3470759 photons but no M0 edge in 3.0 s
+  Realtime counters at 19.3 s (end): 76 pass(es) published, codes written [1], scan 240.000 ms, end of pass on M3
+    card 0 ch1 3T0089/IN1: photons 6490869, M0 77 M1 0 M2 0 M3 77, passes 76 (abandoned 0, off 0, unpaired 0, queued 0)
+      pass 239.998…239.998 ms, M0 → M0 249.998…249.998 ms, thrown (code 0) 261858, outside passes 18632, GAP 0; in passes by code: 0:2263 1:6210379
+    card 1 ch2 3T0089/IN2: photons 19702604, M0 77 M1 0 M2 0 M3 77, passes 76 (abandoned 0, off 0, unpaired 0, queued 0)
+      pass 239.998…239.998 ms, M0 → M0 249.998…249.998 ms, thrown (code 0) 791838, outside passes 57219, GAP 0; in passes by code: 0:7511 1:18853547
+  diagnosis: nothing wrong
 
 ==============================================================================
 Routing lines read back (this run)
 ==============================================================================
-  first 0.0 s: 0 scan samples (P0.0 gate high), 0 pause samples; inverser_routage = true; codes the cards should read during scans: 1
-    P0.4 (R0): high in 0 % of the scan samples, 0 % of the pause samples; Inf … -Inf V
-    P0.5 (R1): high in 0 % of the scan samples, 0 % of the pause samples; Inf … -Inf V
-    P0.6 (R2): high in 0 % of the scan samples, 0 % of the pause samples; Inf … -Inf V
-    P0.7 (R3): high in 0 % of the scan samples, 0 % of the pause samples; Inf … -Inf V
+  first 18.5 s: 0 scan samples (P0.0 gate high), 185100 pause samples; inverser_routage = true; codes the cards should read during scans: 1
+    P0.4 (R0): high in 0 % of the scan samples, 0 % of the pause samples; -0.04 … 0.28 V
+    P0.5 (R1): high in 0 % of the scan samples, 0 % of the pause samples; 0.00 … 0.29 V
+    P0.6 (R2): high in 0 % of the scan samples, 0 % of the pause samples; -0.03 … 0.25 V
+    P0.7 (R3): high in 0 % of the scan samples, 0 % of the pause samples; 0.04 … 0.31 V
   => P0.0 (gate) never high: no scan played, or line_0 isn't read back.
 
 ==============================================================================
 Analysis worker
 ==============================================================================
-  passes analyzed           0
+  passes analyzed           76
   fits failed               channel 1: 0, channel 2: 0
   kept out of the PI        0
   not analyzed (code)       0, codes mask 0
-  most passes waiting       0
-  longest pass analysis     0.0 ms
+  most passes waiting       1
+  longest pass analysis     25.5 ms
 
 ==============================================================================
 IRF
@@ -342,7 +114,7 @@ IRF
 ==============================================================================
 Settings (layout, controller, protocol)
 ==============================================================================
-  [layout] binning=1, plot1=Histogram, plot1_ch1=true, plot1_ch2=false, plot2=Command, plot2_ch1=true, plot2_ch2=false, smoothing=0, time_range=100
+  [layout] binning=1, plot1=Histogram, plot1_ch1=true, plot1_ch2=true, plot2=Lifetime, plot2_ch1=true, plot2_ch2=true, smoothing=0, time_range=100
   [controller] I1=1.0, I2=0.0, P1=10.0, P2=0.0, ch1_inv=true, ch1_mode=Analog, ch1_on=true, ch1_out=Out 1, ch2_inv=false, ch2_mode=Digital, ch2_on=false, ch2_out=Out 2, freq=1000
   [protocol] PWM_frequency=1000, active=true, delay=0, points_per_roi=1000, repeats=0, scan_time=240, setpoints=[1.0, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN], shift_time=10, spiral_turns=10, times=[100.0, 100.0, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]
   [roi] active=false, v_max_x=900, v_max_y=-1800, v_min_x=-1400, v_min_y=800
@@ -467,8 +239,8 @@ diviseur_sync = 1                # 1, 2 ou 4 : à 1, chaque impulsion du laser s
 retard_routage_ns = 0            # lecture du routage après le photon (-57 à 65 ns, pas de 8,192)
 limite_basse_pct = 5.0           # « Limit Low » de SPCM, % de la plage du TDC coupés au début (la DLL met 10 % sans cette clé)
 photon_unique = false            # true : un photon par période du laser ; false : détection multiphoton
-temps_taux_s = 0.25              # s, intégration des compteurs de taux (rate_count_time)
-taux = [2, 3, 4, 1]              # quelle valeur de SPC_read_rates (1 à 8) est IN1, IN2, IN3, SYNC : à confirmer avec qc3_entrees.jl (la vérification compare au FIFO)
+temps_taux_s = 1.0               # s, intégration des compteurs de taux (rate_count_time) : la QC-104 applique 1 s
+taux = [2, 3, 4, 1]              # quelle valeur de SPC_read_rates (1 à 8) est IN1, IN2, IN3, SYNC : [2, 3, 4, 1] confirmé au banc le 2026-10-07 (comparé au flux)
 
 [verification]
 series = ["3T0089/IN1", "3T0089/IN2"] # canal 1 puis canal 2 : "<n° de série>/IN<entrée>" pour la QC-104 (3T0089/IN1), le n° de série de chaque carte pour les SPC-150N
@@ -521,24 +293,24 @@ sorties_numeriques = "b0"
 ==============================================================================
 Debug log: last records (with stack traces)
 ==============================================================================
-2026-10-07 15:17:56.725 INFO t1 FLIMApp app.jl:216 | ============================================================
-2026-10-07 15:17:57.421 INFO t1 FLIMApp app.jl:217 | FLIM Application Starting
-2026-10-07 15:17:57.421 INFO t1 FLIMApp app.jl:218 | ============================================================
-2026-10-07 15:17:57.487 INFO t1 FLIMApp app.jl:223 | Bench config loaded
+2026-10-07 15:34:14.690 INFO t1 FLIMApp app.jl:216 | ============================================================
+2026-10-07 15:34:15.409 INFO t1 FLIMApp app.jl:217 | FLIM Application Starting
+2026-10-07 15:34:15.409 INFO t1 FLIMApp app.jl:218 | ============================================================
+2026-10-07 15:34:15.475 INFO t1 FLIMApp app.jl:223 | Bench config loaded
     source = "C:\\Users\\Admin\\Desktop\\FLIMApp_2\\FLIMApp\\config\\bench.toml"
     backend = :ni
-2026-10-07 15:17:57.855 INFO t1 FLIMApp FLIMApp.jl:269 | Loaded saved state
+2026-10-07 15:34:15.786 INFO t1 FLIMApp FLIMApp.jl:269 | Loaded saved state
     theme = "dark"
-2026-10-07 15:17:58.263 INFO t1 FLIMApp FLIMApp.jl:293 | IRF loaded successfully
+2026-10-07 15:34:16.207 INFO t1 FLIMApp FLIMApp.jl:293 | IRF loaded successfully
     channels = 2
     size = (256, 2)
-    bin_size = 0.04886091184430619
-    window_size = 12.51
-2026-10-07 15:17:58.353 INFO t1 FLIMApp app.jl:233 | Warming up lifetime-fitting code paths (one-time JIT compilation)...
-2026-10-07 15:18:02.011 INFO t1 FLIMApp app.jl:236 | Warmup complete
-    seconds = 3.6
-2026-10-07 15:18:04.194 INFO t1 FLIMApp app.jl:61 | Start-up
-    versions = Dict{String, Any}("flimapp" => "0.1.0", "julia" => "1.13.1", "git_commit" => "d90673f", "spclite" => 12, "git_dirty" => false, "flimcore" => 8)
+    bin_size = 0.048828125
+    window_size = 12.5
+2026-10-07 15:34:16.294 INFO t1 FLIMApp app.jl:233 | Warming up lifetime-fitting code paths (one-time JIT compilation)...
+2026-10-07 15:34:19.766 INFO t1 FLIMApp app.jl:236 | Warmup complete
+    seconds = 3.4
+2026-10-07 15:34:22.062 INFO t1 FLIMApp app.jl:61 | Start-up
+    versions = Dict{String, Any}("flimapp" => "0.1.0", "julia" => "1.13.1", "git_commit" => "4b75080", "spclite" => 12, "git_dirty" => false, "flimcore" => 8)
     threads = "1 interactive + 4 default"
     os = "NT x86_64-w64-mingw32"
     bench_config = "C:\\Users\\Admin\\Desktop\\FLIMApp_2\\FLIMApp\\config\\bench.toml (backend ni)"
@@ -547,150 +319,58 @@ Debug log: last records (with stack traces)
     spc_dll = "C:\\Program Files (x86)\\BH\\SPCM\\DLL\\spcm64.dll"
     journal = "C:\\Users\\Admin\\FLIMApp_journal"
     recording_folder = "C:\\Users\\Admin\\FLIMApp_spc"
-    debug_log = "C:\\Users\\Admin\\FLIMApp_journal\\debug\\2026-10-07_151756_debug.log"
-2026-10-07 15:18:04.566 WARN t1 FLIMApp diagnostics.jl:230 | [FIT-01] IRF missing, or taken with other settings: channel 1: IRF from card 3N0317, but channel 1 is card 3T0089/IN1; channel 1: tac_range = 50.034 for the IRF, 16.384 now; channel 1: cfd_limit_high = 5.0196 for the IRF, -139.22 now; channel 1: tac_limit_high = 94.902 for the IRF, 12.85 now; channel 1: cfd_zc_level = 12.85 for the IRF, -139.22 now; channel 2: IRF from card 3N0318, but channel 2 is card 3T0089/IN2; channel 2: tac_range = 50.034 for the IRF, 16.384 now; channel 2: cfd_limit_high = 5.0196 for the IRF, -139.22 now; channel 2: tac_limit_high = 94.902 for the IRF, 12.85 now; channel 2: cfd_zc_level = 12.85 for the IRF, -139.22 now
-    problem = "FIT-01"
-    check = "Import a Single of the IRF taken with the current settings ([qc] or [spc_module]) and [dcc] gains (IRF button): SPCM's .sdt, or the SPC window's Single (its CSV). The log lists every difference."
-2026-10-07 15:18:04.712 INFO t1 FLIMApp app.jl:261 | Creating GUI...
-2026-10-07 15:18:09.421 INFO t3 FLIMApp hardware.jl:106 | NI-DAQmx 26.5.0; devices: S6110 (PCI-6110), X6321 (PCIe-6321); config needs X6321, S6110
-2026-10-07 15:18:26.610 INFO t1 FLIMApp FLIMApp.jl:184 | State saved
+    debug_log = "C:\\Users\\Admin\\FLIMApp_journal\\debug\\2026-10-07_153414_debug.log"
+2026-10-07 15:34:22.516 INFO t1 FLIMApp app.jl:261 | Creating GUI...
+2026-10-07 15:34:22.516 INFO t2 FLIMApp hardware.jl:106 | NI-DAQmx 26.5.0; devices: S6110 (PCI-6110), X6321 (PCIe-6321); config needs X6321, S6110
+2026-10-07 15:34:41.177 INFO t1 FLIMApp FLIMApp.jl:184 | State saved
     path = "C:\\Users\\Admin\\.flimapp\\AppState.jls"
-2026-10-07 15:18:36.216 WARN t1 FLIMApp diagnostics.jl:230 | [SPC-05] A card setting was not applied as requested: SPC check: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    problem = "SPC-05"
-    check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-2026-10-07 15:18:36.216 WARN t1 FLIMApp diagnostics.jl:230 | [SPC-05] A card setting was not applied as requested: SPC check: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    problem = "SPC-05"
-    check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-2026-10-07 15:18:38.235 INFO t1 FLIMApp spc_view.jl:506 | SPC check
+2026-10-07 15:34:50.234 WARN t1 FLIMApp diagnostics.jl:232 | [SPC-09] QC-104 rate counters don't match the stream: [qc] taux: SPC engine: module 0 (3T0089/IN1) : la carte affiche 3.38e+05 /s pour cette entrée, le flux en compte 1.25e+05 /s : [qc] taux de config/spc.toml à corriger (scripts qc3_entrees.jl) — le taux affiché pendant les mesures, lui, vient du flux
+    problem = "SPC-09"
+    check = "Which SPC_read_rates value is IN1, IN2, IN3, SYNC isn't documented: fix [qc] taux (qc3_entrees.jl tells). Only the display between measurements uses them; the check and the measurements count photons in the stream."
+2026-10-07 15:34:50.244 WARN t1 FLIMApp diagnostics.jl:232 | [SPC-09] QC-104 rate counters don't match the stream: [qc] taux: SPC engine: module 1 (3T0089/IN2) : la carte affiche 1.03e+06 /s pour cette entrée, le flux en compte 3.79e+05 /s : [qc] taux de config/spc.toml à corriger (scripts qc3_entrees.jl) — le taux affiché pendant les mesures, lui, vient du flux
+    problem = "SPC-09"
+    check = "Which SPC_read_rates value is IN1, IN2, IN3, SYNC isn't documented: fix [qc] taux (qc3_entrees.jl tells). Only the display between measurements uses them; the check and the measurements count photons in the stream."
+2026-10-07 15:34:52.270 INFO t1 FLIMApp spc_view.jl:506 | SPC check
     source = "qc104"
-    ok = false
-    cards = "module 0: 3T0089/IN1 channel 1 ready, SYNC 1, CFD 7.6e+03; module 1: 3T0089/IN2 channel 2 ready, SYNC 1, CFD 4.96e+04"
-2026-10-07 15:18:38.265 WARN t1 FLIMApp diagnostics.jl:230 | [SPC-05] A card setting was not applied as requested: SPC engine: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    problem = "SPC-05"
-    check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-2026-10-07 15:18:38.265 WARN t1 FLIMApp diagnostics.jl:230 | [SPC-05] A card setting was not applied as requested: SPC engine: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    problem = "SPC-05"
-    check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-2026-10-07 15:18:38.531 INFO t1 FLIMApp app.jl:268 | Debug log: C:\Users\Admin\FLIMApp_journal\debug\2026-10-07_151756_debug.log
-2026-10-07 15:18:38.531 INFO t1 FLIMApp app.jl:274 | ============================================================
-2026-10-07 15:18:39.322 INFO t1 FLIMApp app.jl:275 | Application ready
-2026-10-07 15:18:39.532 INFO t1 FLIMApp app.jl:276 | ============================================================
-2026-10-07 15:19:38.675 INFO t1 FLIMApp handlers.jl:162 | IRF imported
-    path = "C:\\Users\\Admin\\Desktop\\FLIMApp_2\\FLIMApp\\irf_16x_750nm_ch1.sdt"
-    channels = 2
-2026-10-07 15:19:38.679 INFO t1 FLIMApp FLIMApp.jl:293 | IRF loaded successfully
-    channels = 2
-    size = (256, 2)
-    bin_size = 0.048828125
-    window_size = 12.5
-2026-10-07 15:19:44.092 INFO t1 FLIMApp runtime.jl:369 | Starting acquisition
-2026-10-07 15:19:44.826 INFO t1 FLIMApp runtime.jl:402 | Realtime run started
-    session = "C:\\Users\\Admin\\FLIMApp_spc\\sessions\\2026-10-07_151944"
+    ok = true
+    cards = "module 0: 3T0089/IN1 channel 1 ready, SYNC 1, CFD 1.25e+05; module 1: 3T0089/IN2 channel 2 ready, SYNC 1, CFD 3.79e+05"
+2026-10-07 15:34:52.600 INFO t1 FLIMApp app.jl:268 | Debug log: C:\Users\Admin\FLIMApp_journal\debug\2026-10-07_153414_debug.log
+2026-10-07 15:34:52.600 INFO t1 FLIMApp app.jl:274 | ============================================================
+2026-10-07 15:34:53.438 INFO t1 FLIMApp app.jl:275 | Application ready
+2026-10-07 15:34:53.630 INFO t1 FLIMApp app.jl:276 | ============================================================
+2026-10-07 15:35:10.930 INFO t1 FLIMApp runtime.jl:369 | Starting acquisition
+2026-10-07 15:35:11.701 INFO t1 FLIMApp runtime.jl:402 | Realtime run started
+    session = "C:\\Users\\Admin\\FLIMApp_spc\\sessions\\2026-10-07_153511"
     rois = 0
     order = Int64[]
     roi_active = false
     scan_ms = 240
     shift_ms = 10
-2026-10-07 15:19:45.510 WARN t3 FLIMApp daq_loop.jl:280 | deadline of 250.0 ms leaves little room for garbage-collector pauses; longer slots or a larger timing.lead_slots (config/bench.toml) give more
-2026-10-07 15:19:46.846 INFO t5 FLIMApp acquisition.jl:376 | Real-time worker started on thread 5
-2026-10-07 15:19:47.722 WARN t1 FLIMApp diagnostics.jl:230 | [SPC-05] A card setting was not applied as requested: SPC engine: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    problem = "SPC-05"
-    check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-2026-10-07 15:19:47.722 WARN t1 FLIMApp diagnostics.jl:230 | [SPC-05] A card setting was not applied as requested: SPC engine: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    problem = "SPC-05"
-    check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-2026-10-07 15:19:48.183 ERROR t3 FLIMApp diagnostics.jl:224 | [DAQ-08] DAQ error during a scan: outputs zeroed (FAULT): scan, slot 0, writing the entry and the first slots: DAQmx -89125: No registered trigger lines could be found between the devices in the route.
-    problem = "DAQ-08"
-    check = "The message gives the step and the DAQmx code; RESET acknowledges it. The debug log has the full DAQmx message."
-    exception =
-        scan, slot 0, writing the entry and the first slots: DAQmx -89125 : No registered trigger lines could be found between the devices in the route.
-        
-        If you have a PXI chassis, identify the chassis correctly in MAX, and make sure it has been configured properly. If you are using PCI devices, make sure they are connected with a RTSI cable and that the RTSI cable is registered in MAX. Otherwise, make sure there is an available trigger line on the trigger bus shared between the devices.
-        
-        Source Device: X6321
-        Destination Device: S6110
-        
-        Task Name: flimapp_commands
-        
-        Status Code: -89125
-        Stacktrace:
-         [1] chk(code::Int32)
-           @ FLIMApp.DAQmx C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:82
-         [2] #write_analog#7
-           @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:215 [inlined]
-         [3] write_analog
-           @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:211 [inlined]
-         [4] hw_write!(hw::FLIMApp.NIHardware, buffers::FLIMApp.SlotBuffers)
-           @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\hardware.jl:203
-         [5] run_scan!(hw::FLIMApp.NIHardware, cfg::FLIMApp.BenchConfig, ex::FLIMApp.Exchange, request::FLIMApp.ScanRequest)
-           @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:292
-         [6] daq_loop(cfg::FLIMApp.BenchConfig, ex::FLIMApp.Exchange; hardware::FLIMApp.NIHardware)
-           @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:58
-         [7] daq_loop
-           @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:31 [inlined]
-         [8] (::FLIMApp.var"#start_background_threads!##0#start_background_threads!##1"{FLIMApp.Exchange, FLIMApp.BenchConfig})()
-           @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\app.jl:115
-2026-10-07 15:19:49.423 INFO t5 FLIMApp acquisition.jl:485 | Real-time worker finished
-2026-10-07 15:19:49.562 WARN t1 FLIMApp diagnostics.jl:230 | [SPC-10] QC-104: photons or records set aside by the translation: SPC engine: QC-104 : 94 photon(s) au-delà de [qc] fenetre_ns (12.5 ns) jetés : fenêtre plus courte que la période du laser, diviseur_sync > 1, ou decalage_ns qui pousse le déclin au bout
-    problem = "SPC-10"
-    check = "Beyond [qc] fenetre_ns: the window shorter than the laser period, diviseur_sync > 1, or decalage_ns pushing the decay to its end. An input without a channel: [verification] series. Unknown records: the QC-104's FIFO format (SPCLite.FORMAT_QC104) needs another look."
-2026-10-07 15:19:49.634 WARN t1 FLIMApp diagnostics.jl:230 | [PASS-09] No pass signal generated: the DAQ loop played no slot during the measurement: no M0 edge on any card in 1.8 s, and the DAQ loop played no slot
-    problem = "PASS-09"
-    check = "The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault)."
-2026-10-07 15:19:50.602 INFO t1 FLIMApp refresh.jl:494 | Run debug report written
-    path = "C:\\Users\\Admin\\FLIMApp_spc\\sessions\\2026-10-07_151944\\debug_report.txt"
-2026-10-07 15:20:04.244 INFO t3 FLIMApp hardware.jl:106 | NI-DAQmx 26.5.0; devices: S6110 (PCI-6110), X6321 (PCIe-6321); config needs X6321, S6110
-2026-10-07 15:20:55.650 INFO t1 FLIMApp runtime.jl:369 | Starting acquisition
-2026-10-07 15:20:55.684 INFO t1 FLIMApp runtime.jl:402 | Realtime run started
-    session = "C:\\Users\\Admin\\FLIMApp_spc\\sessions\\2026-10-07_152055"
-    rois = 0
-    order = Int64[]
-    roi_active = false
-    scan_ms = 240
-    shift_ms = 10
-2026-10-07 15:20:55.688 INFO t4 FLIMApp acquisition.jl:376 | Real-time worker started on thread 4
-2026-10-07 15:20:55.688 WARN t3 FLIMApp daq_loop.jl:280 | deadline of 250.0 ms leaves little room for garbage-collector pauses; longer slots or a larger timing.lead_slots (config/bench.toml) give more
-2026-10-07 15:20:55.746 WARN t1 FLIMApp diagnostics.jl:230 | [SPC-05] A card setting was not applied as requested: SPC engine: module 0 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    problem = "SPC-05"
-    check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-2026-10-07 15:20:55.747 WARN t1 FLIMApp diagnostics.jl:230 | [SPC-05] A card setting was not applied as requested: SPC engine: module 1 : réglage non appliqué, rate_count_time demandé 0.25, appliqué 1
-    problem = "SPC-05"
-    check = "The SPC window lists requested → applied; a value out of range in [qc] (QC-104), or a key unknown to the DLL in [spc_module] (SPC-150N)."
-2026-10-07 15:20:55.767 ERROR t3 FLIMApp diagnostics.jl:224 | [DAQ-08] DAQ error during a scan: outputs zeroed (FAULT): scan, slot 0, writing the entry and the first slots: DAQmx -89125: No registered trigger lines could be found between the devices in the route.
-    problem = "DAQ-08"
-    check = "The message gives the step and the DAQmx code; RESET acknowledges it. The debug log has the full DAQmx message."
-    exception =
-        scan, slot 0, writing the entry and the first slots: DAQmx -89125 : No registered trigger lines could be found between the devices in the route.
-        
-        If you have a PXI chassis, identify the chassis correctly in MAX, and make sure it has been configured properly. If you are using PCI devices, make sure they are connected with a RTSI cable and that the RTSI cable is registered in MAX. Otherwise, make sure there is an available trigger line on the trigger bus shared between the devices.
-        
-        Source Device: X6321
-        Destination Device: S6110
-        
-        Task Name: flimapp_commands
-        
-        Status Code: -89125
-        Stacktrace:
-         [1] chk(code::Int32)
-           @ FLIMApp.DAQmx C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:82
-         [2] #write_analog#7
-           @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:215 [inlined]
-         [3] write_analog
-           @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\DAQmx.jl:211 [inlined]
-         [4] hw_write!(hw::FLIMApp.NIHardware, buffers::FLIMApp.SlotBuffers)
-           @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\hardware.jl:203
-         [5] run_scan!(hw::FLIMApp.NIHardware, cfg::FLIMApp.BenchConfig, ex::FLIMApp.Exchange, request::FLIMApp.ScanRequest)
-           @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:292
-         [6] daq_loop(cfg::FLIMApp.BenchConfig, ex::FLIMApp.Exchange; hardware::FLIMApp.NIHardware)
-           @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:58
-         [7] daq_loop
-           @ C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:31 [inlined]
-         [8] (::FLIMApp.var"#start_background_threads!##0#start_background_threads!##1"{FLIMApp.Exchange, FLIMApp.BenchConfig})()
-           @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\app.jl:115
-2026-10-07 15:20:58.700 INFO t4 FLIMApp acquisition.jl:485 | Real-time worker finished
-2026-10-07 15:20:58.732 WARN t1 FLIMApp diagnostics.jl:230 | [SPC-10] QC-104: photons or records set aside by the translation: SPC engine: QC-104 : 145 photon(s) au-delà de [qc] fenetre_ns (12.5 ns) jetés : fenêtre plus courte que la période du laser, diviseur_sync > 1, ou decalage_ns qui pousse le déclin au bout
-    problem = "SPC-10"
-    check = "Beyond [qc] fenetre_ns: the window shorter than the laser period, diviseur_sync > 1, or decalage_ns pushing the decay to its end. An input without a channel: [verification] series. Unknown records: the QC-104's FIFO format (SPCLite.FORMAT_QC104) needs another look."
-2026-10-07 15:20:58.736 WARN t1 FLIMApp diagnostics.jl:230 | [PASS-09] No pass signal generated: the DAQ loop played no slot during the measurement: no M0 edge on any card in 3.0 s, and the DAQ loop played no slot
-    problem = "PASS-09"
-    check = "The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault)."
+2026-10-07 15:35:12.409 WARN t5 FLIMApp daq_loop.jl:280 | deadline of 250.0 ms leaves little room for garbage-collector pauses; longer slots or a larger timing.lead_slots (config/bench.toml) give more
+2026-10-07 15:35:13.667 INFO t2 FLIMApp acquisition.jl:376 | Real-time worker started on thread 2
+2026-10-07 15:35:15.730 WARN t1 FLIMApp diagnostics.jl:232 | [PASS-08] Many photons with a ROI code outside the passes: card 0 (channel 1, 3T0089/IN1): 16502 ROI-coded photons outside the passes, 305673 inside
+    problem = "PASS-08"
+    check = "The routing code and the pass signal are offset in time; normally only a few photons at the edges."
+2026-10-07 15:35:15.747 WARN t1 FLIMApp diagnostics.jl:232 | [PASS-08] Many photons with a ROI code outside the passes: card 1 (channel 2, 3T0089/IN2): 50217 ROI-coded photons outside the passes, 928705 inside
+    problem = "PASS-08"
+    check = "The routing code and the pass signal are offset in time; normally only a few photons at the edges."
+2026-10-07 15:35:33.853 INFO t1 FLIMApp runtime.jl:609 | Stopping acquisition
+2026-10-07 15:35:33.853 INFO t2 FLIMApp acquisition.jl:485 | Real-time worker finished
+
+
+
+┌ Warning: deadline of 250.0 ms leaves little room for garbage-collector pauses; longer slots or a larger timing.lead_slots (config/bench.toml) give more
+└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\loop\daq_loop.jl:280
+[ Info: Real-time worker started on thread 2
+┌ Warning: [PASS-08] Many photons with a ROI code outside the passes: card 0 (channel 1, 3T0089/IN1): 16502 ROI-coded photons outside the passes, 305673 inside
+│   problem = "PASS-08"
+│   check = "The routing code and the pass signal are offset in time; normally only a few photons at the edges."
+└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:232
+┌ Warning: [PASS-08] Many photons with a ROI code outside the passes: card 1 (channel 2, 3T0089/IN2): 50217 ROI-coded photons outside the passes, 928705 inside
+│   problem = "PASS-08"
+│   check = "The routing code and the pass signal are offset in time; normally only a few photons at the edges."
+└ @ FLIMApp C:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\src\diagnostics.jl:232
+[ Info: Stopping acquisition
+[ Info: Real-time worker finished
+┌ Info: Run debug report written
+└   path = "C:\\Users\\Admin\\FLIMApp_spc\\sessions\\2026-10-07_153511\\debug_report.txt"
