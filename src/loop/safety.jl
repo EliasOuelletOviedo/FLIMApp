@@ -66,6 +66,8 @@ end
 
 missed_deadline(e) = (e = root_cause(e); e isa DAQmx.DAQmxError && e.code in DAQmx.CODES_ECHEANCE_MANQUEE)
 read_fell_behind(e) = (e = root_cause(e); e isa DAQmx.DAQmxError && e.code in DAQmx.CODES_LECTURE_EN_RETARD)
+"""No trigger line between the NI cards: the sample clock can't reach the 6110 (RTSI cable)."""
+rtsi_route_missing(e) = (e = root_cause(e); e isa DAQmx.DAQmxError && e.code in DAQmx.CODES_ROUTE_RTSI)
 
 """
     describe_loop_error(e)::String
@@ -107,6 +109,7 @@ function loop_problem_id(e, phase::Symbol)::String
     cause isa SafetyError && return "DAQ-07"
     missed_deadline(cause) && return "DAQ-05"
     read_fell_behind(cause) && return "DAQ-06"
+    rtsi_route_missing(cause) && return "DAQ-10"
     occursin("NI device(s) not found", sprint(showerror, cause)) && return "DAQ-01"
     occursin("pass counter", contexts) && return "DAQ-04"
     (occursin("resetting", contexts) || occursin("zeroing", contexts)) && return "DAQ-02"

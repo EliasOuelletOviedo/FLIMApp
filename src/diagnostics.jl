@@ -73,6 +73,8 @@ const PROBLEM_LIST = Problem[
             "The message gives the step and the DAQmx code; RESET acknowledges it. The debug log has the full DAQmx message."),
     Problem("DAQ-09", "DAQ connection failed",
             "The message gives the step and the reason; RECONNECT once fixed."),
+    Problem("DAQ-10", "No RTSI route between the NI cards: the sample clock can't reach the 6110",
+            "The RTSI cable between the PCIe-6321 and the PCI-6110 must be plugged and registered in NI MAX: Devices and Interfaces → right-click → Create New… → NI-DAQmx RTSI Cable, then add both cards to it (each card's Properties → RTSI cable). Moving or adding a PCI card can undo it. Then RECONNECT."),
     # --- SPC card (SPC-QC-104, or SPC-150N) and engine ---
     Problem("SPC-01", "SPC cards: initialization failed",
             "SPCM must be closed; the cards must be seen by the PC (chassis powered before the PC); UNLOCK if a crashed session left them locked."),

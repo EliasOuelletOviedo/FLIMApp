@@ -40,8 +40,8 @@ diviseur_sync = 1                # 1, 2 ou 4 : à 1, chaque impulsion du laser s
 retard_routage_ns = 0            # lecture du routage après le photon (-57 à 65 ns, pas de 8,192)
 limite_basse_pct = 5.0           # « Limit Low » de SPCM, % de la plage du TDC coupés au début (la DLL met 10 % sans cette clé)
 photon_unique = false            # true : un photon par période du laser ; false : détection multiphoton
-temps_taux_s = 0.25              # s, intégration des compteurs de taux (rate_count_time)
-taux = [2, 3, 4, 1]              # quelle valeur de SPC_read_rates (1 à 8) est IN1, IN2, IN3, SYNC : à confirmer avec qc3_entrees.jl (la vérification compare au FIFO)
+temps_taux_s = 1.0               # s, intégration des compteurs de taux (rate_count_time) : la QC-104 applique 1 s
+taux = [2, 3, 4, 1]              # quelle valeur de SPC_read_rates (1 à 8) est IN1, IN2, IN3, SYNC : [2, 3, 4, 1] confirmé au banc le 2026-10-07 (comparé au flux)
 
 [verification]
 series = ["3T0089/IN1", "3T0089/IN2"] # canal 1 puis canal 2 : "<n° de série>/IN<entrée>" pour la QC-104 (3T0089/IN1), le n° de série de chaque carte pour les SPC-150N

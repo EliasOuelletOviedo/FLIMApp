@@ -854,10 +854,19 @@ end
     h = [sum(reverse(d.adc)[16(k - 1) + 1:16k]) for k in 1:256]
     @test d.photons == 400_000 && s.hors_fenetre == 1 && s.autres_entrees == 1
     @test maximum(abs.(h .- 1562.5)) < 5 * sqrt(1562.5)            # Poisson seul, pas de ±4 %
-    # Ce qui a été écarté est dit à la fin de la mesure (SPC-10), une fois.
+    # Ce qui a été écarté est dit à la fin de la mesure (SPC-10), une fois ; quelques photons au bord de
+    # la période (ici 1 sur 400 001), non : seulement au-delà de 0,1 %.
     bilan = FLIMCore.bilan_source!(s)
-    @test occursin("1 photon(s) au-delà de [qc] fenetre_ns", bilan) && occursin("1 photon(s) d'une entrée sans canal", bilan)
+    @test !occursin("au-delà", bilan) && occursin("1 photon(s) d'une entrée sans canal", bilan)
     @test FLIMCore.bilan_source!(s) == ""
+    e = FLIMCore.EncodeurQC()
+    foreach(t -> FLIMCore.photon_qc!(e, 3t, t <= 990 ? 1000 : 3500; entree = 2), 1:1000)    # 10 au-delà de 12,5 ns
+    s = FLIMCore.SourceQC(FLIMCore.QCRejeu(e.mots))
+    FLIMCore.ouvrir!(s, r)
+    FLIMCore.configurer!(s, 1, FLIMCore.parametres_clamp(r)[1], joinpath(r.dossier, "p.ini"))
+    FLIMCore.lancer!(s, 1)
+    FLIMCore.lire_mots!(s, 1, tampon)
+    @test occursin("10 photon(s) sur 1000 au-delà de [qc] fenetre_ns", FLIMCore.bilan_source!(s))
 end
 
 """Un Realtime à travers la QC-104 imaginaire : (histogrammes, EtatClamp final, alertes, fichiers)."""

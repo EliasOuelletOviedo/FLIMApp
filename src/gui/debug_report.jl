@@ -128,7 +128,8 @@ function debug_report_text(app_run; app = nothing)::String
             println(io, "  no Realtime counters yet")
         else
             foreach(l -> println(io, "  ", l), pass_status_lines(status))
-            diagnoses = diagnose_passes(status)
+            # Realtime: whether the DAQ loop played any slot (no pass signal at all: PASS-09, not wiring).
+            diagnoses = diagnose_passes(status; daq_slots = app_run.run_mode == "Realtime" ? app_run.display.loop_slots : nothing)
             println(io, "  diagnosis: ", isempty(diagnoses) ? "nothing wrong" : "")
             foreach(d -> println(io, "    ", problem_text(d.id, d.detail)), diagnoses)
         end

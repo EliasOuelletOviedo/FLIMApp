@@ -574,6 +574,9 @@ end
     deadline = FLIMApp.ContextError("scan, slot 12, reading the readback", FLIMApp.DAQmx.DAQmxError(FLIMApp.DAQmx.CODES_ECHEANCE_MANQUEE[1], "x"), [])
     @test FLIMApp.loop_problem_id(deadline, :scan) == "DAQ-05" && FLIMApp.missed_deadline(deadline)
     @test FLIMApp.loop_problem_id(FLIMApp.SafetyError("galvo"), :scan) == "DAQ-07"
+    rtsi = FLIMApp.ContextError("scan, slot 0, writing the entry and the first slots",
+                                FLIMApp.DAQmx.DAQmxError(Int32(-89125), "No registered trigger lines could be found between the devices in the route."), [])
+    @test FLIMApp.loop_problem_id(rtsi, :scan) == "DAQ-10" && FLIMApp.loop_problem_id(rtsi, :connect) == "DAQ-10"
     @test FLIMApp.loop_problem_id(ErrorException("NI device(s) not found: X6321 (seen: Dev1 (PCIe-6321))"), :connect) == "DAQ-01"
     @test FLIMApp.loop_problem_id(FLIMApp.ContextError("creating the galvo AO task", ErrorException("x"), []), :connect) == "DAQ-03"
     @test FLIMApp.loop_problem_id(ErrorException("x"), :connect) == "DAQ-09"

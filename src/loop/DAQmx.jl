@@ -144,6 +144,16 @@ function create_task(name::AbstractString = "")
 end
 
 start_task(th) = chk(ccall((:DAQmxStartTask, LIB), Int32, (TaskHandle,), th))
+
+const Val_Task_Commit = Int32(3)
+
+"""
+    task_control(th, action)
+
+DAQmxTaskControl. `Val_Task_Commit` : programme la carte et réserve les
+routes sans démarrer — de quoi voir une route impossible avant la mesure.
+"""
+task_control(th, action::Integer) = chk(ccall((:DAQmxTaskControl, LIB), Int32, (TaskHandle, Int32), th, Int32(action)))
 stop_task(th)  = chk(ccall((:DAQmxStopTask,  LIB), Int32, (TaskHandle,), th))
 clear_task(th) = chk(ccall((:DAQmxClearTask, LIB), Int32, (TaskHandle,), th))
 
@@ -453,7 +463,7 @@ cfg_output_buffer(th, n::Integer) =
 export read_analog_into!, num_chans, cfg_input_buffer
 export create_watchdog, cfg_watchdog_do_expir_states, control_watchdog
 export Val_High, Val_Tristate, Val_ResetTimer, Val_ClearExpiration
-export CODES_ECHEANCE_MANQUEE, CODES_LECTURE_EN_RETARD
+export CODES_ECHEANCE_MANQUEE, CODES_LECTURE_EN_RETARD, CODES_ROUTE_RTSI
 
 const Val_High            = Int32(10192)
 const Val_Tristate        = Int32(10310)
@@ -468,6 +478,12 @@ const CODES_ECHEANCE_MANQUEE = (Int32(-200290), Int32(-200016), Int32(-200621))
 
 """Relecture débordée : la boucle n'a pas lu assez tôt."""
 const CODES_LECTURE_EN_RETARD = (Int32(-200279), Int32(-200361))
+
+"""
+Route impossible entre deux cartes : aucune ligne de déclenchement
+enregistrée entre elles (câble RTSI débranché, ou absent de NI MAX).
+"""
+const CODES_ROUTE_RTSI = (Int32(-89125),)
 
 """
     read_analog_into!(th, tampon, premier, nsamp, nlus; timeout=1.0)

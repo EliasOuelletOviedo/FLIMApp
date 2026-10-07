@@ -114,6 +114,40 @@ function hw_connect!(hw::NIHardware)
         end
     end
     hw_zero!(hw)
+    check_clock_route(hw.cfg)
+    return nothing
+end
+
+"""
+    check_clock_route(cfg)
+
+The command AO (`channels.commands`, on the 6110) counts the 6321's sample
+clock (`channels.clock`) through the RTSI cable. A throwaway task with that
+clock is committed (`DAQmx.task_control`), which reserves the route: a
+missing one — the RTSI cable unplugged, or not registered in NI MAX, after
+moving a card — fails here, at CONNECT (DAQmx -89125, DAQ-10), instead of
+at the first write of a START. Any other error of this check is only
+logged: the scan reports it with its own context.
+"""
+function check_clock_route(cfg::BenchConfig)
+    device(spec) = String(first(split(lstrip(spec, '/'), '/')))
+    (isempty(cfg.command_channels) || device(cfg.clock_source) == device(cfg.command_channels)) && return nothing
+    with_context("checking the RTSI route of the sample clock ($(cfg.clock_source) → $(device(cfg.command_channels)))") do
+        th = DAQmx.create_task("flimapp_route_check")
+        try
+            DAQmx.add_ao_voltage(th, cfg.command_channels; minv = 0.0, maxv = cfg.command_max_v)
+            DAQmx.cfg_sample_clock(th, cfg.sample_rate_hz; source = cfg.clock_source, mode = DAQmx.Val_ContSamps, nsamp = 1000)
+            DAQmx.task_control(th, DAQmx.Val_Task_Commit)
+        catch e
+            e isa DAQmx.DAQmxError && e.code in DAQmx.CODES_ROUTE_RTSI && rethrow()
+            @warn "Clock route check inconclusive: the scan will tell" exception = e
+        finally
+            try
+                DAQmx.clear_task(th)
+            catch
+            end
+        end
+    end
     return nothing
 end
 

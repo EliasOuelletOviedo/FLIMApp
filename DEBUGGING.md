@@ -72,6 +72,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 | DAQ-07 | Scan refused before reaching the card | The message says which limit: galvo range (ROI popup X/Y min/max), more than 15 ROIs, a scan or pause shorter than 2 samples. |
 | DAQ-08 | DAQ error during a scan: outputs zeroed (FAULT) | The message gives the step and the DAQmx code; RESET acknowledges it. The debug log has the full DAQmx message. |
 | DAQ-09 | DAQ connection failed | The message gives the step and the reason; RECONNECT once fixed. |
+| DAQ-10 | No RTSI route between the NI cards: the sample clock can't reach the 6110 | The RTSI cable between the PCIe-6321 and the PCI-6110 must be plugged and registered in NI MAX: Devices and Interfaces → right-click → Create New… → NI-DAQmx RTSI Cable, then add both cards to it (each card's Properties → RTSI cable). Moving or adding a PCI card can undo it. Then RECONNECT. |
 
 ### SPC card (SPC-QC-104, or SPC-150N) and engine
 

@@ -118,7 +118,7 @@ Base.@kwdef mutable struct Reglages
     qc_retard_routage_ns::Int = 0
     qc_limite_basse_pct::Float64 = 5.0
     qc_photon_unique::Bool = false
-    qc_temps_taux_s::Float64 = 0.25
+    qc_temps_taux_s::Float64 = 1.0
     qc_taux::Vector{Int} = [2, 3, 4, 1]
     # [verification]
     series::Vector{String} = ["3T0089/IN1", "3T0089/IN2"]
@@ -174,8 +174,8 @@ const CLES_REGLAGES = [
     ("qc", "retard_routage_ns", :qc_retard_routage_ns, "lecture du routage après le photon (-57 à 65 ns, pas de 8,192)"),
     ("qc", "limite_basse_pct", :qc_limite_basse_pct, "« Limit Low » de SPCM, % de la plage du TDC coupés au début (la DLL met 10 % sans cette clé)"),
     ("qc", "photon_unique", :qc_photon_unique, "true : un photon par période du laser ; false : détection multiphoton"),
-    ("qc", "temps_taux_s", :qc_temps_taux_s, "s, intégration des compteurs de taux (rate_count_time)"),
-    ("qc", "taux", :qc_taux, "quelle valeur de SPC_read_rates (1 à 8) est IN1, IN2, IN3, SYNC : à confirmer avec qc3_entrees.jl (la vérification compare au FIFO)"),
+    ("qc", "temps_taux_s", :qc_temps_taux_s, "s, intégration des compteurs de taux (rate_count_time) : la QC-104 applique 1 s"),
+    ("qc", "taux", :qc_taux, "quelle valeur de SPC_read_rates (1 à 8) est IN1, IN2, IN3, SYNC : [2, 3, 4, 1] confirmé au banc le 2026-10-07 (comparé au flux)"),
     ("verification", "series", :series, "canal 1 puis canal 2 : \"<n° de série>/IN<entrée>\" pour la QC-104 (3T0089/IN1), le n° de série de chaque carte pour les SPC-150N"),
     ("verification", "seuil_cfd", :seuil_cfd, "/s : en dessous, détecteurs éteints (Enable outputs dans le logiciel DCC ?)"),
     ("imagerie", "modules", :modules_imagerie, "cartes enregistrées"),

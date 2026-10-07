@@ -258,13 +258,14 @@ mutable struct SourceQC <: Source
     autres_entrees::Int
     inattendus::Int
     desordre::Int
+    photons_total::Int                 # photons gardés depuis le dernier bilan
 end
 
 SourceQC(carte::CarteQC = QCDll()) =
     SourceQC(carte, Int[], zeros(Int, 4), "", "", "", false, -1, 16.384, 12.5, [2, 3, 4, 1], Alea(104),
              zeros(UInt16, 1 << 21), EncodeurFifo[], 0, 0x0000, false, Set{Int}(), false, false, nothing,
              Dict{String,Float64}(), false, 1.0, true, 8, Vector{Int}[], false, 0.0, 0x0000, Int[], Float64[],
-             0, 0, 0, 0)
+             0, 0, 0, 0, 0)
 
 """
     source_qc_brut(fichier; vitesse=0.0) -> SourceQC
@@ -381,12 +382,16 @@ fenetre_tac(s::SourceQC, k, lus) = s.fenetre_ns
 
 function bilan_source!(s::SourceQC)
     parts = String[]
-    s.hors_fenetre > 0 && push!(parts, "$(s.hors_fenetre) photon(s) au-delà de [qc] fenetre_ns ($(s.fenetre_ns) ns) jetés : " *
+    # Quelques photons au-delà de la fenêtre, c'est le bord de la période (SYNC à 80,1 MHz : 12,48 ns) :
+    # dit seulement au-delà de 0,1 % des photons.
+    garde = s.photons_total
+    s.hors_fenetre > 0.001 * max(garde, 1) && push!(parts, "$(s.hors_fenetre) photon(s) sur $(garde + s.hors_fenetre) au-delà de [qc] fenetre_ns ($(s.fenetre_ns) ns) jetés : " *
                                        "fenêtre plus courte que la période du laser, diviseur_sync > 1, ou decalage_ns qui pousse le déclin au bout")
     s.autres_entrees > 0 && push!(parts, "$(s.autres_entrees) photon(s) d'une entrée sans canal ([verification] series) jetés")
     s.inattendus > 0 && push!(parts, "$(s.inattendus) enregistrement(s) d'un type inconnu (format FIFO de la QC-104 à revoir)")
     s.desordre > 0 && push!(parts, "$(s.desordre) événement(s) antérieur(s) au débordement précédent, gardés à ce temps")
     s.hors_fenetre = s.autres_entrees = s.inattendus = s.desordre = 0
+    s.photons_total = 0
     return isempty(parts) ? "" : "QC-104 : " * join(parts, " ; ")
 end
 infos_fifo(s::SourceQC, k::Integer) = (horloge_macro_s = qc_tic_s(s.carte), entete = 0x00000000)
@@ -574,6 +579,7 @@ end
             return nothing
         end
         s.photons[k] += 1
+        s.photons_total += 1
         if s.single
             h = s.histos[k]
             h[(a * length(h)) ÷ 4096 + 1] += 1
