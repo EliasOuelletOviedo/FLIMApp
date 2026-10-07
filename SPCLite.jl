@@ -45,7 +45,7 @@ module SPCLite
 using Libdl, Printf
 
 """Version de ce fichier : les scripts s'arrêtent si Julia en a chargé une plus ancienne."""
-const VERSION_LITE = 11
+const VERSION_LITE = 12
 
 export SPCError, chk_spc, message_erreur, DLL_SPCM
 export ecrire_ini, lire_ini, avec_spc, avec_spc_tous, initialiser, liberer, liberer_tous
@@ -730,6 +730,10 @@ end
 #   points par courbe          : adc_resolution, en bits (FIFO : toujours 4096)
 #   retard de lecture du routage : ext_latch_delay, -57 à 65 ns par pas de 8,192
 #   décalage par entrée        : tdc_offset1 à tdc_offset4, 0 à 32,256 ns par pas de 0,512
+#   limite basse de la fenêtre : tac_limit_low, en % de la plage (« Limit Low » de SPCM).
+#                                Défaut de la DLL : 10 %, soit les 1,64 premières ns coupées à
+#                                16,384 ns (vu sur la carte : rien sous le canal 411).
+#                                parametres_qc écrit toujours 0 (ou limite_basse_pct).
 #   entrées actives, routage, mode photon : tdc_control (bits ci-dessous)
 #   mode                       : 0 histogramme, 1 FIFO, 13 FIFO en temps absolu
 #   macro_time_clk             : 0 = 2,048 ns en FIFO, 4 ps en temps absolu
@@ -789,10 +793,12 @@ Traduit les réglages de reglages_qc.jl (noms clairs) en clés de la DLL
 pour la QC-104. Clés attendues dans `r` : "seuil_mV", "zc_mV",
 "decalage_ns" (4 valeurs : IN1, IN2, IN3, SYNC), "entrees_actives"
 (4 booléens), "routage_entrees" (3 booléens), "photon_unique",
-"plage_tdc_ns", "diviseur_sync", "retard_routage_ns". Les clés absentes
-ne sont pas écrites (la DLL garde alors sa valeur par défaut, sauf
-tdc_control, toujours écrit : sa valeur par défaut 0 coupe toutes les
-entrées).
+"plage_tdc_ns", "diviseur_sync", "retard_routage_ns", "limite_basse_pct".
+Les clés absentes ne sont pas écrites (la DLL garde alors sa valeur par
+défaut), sauf trois, toujours écrites : tdc_control (son défaut, 0, coupe
+toutes les entrées), stop_on_ovfl = 0 et tac_limit_low (défaut de la DLL :
+10 % de la plage coupés au début de la fenêtre ; ici 0 sauf si
+"limite_basse_pct" dit autre chose).
 """
 function parametres_qc(r::AbstractDict)
     p = Dict{String,Any}()
@@ -829,6 +835,11 @@ function parametres_qc(r::AbstractDict)
     # Pas d'arrêt sur débordement : la valeur par défaut de la DLL (1) n'a pas de sens en
     # FIFO et pourrait empêcher la QC-104 de s'armer. qc6 (histogramme) la remet à 1.
     p["stop_on_ovfl"] = 0
+    # Limite basse de la fenêtre (« Limit Low » de SPCM) : la DLL met 10 % par défaut, ce qui
+    # coupe le début du déclin (1,64 ns à 16,384 ns de plage). Toujours écrite.
+    lb = Float64(get(r, "limite_basse_pct", 0.0))
+    0.0 <= lb <= 100.0 || error("limite_basse_pct : $lb hors de 0 à 100 %")
+    p["tac_limit_low"] = lb
     p["tdc_control"] = controle_tdc(get(r, "entrees_actives", (true, true, true, true)),
                                     get(r, "routage_entrees", (true, true, true)),
                                     Bool(get(r, "photon_unique", false)))
@@ -867,7 +878,8 @@ function afficher_qc(reglages::AbstractDict, lus::AbstractDict; io::IO = stdout)
         push!(lignes, ("décalage $n (ns)", CLES_QC.decalage[i]))
     end
     append!(lignes, [("plage du TDC (ns)", "tac_range"), ("diviseur du SYNC", "sync_freq_div"),
-                     ("retard du routage (ns)", "ext_latch_delay"), ("contrôle du TDC", "tdc_control")])
+                     ("retard du routage (ns)", "ext_latch_delay"), ("limite basse (% plage)", "tac_limit_low"),
+                     ("contrôle du TDC", "tdc_control")])
     ok = true
     valeur(a) = isnan(a) ? "—" : @sprintf("%.5g", a)
     for (nom, cle) in lignes
