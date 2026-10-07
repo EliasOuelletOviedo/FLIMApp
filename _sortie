@@ -1,56 +1,3 @@
-DLL : C:\Program Files (x86)\BH\SPCM\DLL\spcm64.dll
-SPC-QC-104 : module 2, n° de série 3T0089
-
-Acquisitions :
-  marqueurs :     65376 enregistrements en 0.5 s ; flux de type 11, mt_clock 2048131
-  in1       :    138144 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
-  in2       :    165536 enregistrements en 1.0 s ; flux de type 11, mt_clock 2048131
-  controle  :    368544 enregistrements en 2.0 s ; flux de type 11, mt_clock 2048131
-
-Décodage par la DLL (arbitre) :
-  marqueurs :        0 photons valides, 0 invalides, marqueurs M0-M3 [2530, 0, 0, 2530] ; drapeaux vus 1000 8000 ; fin 2
-  in1       :    18292 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
-  in2       :    45334 photons valides, 0 invalides, marqueurs M0-M3 [0, 0, 0, 0] ; drapeaux vus 0 ; fin 2
-  controle  :   126307 photons valides, 0 invalides, marqueurs M0-M3 [1998, 0, 0, 1999] ; drapeaux vus 0 1000 8000 ; fin 2
-  marqueurs : M0 tous les 97649.1 tics → tic de 2.0482 ns (2,048 ns attendu, écart +0.01 %)
-  controle  : M0 tous les 488245.3 tics → tic de 2.0482 ns (2,048 ns attendu, écart +0.01 %)
-
-Oracle des préfixes (1500 enregistrements par acquisition) :
-  marqueurs : 1500 enregistrements, 116 entrées (1384 silencieux)
-  in1       : 1500 enregistrements, 214 entrées (1286 silencieux)
-  in2       : 1500 enregistrements, 417 entrées (1083 silencieux)
-  controle  : 1500 enregistrements, 535 entrées (965 silencieux)
-
-Empreinte des enregistrements (bit 31 à gauche ; 0/1 constant, · variable) :
-  marqueurs marqueurs     116  0100000000000000·00············0
-  marqueurs silencieux   1384  10000000000000000000000000000000
-  in1       photons       214  0000············0110············
-  in1       silencieux   1286  10000000000000000000000000000000
-  in2       photons       417  0001············0101············
-  in2       silencieux   1083  10000000000000000000000000000000
-  controle  photons       519  000·············1011············
-  controle  marqueurs      16  0100000000000000·00············0
-  controle  silencieux    965  10000000000000000000000000000000
-
-FORMAT ÉTABLI ET VÉRIFIÉ (vérifié le 2026-10-07 11:28 sur la QC-104 n° 3T0089 : 189933 photons et 9057 marqueurs identiques à la DLL (spcm64.dll))
-  ordre des mots     : poids faible d'abord
-  macrotemps         : bits 0 à 11 (12 bits)
-  microtemps         : bits 16 à 27, temps croissant direct
-  routage            : bits 12 à 15
-  entrée (voie)      : bits 28 à 29 ; valeurs IN1..IN4 (0, 1, 2, -1)
-  marqueurs          : motif 0x40000000 = 0x40000000 ; bits M0..M3 (12, 13, 14, 15)
-  débordements       : motif 0xc0000000 = 0x80000000, compte 1 par enregistrement ; MTOV bit -1
-  photon invalide    : bit -1
-  note : valeur de IN3 déduite (2), non observée
-  note : M1, M2 déduits de M0 et M3 (non observés)
-  note : sens du temps indéterminé (peu de photons ?) : supposé croissant, comme le dit le manuel
-  note : aucun photon invalide observé : bit_invalide inconnu
-  note : bit de perte (FIFO plein) non observé : les pertes se lisent par SPC_FOVFL
-
-Écrit : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\format_fifo_qc104.jl
-
-
-
 Format : SPC-QC-104 (FIFO, format établi par qc4)
   vérifié le 2026-10-07 11:28 sur la QC-104 n° 3T0089 : 189933 photons et 9057 marqueurs identiques à la DLL (spcm64.dll)
 
@@ -75,18 +22,64 @@ Réglages appliqués :
 
 SYNC : SYNC correct
 
-Photons : 167867 en 2.5 s (IN1 48214, IN2 119653, IN3 0) ; rejetés 0 ; inattendus 0 ; pertes 0
+Photons : 145188 en 2.5 s (IN1 134084, IN2 11104, IN3 0) ; rejetés 0 ; inattendus 0 ; pertes 0
 Marqueurs : M0 200, M1 0, M2 0, M3 200 (attendu 200 M0 et 200 M3)
   tic mesuré : 2.04815 ns (retenu 2.04800 ns, écart +0.007 %)
   M3 - M0 : 0.999938 ms en moyenne, de 0.999936 à 0.999940 ms (attendu 1.000 ms)
 
 Déclins : c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\resultats\qc\q5_declins.svg ; canal de 4.00 ps
-  IN1 : pic à 12.159 ns, temps moyen 7.085 ns
-  IN2 : pic à 3.342 ns, temps moyen 7.064 ns
+  IN1 : pic à 1.646 ns, temps moyen 4.349 ns
+  IN2 : pic à 1.854 ns, temps moyen 4.791 ns
 
 Routage : code écrit 0101, valeur la plus fréquente 1010 pour 100.0 % des photons
   ok : le routage lu est le complément du code (entrées actives à l'état bas), comme sur les SPC-150N.
 
-DLL : 167867 photons, marqueurs [200, 0, 0, 200] ; SPCLite : 167867 photons, marqueurs [200, 0, 0, 200]  identiques
+DLL : 145188 photons, marqueurs [200, 0, 0, 200] ; SPCLite : 145188 photons, marqueurs [200, 0, 0, 200]  identiques
 
 RÉUSSI : photons, déclins, marqueurs et routage conformes. Ouvre q5_declins.svg.
+true
+
+Mémoire : 1024 blocs, 1 blocs par trame, 1 trames par page, 1024 pages, 4096 mots par bloc
+ERROR: SPC -14 dans SPC_read_data_block : wrong value of 2nd function parameter
+Stacktrace:
+  [1] chk_spc
+    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:153 [inlined]
+  [2] lire_bloc(m::Int16, n::Int64; bloc::Int64, page::Int64)
+    @ Main.SPCLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:1088
+  [3] lire_bloc
+    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:1086 [inlined]
+  [4] #mesure_single_qc6##0
+    @ .\none:-1 [inlined]
+  [5] iterate
+    @ .\generator.jl:48 [inlined]
+  [6] collect_to!
+    @ .\array.jl:886 [inlined]
+  [7] collect_to_with_first!
+    @ .\array.jl:864 [inlined]
+  [8] collect(itr::Base.Generator{UnitRange{Int64}, var"#mesure_single_qc6##0#mesure_single_qc6##1"{Int16, Int64}})
+    @ Base .\array.jl:838
+  [9] WARNING: Detected access to binding `Main.mesure_single_qc6` in a world prior to its definition world.
+  Julia 1.12 has introduced more strict world age semantics for global bindings.
+  !!! This code may malfunction under Revise.
+  !!! This code will error in future versions of Julia.
+Hint: Add an appropriate `invokelatest` around the access to this binding.
+To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
+mesure_single_qc6(m::Int16, r::@NamedTuple{…}, nblocs::Int64, npoints::Int64)
+    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc6_single.jl:35
+ [10] (::var"#test_qc6##1#test_qc6##2"{@NamedTuple{…}, Vector{…}, var"#ini#test_qc6##0"{…}, String})(modules::Vector{Int16})
+    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc6_single.jl:68
+ [11] avec_spc_tous(f::var"#test_qc6##1#test_qc6##2"{…}, ini::String; types::Tuple{…}, forcer::Bool)
+    @ Main.SPCLite c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:501
+ [12] avec_spc_tous
+    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\SPCLite.jl:483 [inlined]
+ [13] WARNING: Detected access to binding `Main.test_qc6` in a world prior to its definition world.
+  Julia 1.12 has introduced more strict world age semantics for global bindings.
+  !!! This code may malfunction under Revise.
+  !!! This code will error in future versions of Julia.
+Hint: Add an appropriate `invokelatest` around the access to this binding.
+To make this warning an error, and hence obtain a stack trace, use `julia --depwarn=error`.
+test_qc6(r::@NamedTuple{…}, reglages::Dict{…})
+    @ Main c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc6_single.jl:47
+ [14] top-level scope
+    @ c:\Users\Admin\Desktop\FLIMApp_2\FLIMApp\qc6_single.jl:108
+Some type information was truncated. Use `show(err)` to see complete types.
