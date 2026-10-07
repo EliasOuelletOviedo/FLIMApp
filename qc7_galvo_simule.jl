@@ -31,8 +31,15 @@
 # pixel), q7_sequence.spc (données brutes, pour rejouer dans ton GUI).
 #
 # Réussi si : 16 × cycles passes reçues (M0 et M3), durées mesurées à 0,1 %
-# près, plus de 99,9 % des photons de chaque passe sur la bonne route, même
-# taux de photons (à 10 % près) pour les 16 routes.
+# près, plus de 99,9 % des photons de chaque passe sur la bonne route.
+#
+# Stabilité de la lumière (information, pas un critère d'échec) : le script
+# compare le taux de photons des 16 routes et calcule le spectre du taux de
+# photons (1 à 500 Hz). Une lumière modulée au secteur (60 Hz, 120 Hz…) et un
+# cycle qui dure un nombre entier de périodes du secteur (100 ms = 6 × 1/60 s)
+# font voir à chaque route toujours la même phase de la modulation : les
+# routes n'ont plus le même taux. transit_alea_ms > 0 rend le transit
+# irrégulier et casse ce verrouillage, pour le vérifier.
 
 Base.exit_on_sigint(false)
 isdefined(Main, :DAQmxLite) || include("DAQmxLite.jl")
@@ -41,7 +48,7 @@ isdefined(Main, :SPCLite) || include("SPCLite.jl")
 using .SPCLite
 (isdefined(SPCLite, :VERSION_LITE) && SPCLite.VERSION_LITE >= 12) ||
     error("Julia a gardé une ancienne version de SPCLite.jl (il faut la v12) : redémarre Julia, puis relance ce script.")
-using Printf
+using Printf, Random
 include("reglages_qc.jl")
 isfile(joinpath(@__DIR__, "format_fifo_qc104.jl")) ||
     error("format_fifo_qc104.jl absent : lance d'abord qc4_format_fifo.jl.")
@@ -52,6 +59,7 @@ q7 = (carte = "X6321", compteur = "ctr1", sortie = "PFI13", lignes_routage = "po
       ordre = collect(0:15),                    # routes visitées dans un cycle, dans l'ordre
       duree_ms = [2.0 + 0.5 * k for k in 0:15], # durée de passe de chaque route (indice = route + 1)
       transit_ms = 0.5,                         # déplacement simulé entre deux régions
+      transit_alea_ms = 0.0,                    # > 0 : chaque transit allongé d'un tirage entre 0 et cette valeur
       cycles = 40,                              # répétitions de la séquence (≈ 4 s)
       retard_initial_ms = 5.0,
       nx = 16, ny = 16,                         # pixels de chaque image
@@ -79,7 +87,8 @@ function sequence_q7(r)
     all(>(0), r.duree_ms) && r.transit_ms > 0 || error("durées et transit : strictement positifs")
     routes = repeat(r.ordre, r.cycles)
     haut = [r.duree_ms[k + 1] * 1e-3 for k in routes]
-    bas = fill(r.transit_ms * 1e-3, length(routes))
+    alea = MersenneTwister(7)
+    bas = [(r.transit_ms + r.transit_alea_ms * rand(alea)) * 1e-3 for _ in routes]
     return routes, haut, bas
 end
 
@@ -168,6 +177,47 @@ function trier_q7(dec, routes, r, dt_ns)
     return (coups = coups, somme_t = somme_t, dans = dans, mauvais = mauvais, hors = hors, hors_ok = hors_ok)
 end
 
+"""
+Profondeur de modulation du taux de photons (amplitude relative, 0 à 1) de
+fmin à fmax Hz : photons comptés par tranches de `pas` s entre t0 et t1, puis
+transformée de Fourier discrète à chaque fréquence.
+"""
+function spectre_q7(temps_s::AbstractVector{Float64}, t0, t1; pas = 50e-6, fmin = 1.0, fmax = 500.0, df = 0.25)
+    nb = floor(Int, (t1 - t0) / pas)
+    c = zeros(Float64, nb)
+    for t in temps_s
+        i = floor(Int, (t - t0) / pas) + 1
+        1 <= i <= nb && (c[i] += 1)
+    end
+    total = sum(c)
+    c .-= total / nb
+    fs = collect(fmin:df:fmax)
+    prof = zeros(length(fs))
+    for (q, f) in enumerate(fs)
+        w = cis(-2π * f * pas)
+        z = complex(1.0)
+        acc = complex(0.0)
+        for x in c
+            acc += x * z
+            z *= w
+        end
+        prof[q] = 2 * abs(acc) / max(total, 1)
+    end
+    return fs, prof
+end
+
+"""Les `n` plus hauts maxima locaux du spectre, séparés d'au moins 2 Hz."""
+function pics_q7(fs, prof, n)
+    idx = [i for i in 2:length(prof) - 1 if prof[i] >= prof[i - 1] && prof[i] >= prof[i + 1]]
+    sort!(idx; by = i -> -prof[i])
+    choisis = Int[]
+    for i in idx
+        all(j -> abs(fs[i] - fs[j]) >= 2.0, choisis) && push!(choisis, i)
+        length(choisis) == n && break
+    end
+    return [(fs[i], prof[i]) for i in choisis]
+end
+
 # ---------------------------------------------------------------------
 # Mosaïque en SVG
 # ---------------------------------------------------------------------
@@ -253,8 +303,9 @@ function test_q7(r, reglages, format)
     duree_seq = r.retard_initial_ms * 1e-3 + sum(haut) + sum(bas)
     @printf("Séquence : %d cycles de 16 régions = %d passes, %.2f s ; ordre des routes : %s\n",
             r.cycles, n, duree_seq, join(r.ordre, " "))
-    @printf("  passes de %.1f à %.1f ms, transit de %.2f ms ; images de %d × %d pixels\n",
-            minimum(r.duree_ms), maximum(r.duree_ms), r.transit_ms, r.nx, r.ny)
+    @printf("  passes de %.1f à %.1f ms, transit de %.2f ms%s ; images de %d × %d pixels\n",
+            minimum(r.duree_ms), maximum(r.duree_ms), r.transit_ms,
+            r.transit_alea_ms > 0 ? @sprintf(" + 0 à %.2f ms au hasard", r.transit_alea_ms) : "", r.nx, r.ny)
     p = merge(parametres_qc(reglages), Dict{String,Any}(
         "mode" => 1, "adc_resolution" => 12, "stop_on_time" => 0, "collect_time" => 1.0,
         "macro_time_clk" => 0, "trigger" => 0, "routing_mode" => Int(r.routing_mode)))
@@ -329,8 +380,8 @@ function test_q7(r, reglages, format)
         duree_mes = (m3 .- m0) .* tic
         ecart_duree = maximum(abs.(duree_mes .- haut) ./ haut)
         transit = sum(m0[j + 1] - m3[j] for j in 1:n - 1) * tic / (n - 1)
-        @printf("  passes : écart max à la durée programmée %.4f %% ; transit moyen %.4f ms (programmé %.3f ms)\n",
-                100 * ecart_duree, 1e3 * transit, r.transit_ms)
+        @printf("  passes : écart max à la durée programmée %.4f %% ; transit moyen %.4f ms (programmé %.4f ms)\n",
+                100 * ecart_duree, 1e3 * transit, 1e3 * sum(bas[1:n - 1]) / (n - 1))
         ok &= ecart_duree < 1e-3 + 3 * tic / minimum(haut)
 
         # Tri des photons
@@ -359,7 +410,27 @@ function test_q7(r, reglages, format)
                 t.hors, 100 * t.hors_ok / max(1, t.hors))
         @printf("Taux pendant les passes : %.1f photons/ms en moyenne, écart max d'une route %.2f %%\n",
                 taux_moyen / 1e3, 100 * ecart_taux)
-        ok &= bonne >= 0.999 && all(>(0), t.dans) && ecart_taux < 0.10
+        ok &= bonne >= 0.999 && all(>(0), t.dans)
+
+        # Stabilité de la lumière : spectre du taux de photons pendant la séquence
+        fs, prof = spectre_q7(dec.t_photons .* tic, m0[1] * tic, m3[end] * tic)
+        pics = pics_q7(fs, prof, 3)
+        @printf("Spectre du taux de photons (1 à %.0f Hz, plancher de bruit ≈ %.2f %%) :\n", fs[end],
+                200 / sqrt(max(1, dec.photons)))
+        for (f, a) in pics
+            secteur = any(h -> abs(f - 60h) < 1.0, 1:8) ? "  ← secteur (60 Hz ou harmonique)" : ""
+            @printf("  %7.2f Hz : modulation de %.1f %%%s\n", f, 100 * a, secteur)
+        end
+        cycle_s = sum(haut[1:16]) + sum(bas[1:16])
+        if ecart_taux > 0.10
+            @printf("ATTENTION : les routes n'ont pas le même taux (écart max %.0f %%, bruit de Poisson < 1 %%).\n",
+                    100 * ecart_taux)
+            bonne >= 0.999 && println("  Le tri n'y est pour rien (routage correct ci-dessus) : la lumière varie ",
+                                      "dans le temps, toujours de la même façon d'un cycle à l'autre.")
+            @printf("  Un cycle dure %.3f ms, soit %.3f périodes de 60 Hz", 1e3 * cycle_s, 60 * cycle_s)
+            println(r.transit_alea_ms > 0 ? "." :
+                    " : pour le vérifier, relance avec transit_alea_ms = 5.0 et cycles = 80 ; l'écart doit tomber à quelques %.")
+        end
 
         # Images et mosaïque
         entrees = [v for v in 1:2 if dec.par_voie[v] > 0]
@@ -409,7 +480,8 @@ function test_q7(r, reglages, format)
         println("Mosaïque : ", svg)
         println("Tableaux : q7_routes.csv, q7_images.csv ; données brutes : ", spc)
         println()
-        println(ok ? "RÉUSSI : séquence, marqueurs, routage et tri des photons conformes. Ouvre q7_mosaique.svg." :
+        println(ok ? "RÉUSSI : séquence, marqueurs, routage et tri des photons conformes. Ouvre q7_mosaique.svg." *
+                     (ecart_taux > 0.10 ? " (Lumière instable : voir ATTENTION.)" : "") :
                      "ÉCHEC partiel : voir les lignes ci-dessus ; colle la sortie dans la conversation.")
         return ok
     end
