@@ -131,7 +131,11 @@ The build takes tens of minutes and bundles Julia + all libraries
 ### Initial Setup
 
 1. **Load IRF**: the SPC window's IRF button acquires it and loads it
-   (see "SPC window" below). Or, on first run, you'll be prompted to select
+   (see "SPC window" below). Every IRF imported or acquired is also kept as
+   one file, `<recording folder>/irf/<date>_irf.toml` — both channels'
+   curves, their serials ("3T0089/IN1"), the settings they were taken with
+   and the declared `[dcc]` — which the IRF button imports again, its
+   settings taken over into `config/spc.toml`. Or, on first run, you'll be prompted to select
    the IRF: a Single measurement of it. With the SPC-QC-104, either SPCM's `.sdt`
    (one curve per input; one detector per file works too —
    `irf_ch1.sdt` and `irf_ch2.sdt`, the other found by its number), its TDC

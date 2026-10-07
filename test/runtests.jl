@@ -1239,6 +1239,15 @@ end
     @test isempty(last(FLIMApp.irf_settings_changes(bench, channels)))                            # already the IRF's
     elsewhere = deepcopy(other); elsewhere.series = ["3T0089/IN2", "3T0089/IN1"]
     @test any(m -> occursin("is card 3T0089/IN2", m), FLIMApp.irf_mismatches(info, first(FLIMApp.irf_settings_changes(elsewhere, channels))))
+    # The all-in-one file: both channels, their serials and settings, the [dcc]; read back as imported.
+    bundle = FLIMApp.write_irf_bundle(joinpath(mktempdir(), "irf", "20261007_150000_irf.toml"), irfs, info)
+    @test FLIMApp.is_irf_bundle(bundle) && !FLIMApp.is_irf_bundle(sdt)
+    irfs2, channels2 = FLIMApp.read_irf_file(bundle, bench)
+    @test irfs2 == irfs && [c["serial"] for c in channels2] == ["3T0089/IN1", "3T0089/IN2"]
+    @test channels2[2]["settings"] == channels[2]["settings"]
+    @test isempty(FLIMApp.irf_mismatches(Dict{String, Any}("channels" => channels2, "dcc" => Dict{String, Any}(bench.dcc)), bench))
+    @test last(FLIMApp.irf_settings_changes(other, channels2)) == changes                # its settings, taken over as well
+    @test_throws ErrorException FLIMApp.read_irf_bundle(FLIMApp.irf_info_path(joinpath(mktempdir(), "x.csv")) |> p -> (write(p, "a = 1"); p))
     disagree = deepcopy(channels); disagree[2]["settings"]["tdc_offset2"] = 3.072
     @test_throws ErrorException FLIMApp.irf_settings_changes(bench, disagree)
     @test FLIMApp.rebin_counts([4.0, 6.0, 8.0], 1.0, 1.5, 3) == [7.0, 11.0, 0.0]

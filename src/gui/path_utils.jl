@@ -29,12 +29,13 @@ end
 """
     open_irf_dialog()::Union{String, Nothing}
 
-Open a file picker for IRF selection: a Single measurement of the IRF —
-SPCM's .sdt, or the SPC window's CSV (one per channel) — `import_irf`,
-lifetime_analysis.jl.
+Open a file picker for IRF selection: an IRF all-in-one file (.toml,
+written at every import in `<recording folder>/irf/`), or a Single
+measurement of the IRF — SPCM's .sdt, or the SPC window's CSV (one per
+channel) — `import_irf`, lifetime_analysis.jl.
 """
 function open_irf_dialog()::Union{String, Nothing}
-    return pick_non_empty_path(() -> pick_file(filterlist="csv,sdt"); error_msg="IRF file dialog failed")
+    return pick_non_empty_path(() -> pick_file(filterlist="toml,csv,sdt"); error_msg="IRF file dialog failed")
 end
 
 """

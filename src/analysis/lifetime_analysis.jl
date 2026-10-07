@@ -234,7 +234,7 @@ function load_irfs(spc::FLIMCore.Reglages; ask::Bool = true)
     filepath = isfile(cache_path) ? strip(read(cache_path, String)) : ""
     if !isfile(filepath)
         ask || error("no IRF yet: pick the Single measurement of the IRF (.csv of the SPC window, or .sdt of SPCM)")
-        filepath = pick_file(filterlist = "csv,sdt")
+        filepath = pick_file(filterlist = "toml,csv,sdt")
         isempty(filepath) && error("no IRF file picked")
     end
     return import_irf(filepath, spc)
@@ -243,12 +243,15 @@ end
 """
     import_irf(filepath, spc; applied=Dict()) -> (irfs, info)
 
-Import an IRF from a Single measurement: the SPC window's (one CSV per
-channel, `import_irf_single`) or SPCM's .sdt (`import_irf_sdt`: for the
-QC-104, `read_sdt_irf_qc`), by the file's extension.
+Import an IRF, by the file's extension: an all-in-one .toml
+(`write_irf_bundle`: both channels and their settings), or a Single
+measurement — the SPC window's (one CSV per channel, `import_irf_single`)
+or SPCM's .sdt (`import_irf_sdt`: for the QC-104, `read_sdt_irf_qc`).
 """
-import_irf(filepath::AbstractString, spc::FLIMCore.Reglages; applied::AbstractDict = Dict{Int, Dict{String, Float64}}()) =
-    endswith(lowercase(filepath), ".csv") ? import_irf_single(filepath, spc; applied) : import_irf_sdt(filepath, spc; applied)
+function import_irf(filepath::AbstractString, spc::FLIMCore.Reglages; applied::AbstractDict = Dict{Int, Dict{String, Float64}}())
+    endswith(lowercase(filepath), ".toml") && return save_imported_irf(read_irf_bundle(filepath)..., filepath, spc; applied)
+    return endswith(lowercase(filepath), ".csv") ? import_irf_single(filepath, spc; applied) : import_irf_sdt(filepath, spc; applied)
+end
 
 """
     read_single_irf(filepath; series) -> (irfs, channels)
@@ -439,14 +442,84 @@ function save_imported_irf(irfs, channels, filepath::AbstractString, spc::FLIMCo
                              "channels" => channels, "dcc" => Dict{String, Any}(spc.dcc))
     mismatches = irf_mismatches(info, spc; applied)
     isempty(mismatches) || error("IRF taken with other settings: " * join(mismatches, "; "))
+    # The all-in-one file, to import it again later (not when importing one: it already is).
+    if !is_irf_bundle(filepath)
+        bundle = joinpath(FLIMCore.dossier_spc(spc), "irf", Dates.format(Dates.now(), dateformat"yyyymmdd_HHMMSS") * "_irf.toml")
+        try
+            info["bundle"] = write_irf_bundle(bundle, irfs, info)
+        catch e
+            @warn "IRF all-in-one file not written" path=bundle exception=(e, catch_backtrace())
+        end
+    end
     write_irf_csv(irf_csv_path(), irfs)
     write_irf_info(irf_info_path(irf_csv_path()), info)
     set_path_cache!(irf_filepath_cache(), filepath)
     return irfs, info
 end
 
-"""The IRF of a file, by its kind: a Single's CSV, an SPCM .sdt of the QC-104, or of SPC-150N."""
+"""First line of an IRF all-in-one file (`write_irf_bundle`)."""
+const IRF_BUNDLE_FORMAT = "FLIMApp IRF 1"
+
+"""Whether `path` is an IRF all-in-one file (a .toml starting with its format line)."""
+function is_irf_bundle(path::AbstractString)::Bool
+    endswith(lowercase(path), ".toml") && isfile(path) || return false
+    return get(TOML.parsefile(path), "format", "") == IRF_BUNDLE_FORMAT
+end
+
+"""
+    write_irf_bundle(path, irfs, info) -> path
+
+The IRF in one file, to import again with the IRF button: both channels'
+curves (`time_ns`, then `counts` per channel, at the analysis resolution
+and on its time axis), and its record (`info`: where it came from, each
+channel's serial — "3T0089/IN1" — and the settings it was taken with, the
+declared [dcc]). Written at every import (`save_imported_irf`), in
+`<recording folder>/irf/<date>_irf.toml`.
+"""
+function write_irf_bundle(path::AbstractString, irfs::AbstractVector{<:AbstractMatrix}, info::AbstractDict)::String
+    isempty(irfs) && error("IRF all-in-one file: no channel")
+    channels = [Dict{String, Any}(k => v for (k, v) in c if k != "file") for c in get(info, "channels", Any[])]
+    for (c, irf) in enumerate(irfs)
+        c <= length(channels) || push!(channels, Dict{String, Any}())
+        channels[c]["counts"] = Float64.(irf[:, 2])
+    end
+    bundle = Dict{String, Any}(
+        "format" => IRF_BUNDLE_FORMAT,
+        "source" => String(get(info, "source", "")), "imported" => String(get(info, "imported", "")),
+        "time_ns" => Float64.(irfs[1][:, 1]), "channels" => channels,
+        "dcc" => Dict{String, Any}(get(info, "dcc", Dict{String, Any}())))
+    mkpath(dirname(path))
+    open(io -> TOML.print(io, bundle; sorted = true), path, "w")
+    return String(path)
+end
+
+"""
+    read_irf_bundle(path) -> (irfs, channels)
+
+An IRF all-in-one file (`write_irf_bundle`) read back: `[t_ns counts]`
+per channel, and per channel its serial and settings (as `read_sdt_irf`).
+"""
+function read_irf_bundle(path::AbstractString)
+    d = TOML.parsefile(path)
+    get(d, "format", "") == IRF_BUNDLE_FORMAT || error("not an IRF all-in-one file ($IRF_BUNDLE_FORMAT): $path")
+    t = Float64.(d["time_ns"])
+    irfs = Matrix{Float64}[]
+    channels = Dict{String, Any}[]
+    for c in d["channels"]
+        counts = Float64.(c["counts"])
+        length(counts) == length(t) || error("IRF all-in-one file: a channel of $(length(counts)) points for $(length(t)) times ($path)")
+        sum(counts) > 0 || error("IRF all-in-one file: an empty curve ($path)")
+        push!(irfs, hcat(t, counts))
+        push!(channels, Dict{String, Any}("serial" => String(get(c, "serial", "")),
+                                          "settings" => Dict{String, Any}(get(c, "settings", Dict{String, Any}()))))
+    end
+    isempty(irfs) && error("IRF all-in-one file without a channel: $path")
+    return irfs, channels
+end
+
+"""The IRF of a file, by its kind: an all-in-one .toml, a Single's CSV, an SPCM .sdt of the QC-104, or of SPC-150N."""
 function read_irf_file(filepath::AbstractString, spc::FLIMCore.Reglages)
+    endswith(lowercase(filepath), ".toml") && return read_irf_bundle(filepath)
     endswith(lowercase(filepath), ".csv") && return read_single_irf(filepath; series = spc.series)
     return FLIMCore.est_qc104(spc) ? read_sdt_irf_qc(filepath, spc) : read_sdt_irf(filepath; series = spc.series)
 end
