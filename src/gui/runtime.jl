@@ -162,14 +162,50 @@ end
 
 Snapshot of everything the DAQ loop needs for this run's slots.
 """
-function scan_request(app, app_run, order::Vector{Int})::ScanRequest
+function scan_request(app, app_run, order::Vector{Int}; image_mode::Bool = false)::ScanRequest
     return ScanRequest(
-        copy(app_run.rois[]), copy(order), app.roi.active,
+        copy(app_run.rois[]), copy(order), app.roi.active && !image_mode,
         app.roi.v_min_x, app.roi.v_max_x, app.roi.v_min_y, app.roi.v_max_y,
         app.protocol.points_per_roi, app.protocol.spiral_turns,
         app.protocol.scan_time, app.protocol.shift_time,
-        app_run.imported_image_size, app_run.spc.settings.inverser_routage
+        app_run.imported_image_size, app_run.spc.settings.inverser_routage, image_mode
     )
+end
+
+"""
+    images_command(rois, order, image_size, settings, dir)::FLIMCore.ImagesROI
+
+The Realtime in images ([clamp] images): the SPC engine images with the
+settings' geometry and bins, every `images_par_bloc` images, the photons of
+each ROI of `order` (its pixels on the `image_size` image it was drawn on,
+`roi_pixel_mask`) — the whole image without ROIs —, each card's stream
+recorded in `dir`/spc ("" : nothing).
+"""
+function images_command(rois::Vector{RoiCoordinates}, order::Vector{Int}, image_size::Tuple{Int, Int},
+                        settings::FLIMCore.Reglages, dir::AbstractString)::FLIMCore.ImagesROI
+    pixels = [roi_pixel_mask(rois[k].xs, rois[k].ys, image_size...) for k in order]
+    return FLIMCore.ImagesROI(FLIMCore.geometrie(settings); rois = pixels, taille = image_size,
+                              trames = settings.images_par_bloc, dossier = isempty(dir) ? "" : joinpath(dir, "spc"))
+end
+
+"""
+    images_start_refusal(app, app_run)::String
+
+What keeps the Realtime in images from starting ("" if nothing): the
+protocol, active, gives the command voltage — each of its values must lie
+within 0 V and `command_max_v`; and the ROIs must have been drawn on an
+image (the ROI popup's Image button), whose pixels they bin.
+"""
+function images_start_refusal(app, app_run)::String
+    limit = app_run.config.command_max_v
+    if app.protocol.active
+        bad = [v for v in app.protocol.setpoints if isfinite(v) && !(0 <= v <= limit)]
+        isempty(bad) || return "Realtime in images: the protocol gives the command voltage, $(first(bad)) V is outside 0–$(limit) V"
+    end
+    split_rois = app.roi.active && !isempty(app_run.rois[])
+    split_rois && minimum(app_run.imported_image_size) <= 0 &&
+        return "Realtime in images: no image for the ROIs — take one with the ROI popup's Image button"
+    return ""
 end
 
 
@@ -338,7 +374,9 @@ function start_pressed(app, app_run, blocks)
     mode isa AbstractString || (mode = "Realtime")
     mode in (PLAYBACK_SESSION_MODE, PLAYBACK_CURRENT_MODE) && return start_playback!(app, app_run, blocks, mode)
 
+    images = app_run.spc.settings.images
     refusal = realtime_start_refusal(app, app_run)
+    isempty(refusal) && images && (refusal = images_start_refusal(app, app_run))
     if !isempty(refusal)
         # The refusals that are bench problems carry their code.
         if startswith(refusal, "IRF") || startswith(refusal, "Load an IRF")
@@ -365,7 +403,8 @@ function start_pressed(app, app_run, blocks)
 
         rois = app_run.rois[]
         split_rois = app.roi.active && !isempty(rois)
-        order = split_rois ? fetch(Threads.@spawn roi_visit_order(rois)) : Int[]
+        # In images, every ROI at once: no visiting order, ROI k is code k.
+        order = !split_rois ? Int[] : images ? collect(1:length(rois)) : fetch(Threads.@spawn roi_visit_order(rois))
 
         if !app_run.running[]
             @info "Acquisition stopped before it finished starting"
@@ -387,7 +426,7 @@ function start_pressed(app, app_run, blocks)
             return nothing
         end
         app_run.run_dir = dir
-        @info "Realtime run started" session=dir rois=length(rois) order=order roi_active=app.roi.active scan_ms=app.protocol.scan_time shift_ms=app.protocol.shift_time
+        @info "Realtime run started" session=dir rois=length(rois) order=order roi_active=app.roi.active scan_ms=app.protocol.scan_time shift_ms=app.protocol.shift_time images=images images_per_block=app_run.spc.settings.images_par_bloc
         app_run.run_open = true
         app_run.run_started_ns = time_ns()
         send_journal!(ex.journal, JournalRunStart(t, dir, run_info(app, app_run, order), loaded_irfs(), loaded_irf_info()))
@@ -400,12 +439,19 @@ function start_pressed(app, app_run, blocks)
         end
         ex.stop[] = false
         app_run.spc.clamp_stop_sent = false
-        FLIMCore.commander!(engine, clamp_command(app, app_run, order, dir))
-        send_command!(ex, StartCommand(scan_request(app, app_run, order)))
-
-        out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats)
+        if images
+            # Whole images: the galvos still, the commands the protocol's voltages, no PI.
+            FLIMCore.commander!(engine, images_command(rois, order, app_run.imported_image_size, app_run.spc.settings, dir))
+            send_command!(ex, StartCommand(scan_request(app, app_run, order; image_mode = true)))
+            out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats, image_full_scale_v=app_run.config.command_full_scale_v)
+        else
+            FLIMCore.commander!(engine, clamp_command(app, app_run, order, dir))
+            send_command!(ex, StartCommand(scan_request(app, app_run, order)))
+            out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats)
+        end
         spawn_acquisition_worker!(app_run, out, engine.histogrammes, initial_guess)
-        show_status!(blocks, "Realtime: session $(basename(dir))")
+        show_status!(blocks, (images ? "Realtime in images ($(app_run.spc.settings.images_par_bloc) per block)" : "Realtime") *
+                             ": session $(basename(dir))")
         return nothing
     end
 
@@ -524,9 +570,18 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
     rate, scan_s, sample_s = session_pass_timing(session)
     pause_s = isfinite(rate) && rate > 0 ? 1 / rate - scan_s : 0.05
     # The end of each pass as it was recorded: from M3, or M0 + the scan (sessions before this setting: M3).
-    fin_par_m3 = Bool(get(get(session.info, "spc", Dict{String, Any}()), "fin_par_m3", true))
-    FLIMCore.commander!(engine, FLIMCore.Clamp(rois = copy(order), ordre = copy(order), scan_s = scan_s, pause_s = pause_s,
-                                               echantillon_s = sample_s, fin_par_m3 = fin_par_m3))
+    spc_info = get(session.info, "spc", Dict{String, Any}())
+    fin_par_m3 = Bool(get(spc_info, "fin_par_m3", true))
+    images = Bool(get(spc_info, "images", false))
+    if images
+        # A Realtime in images: the same ROI binning over the recorded images, block by block.
+        settings_images = deepcopy(app_run.spc.settings)
+        settings_images.images_par_bloc = Int(get(spc_info, "images_par_bloc", settings_images.images_par_bloc))
+        FLIMCore.commander!(engine, images_command(session.rois, order, session.image_size, settings_images, ""))
+    else
+        FLIMCore.commander!(engine, FLIMCore.Clamp(rois = copy(order), ordre = copy(order), scan_s = scan_s, pause_s = pause_s,
+                                                   echantillon_s = sample_s, fin_par_m3 = fin_par_m3))
+    end
 
     app_run.run_mode = "Playback"
     app_run.run_rois = copy(session.rois)
@@ -549,7 +604,8 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
     isempty(dir) || send_journal!(ex.journal, JournalRunStart(t, dir, run_info(app, app_run, order; mode, session, settings),
                                                              loaded_irfs(), loaded_irf_info()))
 
-    out = AnalysisOutput(ex; roi_order = order, drive_outputs = false, stats = app_run.worker_stats)
+    out = AnalysisOutput(ex; roi_order = order, drive_outputs = false, stats = app_run.worker_stats,
+                         image_full_scale_v = images ? app_run.config.command_full_scale_v : NaN)
     spawn_acquisition_worker!(app_run, out, engine.histogrammes, selected_initial_guess(blocks);
                               source_done = playback.source_done)
     what = playback.session_settings ? "session settings" : "current settings"

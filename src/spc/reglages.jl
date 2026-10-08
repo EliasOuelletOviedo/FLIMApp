@@ -150,6 +150,8 @@ Base.@kwdef mutable struct Reglages
     irf_histogrammes_max::Int = 600
     # [clamp]
     canaux_clamp::Int = 256
+    images::Bool = false
+    images_par_bloc::Int = 17
     inverser_routage::Bool = true
     fin_par_m3::Bool = true
     # [enregistrement]
@@ -204,6 +206,8 @@ const CLES_REGLAGES = [
     ("single", "irf_maximum", :irf_maximum, "… additionnés jusqu'à ce que le maximum de la somme dépasse ce nombre de coups sur chaque canal (2^15)"),
     ("single", "irf_histogrammes_max", :irf_histogrammes_max, "… au plus ce nombre de Singles : au-delà, l'IRF n'est pas changée"),
     ("clamp", "canaux", :canaux_clamp, "canaux des déclins du Realtime (les 4096 du FIFO regroupés) : 256, la résolution de l'IRF"),
+    ("clamp", "images", :images, "Realtime en images : galvos arrêtés, le scanner du microscope balaie l'image entière ; un histogramme par ROI (ses pixels) tous les images_par_bloc images, le protocole donnant la tension de commande (pas de PI)"),
+    ("clamp", "images_par_bloc", :images_par_bloc, "images additionnées pour chaque histogramme de ROI du Realtime en images"),
     ("clamp", "fin_par_m3", :fin_par_m3, "false : M0 seul, chaque passe dure le scan programmé ; true : sa fin vient de M3 (le même signal de passe câblé aussi sur M3, front descendant)"),
     ("clamp", "inverser_routage", :inverser_routage, "la NI écrit NON(c) sur P0.4-P0.7 et la carte, aux entrées actives à 0 V, lit c"),
     ("enregistrement", "dossier", :dossier, "\"\" : ~/FLIMApp_spc (sous-dossiers imagerie et single)"),
@@ -327,6 +331,7 @@ function valider_reglages(r::Reglages)
     r.resolution_adc == 8 ||
         error("réglages SPC : [single] resolution_adc : 8 bits, des histogrammes de 256 canaux comme ceux du Realtime et de l'IRF")
     r.canaux_clamp in (64, 128, 256, 512, 1024, 4096) || error("réglages SPC : [clamp] canaux : 64 à 4096, un diviseur de 4096")
+    r.images_par_bloc >= 1 || error("réglages SPC : [clamp] images_par_bloc : au moins 1 image par bloc")
     return r
 end
 

@@ -198,6 +198,19 @@ end
     short = FLIMApp.PlotSlot()
     push!(short.series_lines, bound_line([0.0, 1.0], [2.0, 2.0]))
     @test FLIMApp.data_limits(app, short; pad_ratio=0.0) == ((0.0, 10.0), (1.5, 2.5))
+
+    # Channel ratio: the numerator channel's photons over the other's, refilled and scaled as such.
+    ratio = FLIMApp.SeriesLine(FLIMApp.Observable(FLIMApp.Point2f[]), [0.0, 1.0, 2.0], [10.0, 30.0, 40.0], [5.0, 10.0], true)
+    @test FLIMApp.line_length(ratio) == 2                                    # the other channel lags: shortest
+    @test FLIMApp.fill_points!(ratio.points[], ratio, Inf, 100) == [FLIMApp.Point2f(0, 2), FLIMApp.Point2f(1, 3)]
+    ratios = FLIMApp.PlotSlot()
+    push!(ratios.series_lines, ratio)
+    @test FLIMApp.data_limits(app, ratios; pad_ratio=0.0) == ((0.0, 10.0), (2.0, 3.0))
+    app_run = AppRun()
+    @test FLIMApp.ratio_series(app_run, false, true) == (app_run.ch2_rois, app_run.ch1_rois, FLIMApp.PLOT_COLOR_CH2)
+    @test FLIMApp.ratio_series(app_run, true, true)[1] === app_run.ch1_rois && FLIMApp.ratio_series(app_run, false, false) === nothing
+    @test FLIMApp.plot_title("Channel ratio", app_run, false, true) == "Photons ch2 / ch1" && "Channel ratio" in FLIMApp.PLOT_OPTIONS
+    @test FLIMApp.ratio_partner(:plot2_ch1) == :plot2_ch2
     @test FLIMApp.data_limits(app, FLIMApp.PlotSlot()) === nothing
 
     @test FLIMApp.normalize_to_own_max([1.0, 2.0, 4.0]) == [0.25, 0.5, 1.0]
@@ -354,13 +367,13 @@ end
     buffers = FLIMApp.SlotBuffers(pattern.slot_samples)
     rising_edges(v) = count(i -> v[i] == 1 && v[i - 1] == 0, 2:length(v))
     for s in 0:2
-        FLIMApp.prepare_slot!(buffers, pattern, s, 2.0, 0.5)
+        FLIMApp.prepare_slot!(buffers, pattern, s, 0.8, 0.5)
         line(b) = (buffers.lines .>> b) .& 0x01
         gate = line(FLIMApp.DO_BIT_GATE)
         # Scan: gate high, commands on. Shift: gate low, commands at 0 V —
         # every slot ends off.
         @test all(==(1), gate[1:n_scan]) && all(==(0), gate[n_scan+1:end])
-        @test all(==(2.0), buffers.commands[1:n_scan]) && all(==(0.0), buffers.commands[n_scan+1:pattern.slot_samples])
+        @test all(==(0.8), buffers.commands[1:n_scan]) && all(==(0.0), buffers.commands[n_scan+1:pattern.slot_samples])
         @test all(==(0.5), buffers.commands[pattern.slot_samples+1:pattern.slot_samples+n_scan])
         @test buffers.commands[end] == 0.0 && buffers.lines[end] & FLIMApp.do_bit(FLIMApp.DO_BIT_GATE) == 0
         # During the scan, the visited ROI's routing code (its drawn index),
@@ -403,6 +416,24 @@ end
     @test FLIMApp.routing_byte(FLIMCore.CODE_HORS_ROI, false) == 0x00
     @test FLIMApp.slots_per_cycle(idle) == 1 && FLIMApp.slot_duration_s(idle) ≈ 0.1
 
+    # The Realtime in images: galvos at 0 V, gate high the whole slot (no pause), even with ROIs drawn.
+    images = FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(rois, order, false, -1000, 1000, -1000, 1000, 20, 3, 95, 5,
+                                                            (1024, 1024), true, true), cfg)
+    FLIMApp.prepare_slot!(buffers, images, 3, 0.75, 0.0)
+    gate = (buffers.lines .>> FLIMApp.DO_BIT_GATE) .& 0x01
+    @test images.image_mode && FLIMApp.slots_per_cycle(images) == 1 && FLIMApp.slot_duration_s(images) ≈ 0.1
+    @test all(==(0.0), buffers.galvos) && all(==(1), gate) && all(==(0.75), buffers.commands[1:images.slot_samples])   # the whole slot
+    @test FLIMApp.slot_start_s(images, 2) ≈ (FLIMApp.entry_samples(images) + 2 * images.slot_samples) / cfg.sample_rate_hz
+    # Its commands: the protocol's voltages (no PI) on the outputs whose controller is on; 0 V off the protocol.
+    protocol = ProtocolSettings(active = true, delay = 10, times = [30.0, 30.0], setpoints = [0.75, 0.0], repeats = 1)
+    commands(t; on1 = true, on2 = false, active = true) =
+        FLIMApp.image_mode_commands(FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = on1, ch2_on = on2),
+                                                             (p = deepcopy(protocol); p.active = active; p)), t, cfg)
+    @test commands(20.0)[1] ≈ 0.75 / cfg.command_full_scale_v * 100 && isnan(commands(20.0)[2])
+    @test FLIMApp.command_volts(commands(20.0)[1], cfg) ≈ 0.75 && FLIMApp.command_volts(commands(50.0)[1], cfg) == 0.0
+    @test FLIMApp.command_volts(commands(5.0)[1], cfg) == 0.0 && FLIMApp.command_volts(commands(80.0)[1], cfg) == 0.0   # delay, repeats over
+    @test all(isnan, commands(20.0; active = false)) && commands(20.0; on2 = true)[2] ≈ commands(20.0)[1]
+
     # More ROIs than routing codes (4 lines, code 0 reserved: 15 ROIs): refused.
     many = [square_roi(10.0 * k, 10.0 * k) for k in 1:16]
     @test_throws FLIMApp.SafetyError FLIMApp.build_scan_pattern(
@@ -420,6 +451,38 @@ end
     @test_throws FLIMApp.SafetyError FLIMApp.check_galvo_path([0.0, NaN], [0.0, 0.0], cfg)
     buffers.commands[1] = cfg.command_max_v + 1
     @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, cfg)
+    # AO 1 is the 1064 nm gate ([limits] gate_1064_v): 0–5 V there, synchronized with the gate P0.0.
+    @test cfg.gate_1064_v == 5.0 && FLIMApp.command_channel_pair("S6110/ao0:1") == ("S6110/ao0", "S6110/ao1")
+    @test_throws ErrorException FLIMApp.command_channel_pair("S6110/ao0")
+    FLIMApp.prepare_slot!(buffers, pattern, 0, 0.5, cfg.gate_1064_v)
+    @test FLIMApp.check_slot(buffers, cfg) === nothing                         # 5 V on AO 1 only
+    n_slot = pattern.slot_samples
+    gate = (buffers.lines .>> FLIMApp.DO_BIT_GATE) .& 0x01
+    @test buffers.commands[n_slot+1:2n_slot] == ifelse.(gate .== 1, 5.0, 0.0)  # high exactly with P0.0
+    buffers.commands[1] = 5.0
+    @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, cfg)         # not on AO 0: 1 V at most
+    no_gate = test_bench_config(Dict{String, Any}("limits" => Dict{String, Any}("gate_1064_v" => 0.0)))
+    FLIMApp.prepare_slot!(buffers, pattern, 0, 0.5, 5.0)
+    @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, no_gate)     # PI command 2 again: 1 V at most
+end
+
+@testset "Realtime in images: the engine's command, START's checks, no PI" begin
+    roi = FLIMApp.RoiCoordinates("square", [10.0, 20.0, 20.0, 10.0], [5.0, 5.0, 15.0, 15.0])
+    settings = FLIMCore.Reglages(images = true, images_par_bloc = 5)
+    c = FLIMApp.images_command([roi], [1], (100, 48), settings, "/session")
+    @test c isa FLIMCore.ImagesROI && c.trames == 5 && c.taille == (100, 48) && c.dossier == joinpath("/session", "spc")
+    @test sort(c.rois[1]) == sort(FLIMApp.roi_pixel_mask(roi.xs, roi.ys, 100, 48)) && length(c.rois[1]) == 100
+    @test isempty(FLIMApp.images_command([roi], Int[], (100, 48), settings, "").rois)        # without ROIs: the whole image
+
+    app, app_run = AppState(true), AppRun(test_bench_config())
+    app.protocol.active, app.protocol.setpoints = true, [0.5, 1.5, NaN]
+    @test occursin("1.5 V is outside 0–1.0 V", FLIMApp.images_start_refusal(app, app_run))      # [limits] command_max_v
+    app.protocol.setpoints = [0.5, 1.0, NaN]
+    @test FLIMApp.images_start_refusal(app, app_run) == ""
+
+    out = FLIMApp.AnalysisOutput(FLIMApp.Exchange(); roi_order = [1, 2], image_full_scale_v = 5.0)
+    @test FLIMApp.image_mode(out) && !out.drive_outputs                       # the DAQ loop writes the protocol, not the worker
+    @test !FLIMApp.image_mode(FLIMApp.AnalysisOutput(FLIMApp.Exchange())) && FLIMApp.AnalysisOutput(FLIMApp.Exchange()).drive_outputs
 end
 
 @testset "DAQ loop on the simulated cards" begin
@@ -452,8 +515,8 @@ end
     # Slots follow the visiting order; commands carried as written; the loop
     # stays far from its deadline.
     @test [s.roi for s in summaries[1:3]] == order
-    # Each ROI's scan carries that ROI's commands.
-    @test all(s -> s.command1_v == FLIMApp.command_volts(s.roi == order[2] ? 60.0 : 40.0, cfg) && s.command2_v == 0.0, summaries)
+    # Each ROI's scan carries that ROI's commands; AO 1, the 1064 nm gate, its voltage during each scan.
+    @test all(s -> s.command1_v == FLIMApp.command_volts(s.roi == order[2] ? 60.0 : 40.0, cfg) && s.command2_v == cfg.gate_1064_v, summaries)
     @test all(s -> s.iteration_s < s.deadline_s / 2, summaries)
 
     # The readback is what was written (the simulation mirrors the outputs).

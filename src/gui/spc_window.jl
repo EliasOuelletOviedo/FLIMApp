@@ -14,9 +14,11 @@ running.
 - Per card: the intensity image and the mean arrival time (first moment,
   no IRF correction: a preview, not a fit), then the decays (solid:
   imaging, dashed: last Single histogram) and the CFD rate.
-- The geometry, display and Single settings, and (QC-104) each channel's
-  timing offset, are written back to config/spc.toml, which the engine
-  rereads at every measurement start.
+- The geometry, display and Single settings, (QC-104) each channel's
+  timing offset, and the Realtime in images (a box: START acquires whole
+  images, galvos off, one histogram per ROI every "Images / block"
+  images) are written back to config/spc.toml, which the engine rereads
+  at every measurement start.
 
 Every Observable here is refreshed by the refresh tick (`spc_tick!`,
 gui/spc_view.jl); the callbacks only send commands or edit the settings.
@@ -156,6 +158,23 @@ function build_spc_figure(view::SpcView)
                 accepted || (box.displayed_string[] = string(view.settings.qc_decalage_ns[entree]))
             end
         end
+    end
+    # The Realtime in images: START acquires whole images (galvos off) and bins each ROI's pixels
+    # over `images_par_bloc` images ([clamp] images, images_par_bloc).
+    Label(settings[7, 1]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Realtime: whole images (galvos off)", :halign => :right, :fontsize => 11))...)
+    images_toggle = Toggle(settings[7, 2]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => s.images))...)
+    on(images_toggle.active) do active
+        spc_edit_setting!(view, :images, active) || (images_toggle.active[] = view.settings.images)
+    end
+    Label(settings[7, 3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Images / block", :halign => :right, :fontsize => 11))...)
+    block_now = string(s.images_par_bloc)
+    block_box = Textbox(settings[7, 4]; merge(TEXT_ATTRS, Dict{Symbol, Any}(
+        :displayed_string => block_now, :stored_string => block_now, :width => 64,
+        :validator => make_int_range_validator(1, 100_000)))...)
+    on(block_box.stored_string) do text
+        value = tryparse(Int, strip(text))
+        accepted = value !== nothing && spc_edit_setting!(view, :images_par_bloc, value)
+        accepted || (block_box.displayed_string[] = string(view.settings.images_par_bloc))
     end
     Label(settings[5, 3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Save raw stream (.spc)", :halign => :right, :fontsize => 11))...)
     raw_toggle = Toggle(settings[5, 4]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => s.flux_brut))...)

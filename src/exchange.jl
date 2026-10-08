@@ -139,7 +139,9 @@ galvos scan the ROIs only when `roi_active` and `rois` isn't empty;
 otherwise they stay at 0 V with the same scan/pause rhythm.
 `invert_routing` (`[clamp] inverser_routage` in config/spc.toml): write
 NOT(code) on P0.4–P0.7 so the SPC card, whose routing inputs are active
-low, reads the code itself.
+low, reads the code itself. `image_mode` (`[clamp] images`): the Realtime
+in images — the galvos don't move, the gate stays high, and the commands
+are the protocol's voltages (`image_mode_commands`), no PI.
 """
 struct ScanRequest
     rois::Vector{RoiCoordinates}
@@ -155,12 +157,13 @@ struct ScanRequest
     shift_time_ms::Int
     image_size::Tuple{Int, Int}
     invert_routing::Bool
+    image_mode::Bool
 end
 
 ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_per_roi, spiral_turns,
-            scan_time_ms, shift_time_ms, image_size) =
+            scan_time_ms, shift_time_ms, image_size, invert_routing = true) =
     ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_per_roi, spiral_turns,
-                scan_time_ms, shift_time_ms, image_size, true)
+                scan_time_ms, shift_time_ms, image_size, invert_routing, false)
 
 """
     AnalysisSettings

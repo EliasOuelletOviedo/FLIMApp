@@ -16,7 +16,7 @@ galvos = "X6321/ao0:1"                  # AO 0 = galvo X, AO 1 = galvo Y
 lines = "X6321/port0/line0:7"           # sync lines, one bit per line (see src/loop/scan_pattern.jl)
 counter = "X6321/ctr0"                  # counter generating the shared sample clock
 clock = "/X6321/Ctr0InternalOutput"     # ...its output terminal, reaching the 6110 through RTSI
-commands = "S6110/ao0:1"                # AO 0 = PI command 1, AO 1 = PI command 2
+commands = "S6110/ao0:1"                # AO 0 = PI command 1 (1064 nm power), AO 1 = 1064 nm laser gate (limits.gate_1064_v; 0 there: PI command 2)
 readback = "X6321/ai0:11"               # AI read back every block; paces the loop
 readback_terminal = "RSE"               # RSE, NRSE, Diff, PseudoDiff or Default
 # What each readback channel is wired to, in order: galvo_x, galvo_y,
@@ -45,9 +45,10 @@ block_ms = 20           # readback block: loop period and stop-flag latency
 lead_slots = 0          # slots written ahead of the card; 0 = max(2, number of ROIs)
 
 [limits]
-galvo_v = 5.0                  # any galvo sample beyond this is refused
-command_full_scale_v = 5.0     # output for a 100 % PI command
-command_max_v = 5.0            # AO range declared to NI-DAQmx: it refuses any write beyond
+galvo_v = 2.0                  # any galvo sample beyond this is refused
+command_full_scale_v = 1.0     # output for a 100 % PI command
+command_max_v = 1.0            # AO range declared to NI-DAQmx: it refuses any write beyond
+gate_1064_v = 5.0              # AO 1 of channels.commands: the 1064 nm laser gate, this voltage while the gate P0.0 is high (each scan; the whole slot in images), 0 V otherwise — same sample clock. 0: AO 1 is PI command 2
 
 [sync]
 pulse_s = 0.001                # width of the sequence (P0.2) and ROI (P0.3) pulses

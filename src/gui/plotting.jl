@@ -15,11 +15,17 @@ change).
 using GLMakie
 using Observables
 
-const PLOT_OPTIONS = ["Histogram", "Photon counts", "Lifetime", "Ion concentration", "Command", "Readback"]
+const PLOT_OPTIONS = ["Histogram", "Photon counts", "Lifetime", "Ion concentration", "Channel ratio", "Command", "Readback"]
 
-"""A plot's title: in Playback, the PI outputs are simulated (the recorded stimulation doesn't change)."""
-plot_title(selection::AbstractString, app_run) =
-    selection == "Command" && app_run.run_mode == "Playback" ? "Command — simulated (Playback)" : selection
+"""The plot whose two channel toggles are exclusive: the one on is the numerator."""
+const RATIO_PLOT = "Channel ratio"
+
+"""A plot's title: in Playback, the PI outputs are simulated (the recorded stimulation doesn't change); the ratio says which way."""
+function plot_title(selection::AbstractString, app_run, show_ch1::Bool = false, show_ch2::Bool = false)
+    selection == "Command" && app_run.run_mode == "Playback" && return "Command — simulated (Playback)"
+    selection == RATIO_PLOT && return show_ch1 ? "Photons ch1 / ch2" : show_ch2 ? "Photons ch2 / ch1" : "Channel ratio: pick the numerator (1 or 2)"
+    return selection
+end
 
 # -----------------------------------------------------------------------------
 # Histogram plot normalization
@@ -143,7 +149,13 @@ only the last `window_s` seconds (all of it if `window_s` is `Inf`), at
 most `max_points` points (evenly decimated, last point always kept).
 """
 function fill_points!(points::Vector{Point2f}, xs::AbstractVector{Float64}, ys::AbstractVector{Float64}, window_s::Float64, max_points::Int)
-    n = min(length(xs), length(ys))
+    return fill_points!(points, SeriesLine(Observable(points), Vector{Float64}(xs), Vector{Float64}(ys)), window_s, max_points)
+end
+
+"""Refill `points` from `line` (its history, or the ratio of its two) — see the method above."""
+function fill_points!(points::Vector{Point2f}, line::SeriesLine, window_s::Float64, max_points::Int)
+    xs = line.xs
+    n = line_length(line)
     if n == 0
         empty!(points)
         return points
@@ -159,9 +171,9 @@ function fill_points!(points::Vector{Point2f}, xs::AbstractVector{Float64}, ys::
     j = 0
     @inbounds for i in start:stride:n
         j += 1
-        points[j] = Point2f(xs[i], ys[i])
+        points[j] = Point2f(xs[i], line_value(line, i))
     end
-    last_included || (points[end] = Point2f(xs[n], ys[n]))
+    last_included || (points[end] = Point2f(xs[n], line_value(line, n)))
     return points
 end
 
@@ -272,6 +284,40 @@ function draw_roi_metric_plot!(axis, plot::PlotSlot, app_run, raw_field::Symbol,
 end
 
 """
+    ratio_series(app_run, show_ch1, show_ch2) -> (numerators, denominators, color) or nothing
+
+The Channel ratio plot's pairs: per ROI, the numerator channel's series —
+the one whose toggle is on (channel 1 if both are) — and the other
+channel's; the numerator's color. `nothing` with neither toggle on.
+"""
+function ratio_series(app_run, show_ch1::Bool, show_ch2::Bool)
+    show_ch1 && return (app_run.ch1_rois, app_run.ch2_rois, PLOT_COLOR_CH1)
+    show_ch2 && return (app_run.ch2_rois, app_run.ch1_rois, PLOT_COLOR_CH2)
+    return nothing
+end
+
+"""
+    draw_ratio_plot!(axis, plot, app_run, show_ch1, show_ch2)
+
+Channel ratio: per ROI, the numerator channel's photon count over the
+other's, raw (faint) and smoothed (the ratio of the smoothed counts), in
+the numerator's color.
+"""
+function draw_ratio_plot!(axis, plot::PlotSlot, app_run, show_ch1::Bool, show_ch2::Bool)
+    pairs = ratio_series(app_run, show_ch1, show_ch2)
+    pairs === nothing && return nothing
+    numerators, denominators, color = pairs
+    for (num, den) in zip(numerators, denominators)
+        for (field, faint) in ((:photons, true), (:photons_smooth, false))
+            points = Observable(Point2f[])
+            lines!(axis, points; color = faint ? (color, 0.25) : color, linewidth = PLOT_LINEWIDTH)
+            push!(plot.series_lines, SeriesLine(points, num.timestamps, getfield(num, field), getfield(den, field), true))
+        end
+    end
+    return nothing
+end
+
+"""
     draw_readback_plot!(axis, plot, app_run)
 
 The last slot the DAQ loop played, as read back by the cards: one line per
@@ -308,12 +354,12 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol;
         axis = blocks.plot_1_axis
         selection = something(selection, app.layout.plot1)
         show_ch1, show_ch2 = something(show_channels, (app.layout.plot1_ch1, app.layout.plot1_ch2))
-        axis.title[] = "Plot 1\n($(plot_title(selection, app_run)))"
+        axis.title[] = "Plot 1\n($(plot_title(selection, app_run, show_ch1, show_ch2)))"
     else
         axis = blocks.plot_2_axis
         selection = something(selection, app.layout.plot2)
         show_ch1, show_ch2 = something(show_channels, (app.layout.plot2_ch1, app.layout.plot2_ch2))
-        axis.title[] = "Plot 2\n($(plot_title(selection, app_run)))"
+        axis.title[] = "Plot 2\n($(plot_title(selection, app_run, show_ch1, show_ch2)))"
     end
 
     previous = get(app_run.display.plots, plot_slot, nothing)
@@ -341,6 +387,8 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol;
     elseif selection == "Photon counts"
         add_setpoint_highlight!(axis, plot)
         draw_roi_metric_plot!(axis, plot, app_run, :photons, :photons_smooth, show_ch1, show_ch2)
+    elseif selection == RATIO_PLOT
+        draw_ratio_plot!(axis, plot, app_run, show_ch1, show_ch2)
     elseif selection == "Readback"
         draw_readback_plot!(axis, plot, app_run)
     end
@@ -362,7 +410,7 @@ function refresh_plot_slot!(app, app_run, plot::PlotSlot)
     max_points = app_run.config.max_points_per_line
 
     for line in plot.series_lines
-        fill_points!(line.points[], line.xs, line.ys, window_s, max_points)
+        fill_points!(line.points[], line, window_s, max_points)
         notify(line.points)
     end
 
@@ -428,7 +476,7 @@ function data_limits(app, plot::PlotSlot; pad_ratio=0.05)
     # x: each curve shows its own last `time_range` seconds (fill_points!).
     xmin, xmax = Inf, -Inf
     for line in plot.series_lines
-        n = min(length(line.xs), length(line.ys))
+        n = line_length(line)
         n == 0 && continue
         last_x = line.xs[n]
         first_x = line.xs[searchsortedfirst(view(line.xs, 1:n), last_x - time_range)]
@@ -442,10 +490,10 @@ function data_limits(app, plot::PlotSlot; pad_ratio=0.05)
     # y: every finite value inside [xmin, xmax].
     ymin, ymax = Inf, -Inf
     for line in plot.series_lines
-        n = min(length(line.xs), length(line.ys))
+        n = line_length(line)
         start = searchsortedfirst(view(line.xs, 1:n), xmin)
         @inbounds for i in start:n
-            y = line.ys[i]
+            y = line_value(line, i)
             if isfinite(y)
                 ymin = min(ymin, y)
                 ymax = max(ymax, y)

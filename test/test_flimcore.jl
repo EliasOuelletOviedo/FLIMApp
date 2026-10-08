@@ -712,6 +712,61 @@ end
 end
 
 
+@testset "Realtime en images : un histogramme par ROI tous les N images" begin
+    mots = flux_test()                                   # 8 trames de 100 × 48 pixels, 7 complètes
+    g = geometrie_auto()
+    # Les images trame par trame, pour savoir ce que chaque ROI doit recevoir.
+    etalonnage = FLIMCore.Etalonnage()
+    FLIMCore.ajouter_etalonnage!(etalonnage, mots, length(mots))
+    geo = FLIMCore.geometrie_etalonnee(etalonnage, TIC_TEST, g)
+    images = Matrix{UInt32}[]
+    r = FLIMCore.Rangeur(geo, TIC_TEST, DT_TEST, g)
+    FLIMCore.ranger!((rg, complete) -> complete && push!(images, copy(rg.intensite)), r, mots, length(mots))
+    @test length(images) == 7 && (geo.nx, geo.ny) == (100, 48)
+
+    gauche = [(x, y) for x in 1:50 for y in 1:48]          # ROI 1
+    haut = [(x, y) for x in 1:100 for y in 1:10]           # ROI 2, en partie sur la ROI 1 : ses photons comptent pour les deux
+    dans(roi, image) = sum(Int(image[y, x]) for (x, y) in roi)
+    function images_roi(c)
+        m = FLIMCore.demarrer_moteur(reglages_test(); source = source_test(mots; modules = (0, 1), vitesse = 0, boucle = false))
+        @test attendre_etat(m, :pret)
+        FLIMCore.commander!(m, c)
+        trames = Ref(0)
+        fin = jusqu_a_fin(m, :clamp; garder = x -> x isa FLIMCore.ImageTrame && x.carte == 0 && (trames[] += 1))
+        histos = FLIMCore.HistoClamp[]
+        while isready(m.histogrammes)
+            push!(histos, take!(m.histogrammes))
+        end
+        FLIMCore.arreter_moteur(m)
+        return histos, fin, trames[]
+    end
+
+    dossier = mktempdir()
+    histos, fin, trames = images_roi(FLIMCore.ImagesROI(g; rois = [gauche, haut], taille = (100, 48), trames = 3, dossier = dossier))
+    @test !fin.erreur && occursin("2 bloc(s) de 3 image(s)", fin.raison)
+    @test trames >= 1                                    # les images vont aussi à la fenêtre SPC (sans attente : certaines sautées)
+    @test [(h.passe, argmax(vec(sum(h.histogrammes[1]; dims = 1))) - 1) for h in histos] == [(1, 1), (1, 2), (2, 1), (2, 2)]
+    for h in histos, carte in 1:2
+        bloc = h.passe == 1 ? images[1:3] : images[4:6]
+        roi = argmax(vec(sum(h.histogrammes[carte]; dims = 1))) - 1 == 1 ? gauche : haut
+        @test sum(h.histogrammes[carte]) == sum(dans(roi, im) for im in bloc)    # chaque carte : le même flux ici
+        @test size(h.histogrammes[carte]) == (256, 16) && h.dt_ns ≈ 12.5 / 256
+    end
+    @test histos[1].t_fin_s > histos[1].t_debut_s && histos[3].t_debut_s >= histos[1].t_fin_s - 1e-9
+    @test all(h -> h.motifs == (h.pertes > 0 ? ["GAP : $(h.pertes) enregistrement(s) perdus pendant le bloc"] : String[]), histos)
+    # La session : le flux de chaque carte et son _acquisition.ini (le Realtime en images, ses blocs), pour Playback.
+    @test sort(filter(f -> endswith(f, ".spc"), readdir(dossier))) == ["REJEU-0.spc", "REJEU-1.spc"]
+    ini = FLIMCore.lire_ini_textes(joinpath(dossier, "REJEU-0_acquisition.ini"); section = "clamp")
+    @test ini["images"] == "1" && ini["trames_bloc"] == "3" && ini["serie"] == "REJEU-0"
+
+    # Sans ROI : l'image entière, au code des scans sans ROI.
+    histos, _, _ = images_roi(FLIMCore.ImagesROI(g; trames = 7))
+    @test length(histos) == 1 && sum(histos[1].histogrammes[1][:, FLIMCore.CODE_SANS_ROI + 1]) == sum(sum(Int, im) for im in images)
+    # ROI dessinées sur une autre taille d'image : refusé, en le disant.
+    _, fin, _ = images_roi(FLIMCore.ImagesROI(g; rois = [gauche], taille = (1024, 512), trames = 3))
+    @test fin.erreur && occursin("1024 × 512", fin.raison) && occursin("100 × 48", fin.raison)
+end
+
 # ---------------------------------------------------------------------
 # SPC-QC-104
 # ---------------------------------------------------------------------

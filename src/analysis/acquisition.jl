@@ -41,7 +41,11 @@ the journal writes every pass to the session as it comes.
 `unmatched_passes`: passes whose routing code is none of this run's ROIs
 (or that hold no photon under a ROI code), not analyzed. `stats`: the
 counters the GUI reads live for its diagnosis (`WorkerStats`,
-diagnostics.jl).
+diagnostics.jl). `image_full_scale_v` (finite: the Realtime in images, `[clamp] images`):
+no PI — each pass (a block of images, one ROI) is fit and shown, and the
+commands it records are the protocol's voltages the DAQ loop writes
+(`image_mode_commands`, in percent of this full scale), never sent from
+here.
 """
 mutable struct AnalysisOutput
     exchange::Exchange
@@ -50,11 +54,15 @@ mutable struct AnalysisOutput
     excluded_passes::Int
     unmatched_passes::Int
     stats::WorkerStats
+    image_full_scale_v::Float64
 end
 
 AnalysisOutput(exchange::Exchange; roi_order::Vector{Int} = Int[], drive_outputs::Bool = true,
-               stats::WorkerStats = WorkerStats()) =
-    AnalysisOutput(exchange, copy(roi_order), drive_outputs, 0, 0, stats)
+               stats::WorkerStats = WorkerStats(), image_full_scale_v::Real = NaN) =
+    AnalysisOutput(exchange, copy(roi_order), drive_outputs && !isfinite(image_full_scale_v), 0, 0, stats, Float64(image_full_scale_v))
+
+"""Is this the Realtime in images (`[clamp] images`): no PI, the protocol's voltages as commands?"""
+image_mode(out::AnalysisOutput) = isfinite(out.image_full_scale_v)
 
 """
     pass_roi(h, roi_order) -> (roi_index, code)
@@ -422,8 +430,9 @@ function start_realtime(
             layout = settings.layout
             controller = settings.controller
             current_protocol = settings.protocol
-            protocol_active = current_protocol.active
-            setpoint_ns = protocol_active ? protocol_setpoint_at(current_protocol, timestamp) : fallback_setpoint_ns
+            protocol_active = current_protocol.active && !image_mode(out)    # in images, the protocol gives volts, not a lifetime
+            setpoint_ns = protocol_active ? protocol_setpoint_at(current_protocol, timestamp) :
+                          image_mode(out) ? NaN : fallback_setpoint_ns
 
             # Distinct from setpoint_ns: PID control keeps regulating toward the
             # fallback setpoint even without an active protocol, but the plotted
@@ -457,6 +466,8 @@ function start_realtime(
                                                                 controller.I2, controller.ch2_inv, controller.ch2_on))
             end
 
+            # In images: no PI; the commands recorded are the protocol's voltages the DAQ loop writes.
+            image_mode(out) && (commands = image_mode_commands(settings, timestamp, out.image_full_scale_v))
             for c in 1:channels
                 isnan(frames[c].lifetime) && Threads.atomic_add!(stats.fits_failed[c], 1)
             end

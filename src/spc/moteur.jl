@@ -339,6 +339,38 @@ tolerance_periode(c::Clamp) = c.echantillon_s + 100e-6 * (c.scan_s + c.pause_s)
 """Écart toléré sur M3 − M0 : un échantillon de l'AO et 100 ppm de la durée programmée."""
 tolerance_passe(c::Clamp) = c.echantillon_s + 100e-6 * c.scan_s
 
+"""
+    ImagesROI(geometrie; rois=[], taille=(0, 0), trames=17, dossier="")
+
+Le Realtime en images : les galvos de la NI ne bougent pas, le scanner du
+microscope balaie l'image entière (horloges de ligne et de trame sur M1 et
+M2, comme `Imagerie`). Tous les `trames` images complètes (des blocs
+consécutifs, les mêmes images sur chaque carte), un histogramme par ROI :
+les photons de tous les pixels de la ROI, `canaux` ([clamp]) de temps
+croissant. Publié comme un `HistoClamp` par ROI et par bloc, la colonne du
+code de la ROI remplie (`code_routage`), de quoi passer par la même
+analyse que les passes ; `passe` : le numéro du bloc ; `motifs` : GAP ou
+FIFO débordé pendant le bloc.
+
+`rois[k]` : les pixels `(x, y)` (de 1) de la ROI n° k, sur une image de
+`taille = (nx, ny)` — celle du scanner, sinon refusé ; vide : l'image
+entière, un seul histogramme au code `CODE_SANS_ROI`. `dossier` : où
+enregistrer le flux de chaque carte (`<série>.spc` et `_acquisition.ini`,
+comme le Realtime) ; "" : rien. État du moteur et `Fin` : ceux du Realtime
+(`:clamp`).
+"""
+struct ImagesROI <: Commande
+    geometrie::Geometrie
+    rois::Vector{Vector{Tuple{Int,Int}}}
+    taille::Tuple{Int,Int}
+    trames::Int
+    dossier::String
+end
+ImagesROI(g::Geometrie = Geometrie(); rois::AbstractVector = Vector{Tuple{Int,Int}}[], taille::Tuple{Integer,Integer} = (0, 0),
+          trames::Integer = 17, dossier::AbstractString = "") =
+    ImagesROI(g, [Tuple{Int,Int}[(Int(p[1]), Int(p[2])) for p in roi] for roi in rois], (Int(taille[1]), Int(taille[2])),
+              Int(trames), String(dossier))
+
 """Arrête la mesure en cours (réponse : un `Fin`)."""
 struct Arret <: Commande end
 
@@ -617,6 +649,8 @@ function _executer!(m::Moteur, src::Source, ctx::Contexte, c::Commande)
             _verifier!(m, src, ctx, c.reponse)
         elseif c isa Clamp
             _clamp!(m, src, ctx, c)
+        elseif c isa ImagesROI
+            _images_roi!(m, src, ctx, c)
         elseif c isa Deverrouiller
             _deverrouiller!(m, src, ctx)
         end                                  # Arret sans mesure en cours : rien à faire
@@ -837,6 +871,59 @@ end
 # Imagerie
 # ---------------------------------------------------------------------
 
+"""
+Les blocs d'images d'une carte (Realtime en images, `ImagesROI`) : les
+images complètes du bloc en cours, son début (s), ses enregistrements GAP,
+et les blocs terminés en attente des autres cartes : (histogrammes par ROI,
+début, fin, GAP, FIFO débordé pendant le bloc).
+"""
+mutable struct BlocsROI
+    rois::Vector{Vector{Tuple{Int,Int}}}
+    taille::Tuple{Int,Int}
+    trames::Int
+    canaux::Int
+    n::Int
+    t_debut::Float64
+    pertes::Int
+    deborde_vu::Bool
+    file::Vector{Tuple{Matrix{UInt32},Float64,Float64,Int,Bool}}
+end
+BlocsROI(c::ImagesROI, canaux::Integer) =
+    BlocsROI(c.rois, c.taille, c.trames, Int(canaux), 0, 0.0, 0, false, Tuple{Matrix{UInt32},Float64,Float64,Int,Bool}[])
+
+"""Codes de routage des histogrammes d'un bloc : un par ROI, ou `CODE_SANS_ROI` pour l'image entière."""
+codes_blocs(b::BlocsROI) = isempty(b.rois) ? [CODE_SANS_ROI] : [code_routage(k) for k in eachindex(b.rois)]
+
+"""Les bits des ROI par pixel (`rois_rangeur!`) pour l'image `ny × nx` du scanner ; erreur si les ROI viennent d'une autre taille."""
+function _bits_rois(b::BlocsROI, ny::Integer, nx::Integer)
+    isempty(b.rois) && return fill(UInt16(1) << CODE_SANS_ROI, ny, nx)
+    b.taille == (nx, ny) ||
+        error("ROI dessinées sur une image de $(b.taille[1]) × $(b.taille[2]) pixels, le scanner en donne $nx × $ny : " *
+              "refais l'image (bouton Image de la fenêtre ROI) et les ROI, ou change le réglage du scanner")
+    bits = zeros(UInt16, ny, nx)
+    for (k, pixels) in enumerate(b.rois), (x, y) in pixels
+        (1 <= x <= nx && 1 <= y <= ny) && (bits[y, x] |= UInt16(1) << code_routage(k))
+    end
+    return bits
+end
+
+"""Une image complète de la carte `a` dans son bloc ; au bout de `trames`, le bloc attend les autres cartes."""
+function _bloc_trame!(a, r::Rangeur, complete::Bool)
+    b = a.blocs
+    complete || return nothing
+    b.n == 0 && (b.t_debut = r.t_debut_trame * a.tic_s)
+    b.n += 1
+    b.pertes += r.pertes_trame
+    b.n < b.trames && return nothing
+    t_fin = (r.t_debut_trame + a.geo.periode * a.geo.lignes_trame) * a.tic_s
+    deborde = a.deborde && !b.deborde_vu
+    b.deborde_vu = a.deborde
+    push!(b.file, (copy(r.histos_roi), b.t_debut, t_fin, b.pertes, deborde))
+    fill!(r.histos_roi, 0)
+    b.n, b.pertes = 0, 0
+    return nothing
+end
+
 """Une carte pendant une acquisition d'imagerie."""
 mutable struct AcqModule
     carte::Int
@@ -856,6 +943,7 @@ mutable struct AcqModule
     debut::Float64
     mots_gardes::Union{Nothing,Vector{UInt16}}   # flux rangé dans l'image (Imagerie(...; garder_mots))
     serie::Union{Nothing,String}
+    blocs::Union{Nothing,BlocsROI}               # Realtime en images (ImagesROI)
 end
 
 # Au-delà, les mots gardés pour mesurer la géométrie sont jetés (scanner arrêté).
@@ -889,7 +977,7 @@ function _imagerie!(m::Moteur, src::Source, ctx::Contexte, c::Imagerie)
             ecrivain = r.flux_brut ? ouvrir_spc(prefixe * ".spc", info.entete) : nothing
             push!(acqs, AcqModule(k, prefixe, info.horloge_macro_s, fenetre, fenetre / 4096, ecrivain,
                                   Etalonnage(), false, nothing, nothing, nothing, false, 0, 0, 0.0,
-                                  c.garder_mots ? UInt16[] : nothing, get(ctx.series, k, nothing)))
+                                  c.garder_mots ? UInt16[] : nothing, get(ctx.series, k, nothing), nothing))
             effacer_taux!(src, k)
         end
         _etat!(m, :imagerie)
@@ -997,6 +1085,7 @@ function _traiter_mots!(m::Moteur, a::AcqModule, tampon::Vector{UInt16}, n::Inte
                    "par trame, $(geo.reglage[3]) ignorées en haut)"))
     end
     a.rangeur = Rangeur(geo, a.tic_s, a.dt_ns, g)
+    a.blocs === nothing || rois_rangeur!(a.rangeur, _bits_rois(a.blocs, geo.ny, geo.nx); canaux = a.blocs.canaux)
     a.pool = _nouveau_pool!(m, a.carte, geo.ny, geo.nx, a.dt_ns)
     mots = a.etalonnage.mots
     a.etalonnage = Etalonnage()
@@ -1007,6 +1096,7 @@ end
 
 function _publier_trame!(m::Moteur, a::AcqModule, r::Rangeur, complete::Bool)
     a.trames += 1
+    a.blocs === nothing || _bloc_trame!(a, r, complete)
     t = _acquerir!(a.pool)
     if t === nothing
         Threads.atomic_add!(m.trames_sautees, 1)
@@ -1453,6 +1543,157 @@ function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
     publier!(m, Fin(:clamp, "$raison après $passes passe(s)", erreur, fichiers, time()))
     _etat!(m, :pret)
     return nothing
+end
+
+# ---------------------------------------------------------------------
+# Realtime en images (ImagesROI) : un histogramme par ROI tous les N images
+# ---------------------------------------------------------------------
+
+function _images_roi!(m::Moteur, src::Source, ctx::Contexte, c::ImagesROI)
+    r = _reglages_courants!(m, ctx)
+    modules = _cartes_par_canal(ctx, r)
+    refus = isempty(modules) ? "Realtime en images : aucune carte prête" :
+            length(c.rois) > ROI_MAX ? "Realtime en images : $(length(c.rois)) ROI, $ROI_MAX au plus" :
+            c.trames < 1 ? "Realtime en images : au moins 1 image par bloc" : ""
+    if !isempty(refus)
+        publier!(m, Alerte(:erreur, -1, refus))
+        publier!(m, Fin(:clamp, refus, true, String[], time()))
+        return nothing
+    end
+    g = c.geometrie
+    parametres, _ = parametres_imagerie(r, g)
+    enregistrer = !isempty(c.dossier)
+    dossier = enregistrer ? c.dossier : joinpath(dossier_spc(r), "moteur")
+    mkpath(dossier)
+    tampon = zeros(UInt16, 1 << 20)
+    acqs = AcqModule[]
+    raison, erreur = "arrêtée", false
+    blocs_publies = 0
+    attendre = !est_materiel(src)
+    debut = time()
+    dt_ns = NaN
+    try
+        for k in modules
+            serie = get(ctx.series, k, "")
+            nom = isempty(serie) ? "module$k" : nom_fichier_serie(serie)
+            prefixe = joinpath(dossier, nom)
+            lus = configurer!(src, k, parametres, prefixe * "_parametres.ini")
+            _signaler_tableau!(m, k, parametres, lus)
+            info = infos_fifo(src, k)
+            fenetre = fenetre_tac(src, k, lus)
+            isnan(dt_ns) && (dt_ns = fenetre / r.canaux_clamp)
+            ecrivain = enregistrer ? ouvrir_spc(prefixe * ".spc", info.entete) : nothing
+            push!(acqs, AcqModule(k, prefixe, info.horloge_macro_s, fenetre, fenetre / 4096, ecrivain,
+                                  Etalonnage(), false, nothing, nothing, nothing, false, 0, 0, 0.0, nothing,
+                                  isempty(serie) ? nothing : serie, BlocsROI(c, r.canaux_clamp)))
+            effacer_taux!(src, k)
+        end
+        _etat!(m, :clamp)
+        debut = time()
+        for a in acqs
+            a.debut = debut
+            lancer!(src, a.carte)
+        end
+        prochain_taux = debut + PERIODE_TAUX
+        while true
+            m.arret[] && break
+            cmd = _prochaine_commande(m)
+            cmd isa Arret && break
+            cmd === nothing || _refuser!(m, cmd, "Realtime en cours")
+            for a in acqs
+                _traiter_mots!(m, a, tampon, lire_mots!(src, a.carte, tampon), g)
+                if !a.deborde && (lire_etat(src, a.carte) & SPC_FOVFL) != 0
+                    a.deborde = true
+                    publier!(m, Alerte(:erreur, a.carte, "module $(a.carte) : FIFO débordé, des photons sont perdus : baisse la lumière"))
+                end
+            end
+            blocs_publies += _publier_blocs!(m, acqs, dt_ns, blocs_publies, attendre)
+            if all(a -> epuisee(src, a.carte), acqs)
+                raison = "fin du rejeu"
+                break
+            end
+            if time() >= prochain_taux
+                _taux!(m, src, ctx, modules, true)
+                prochain_taux += PERIODE_TAUX
+            end
+            sleep(0.005)
+        end
+    catch e
+        raison, erreur = _texte_erreur(e), true
+        @error "Realtime en images interrompu" exception = (e, catch_backtrace())
+        publier!(m, Alerte(:erreur, -1, "Realtime en images interrompu : " * raison))
+    finally
+        for a in acqs
+            try
+                erreur || _traiter_mots!(m, a, tampon, lire_mots!(src, a.carte, tampon), g)   # avant l'arrêt, qui vide le FIFO
+            catch
+            end
+            try
+                stopper!(src, a.carte)
+            catch e
+                publier!(m, Alerte(:erreur, a.carte, "arrêt de la mesure : " * _texte_erreur(e)))
+            end
+        end
+    end
+    fichiers = String[]
+    try
+        for a in acqs
+            a.rangeur === nothing || terminer!((rg, complete) -> _publier_trame!(m, a, rg, complete), a.rangeur)
+        end
+        blocs_publies += _publier_blocs!(m, acqs, dt_ns, blocs_publies, attendre)
+        for (canal, a) in enumerate(acqs)
+            a.rangeur === nothing &&
+                publier!(m, Alerte(:avertissement, a.carte, "module $(a.carte) : aucune image (pas d'horloge de ligne ou de trame)"))
+            a.ecrivain === nothing && continue
+            push!(fichiers, fermer_spc!(a.ecrivain))
+            push!(fichiers, ecrire_acquisition_ini(a.prefixe * "_acquisition.ini", a.carte, a.tic_s, a.fenetre_ns,
+                                                   time() - debut, a.deborde; geometrie = g, dcc = r.dcc,
+                                                   clamp = Dict{String,Any}("serie" => something(a.serie, ""), "canal" => canal,
+                                                                            "canaux" => r.canaux_clamp, "images" => 1,
+                                                                            "trames_bloc" => c.trames, "blocs" => blocs_publies,
+                                                                            "trames" => a.trames)))
+            isfile(a.prefixe * "_parametres.ini") && push!(fichiers, a.prefixe * "_parametres.ini")
+        end
+    catch e
+        erreur = true
+        @error "Fichiers du Realtime en images" exception = (e, catch_backtrace())
+        publier!(m, Alerte(:erreur, -1, "fichiers du Realtime en images : " * _texte_erreur(e)))
+    end
+    _publier_bilan!(m, src)
+    publier!(m, Fin(:clamp, "$raison après $blocs_publies bloc(s) de $(c.trames) image(s)", erreur, fichiers, time()))
+    _etat!(m, :pret)
+    return nothing
+end
+
+"""
+Les blocs terminés sur toutes les cartes (le k-ième de chacune : les mêmes
+images), un `HistoClamp` par ROI ; renvoie le nombre de blocs publiés.
+"""
+function _publier_blocs!(m::Moteur, acqs::Vector{AcqModule}, dt_ns::Float64, deja::Int, attendre::Bool)
+    n = 0
+    while !isempty(acqs) && all(a -> !isempty(a.blocs.file), acqs)
+        parts = [popfirst!(a.blocs.file) for a in acqs]
+        n += 1
+        t0, t1 = parts[1][2], parts[1][3]
+        pertes = sum(p[4] for p in parts)
+        motifs = String[]
+        pertes > 0 && push!(motifs, "GAP : $pertes enregistrement(s) perdus pendant le bloc")
+        for (a, p) in zip(acqs, parts)
+            p[5] && push!(motifs, "module $(a.carte) : FIFO débordé (SPC_FOVFL) pendant le bloc")
+        end
+        canaux = size(parts[1][1], 1)
+        for code in codes_blocs(acqs[1].blocs)
+            histos = Matrix{UInt32}[]
+            for p in parts
+                h = zeros(UInt32, canaux, 16)
+                h[:, code + 1] .= view(p[1], :, code + 1)
+                push!(histos, h)
+            end
+            _publier_histo!(m, HistoClamp(deja + n, t0, t1, [a.carte for a in acqs], [something(a.serie, "") for a in acqs],
+                                          histos, pertes, dt_ns, copy(motifs)); attendre)
+        end
+    end
+    return n
 end
 
 """Lit le FIFO d'une carte, l'enregistre et range ses photons dans les passes."""

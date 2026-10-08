@@ -174,7 +174,10 @@ The build takes tens of minutes and bundles Julia + all libraries
 4. **Configure Layout**: Use the Layout panel to adjust:
    - **Time range**: Duration of display window (seconds)
    - **Binning**: Number of frames to sum together
-   - **Plot selection**: Choose what quantities to display
+   - **Plot selection**: Choose what quantities to display. "Channel ratio":
+     per ROI, the photon count of the channel whose toggle is on over the
+     other's (the two toggles are exclusive there: the one on is the
+     numerator)
 
 ## SPC card: SPC-QC-104 (FLIMCore)
 
@@ -295,6 +298,11 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
     the default; `routing_mode = 0x1900`, set by the engine). Without M3,
     `fin_par_m3 = false`: the pass lasts the programmed scan after M0
     (0x1100).
+- the **1064 nm laser gate**: AO 1 of the 6110 (`channels.commands`,
+  `[limits] gate_1064_v` = 5 V in config/bench.toml), on the same sample
+  clock, at 5 V exactly while the gate P0.0 is high — during each scan, the
+  whole slot in images — and 0 V otherwise; AO 0 stays PI command 1
+  (0–1 V). `gate_1064_v = 0` makes AO 1 PI command 2 again.
 - the **SPC engine** measures in FIFO mode (`[clamp]` in `config/spc.toml`,
   256 channels by default) and cuts each card's photon stream into passes
   at the markers the card itself time-stamped: a late read only fills the
@@ -314,6 +322,19 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
   window and Kalman observer per ROI and channel), and runs **one PI per
   ROI**: the DAQ loop writes each ROI's own commands during that ROI's
   scans.
+
+**Realtime in images** (the SPC window's "Realtime: whole images" box,
+`[clamp] images`): START acquires whole images instead of scanning the
+ROIs with the galvos — the microscope's scanner images (line and frame
+clocks on M1/M2), the galvos stay at 0 V, the gate P0.0 (and P0.1) stays
+high. Every "Images / block" images (`images_par_bloc`, consecutive
+blocks), the photons of each ROI's pixels make one histogram per ROI and
+channel (the ROIs as drawn on the ROI popup's image, of the scanner's
+size; ROI off or none drawn: the whole image), fit and shown like the
+passes, recorded the same way (Playback replays them). No PI: while the
+protocol is active, its value at each moment is the command voltage
+(0 V to `command_max_v`), on Out 1 if controller 1 is on, Out 2 if
+controller 2 is; 0 V otherwise.
 
 **ROI off** (or no ROI drawn): the galvos stay still and the slots keep the
 same scan/pause rhythm; the routing lines carry code 1 during the scans

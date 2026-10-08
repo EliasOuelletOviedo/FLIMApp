@@ -51,15 +51,20 @@ end
     check_slot(buffers, cfg)
 
 Last check before a slot is written: finite values, galvos within
-`galvo_limit_v`, commands within 0…`command_max_v`. Throws a
-`SafetyError`; allocates nothing when the slot is fine.
+`galvo_limit_v`, command 1 within 0…`command_max_v`, AO 1 within
+0…`gate_1064_v` when it is the 1064 nm gate (0…`command_max_v` when it is
+PI command 2). Throws a `SafetyError`; allocates nothing when the slot is
+fine.
 """
 function check_slot(buffers::SlotBuffers, cfg::BenchConfig)
     @inbounds for v in buffers.galvos
         (isfinite(v) && abs(v) <= cfg.galvo_limit_v) || throw(SafetyError("galvo sample $v V outside ±$(cfg.galvo_limit_v) V"))
     end
-    @inbounds for v in buffers.commands
-        (isfinite(v) && 0.0 <= v <= cfg.command_max_v) || throw(SafetyError("command sample $v V outside 0…$(cfg.command_max_v) V"))
+    n = length(buffers.commands) ÷ 2
+    @inbounds for (j, v) in enumerate(buffers.commands)
+        limit = j > n && cfg.gate_1064_v > 0 ? cfg.gate_1064_v : cfg.command_max_v
+        (isfinite(v) && 0.0 <= v <= limit) ||
+            throw(SafetyError("$(j > n ? (cfg.gate_1064_v > 0 ? "1064 nm gate" : "command 2") : "command 1") sample $v V outside 0…$limit V"))
     end
     return nothing
 end

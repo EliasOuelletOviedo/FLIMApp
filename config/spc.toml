@@ -77,6 +77,8 @@ irf_histogrammes_max = 600       # … au plus ce nombre de Singles : au-delà, 
 
 [clamp]
 canaux = 256                     # canaux des déclins du Realtime (les 4096 du FIFO regroupés) : 256, la résolution de l'IRF
+images = false                   # Realtime en images : galvos arrêtés, le scanner du microscope balaie l'image entière ; un histogramme par ROI (ses pixels) tous les images_par_bloc images, le protocole donnant la tension de commande (pas de PI)
+images_par_bloc = 17             # images additionnées pour chaque histogramme de ROI du Realtime en images
 fin_par_m3 = true                # false : M0 seul, chaque passe dure le scan programmé ; true : sa fin vient de M3 (le même signal de passe câblé aussi sur M3, front descendant)
 inverser_routage = true          # la NI écrit NON(c) sur P0.4-P0.7 et la carte, aux entrées actives à 0 V, lit c
 

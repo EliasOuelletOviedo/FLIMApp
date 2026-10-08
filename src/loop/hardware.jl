@@ -135,7 +135,7 @@ function check_clock_route(cfg::BenchConfig)
     with_context("checking the RTSI route of the sample clock ($(cfg.clock_source) → $(device(cfg.command_channels)))") do
         th = DAQmx.create_task("flimapp_route_check")
         try
-            DAQmx.add_ao_voltage(th, cfg.command_channels; minv = 0.0, maxv = cfg.command_max_v)
+            add_command_channels!(th, cfg)
             DAQmx.cfg_sample_clock(th, cfg.sample_rate_hz; source = cfg.clock_source, mode = DAQmx.Val_ContSamps, nsamp = 1000)
             DAQmx.task_control(th, DAQmx.Val_Task_Commit)
         catch e
@@ -149,6 +149,41 @@ function check_clock_route(cfg::BenchConfig)
         end
     end
     return nothing
+end
+
+"""
+    command_channel_pair(spec) -> (ao0, ao1)
+
+The two command outputs of `channels.commands`: "S6110/ao0:1" → "S6110/ao0",
+"S6110/ao1" (or two channels separated by a comma).
+"""
+function command_channel_pair(spec::AbstractString)
+    parts = strip.(split(spec, ','))
+    length(parts) == 2 && return (String(parts[1]), String(parts[2]))
+    m = match(r"^(.*?)(\d+):(\d+)$", strip(spec))
+    (m !== nothing && parse(Int, m[3]) == parse(Int, m[2]) + 1) ||
+        error("channels.commands = \"$spec\": two consecutive outputs (\"S6110/ao0:1\") for command 1 and the 1064 nm gate")
+    return (m[1] * m[2], m[1] * m[3])
+end
+
+"""
+    add_command_channels!(th, cfg)
+
+The command AO channels: AO 0, PI command 1, declared 0…`command_max_v`;
+AO 1 — the 1064 nm laser gate when `[limits] gate_1064_v` > 0 — declared
+0…`gate_1064_v` (otherwise PI command 2, 0…`command_max_v`). NI-DAQmx
+itself refuses any write outside (-200561), a second layer behind
+`check_slot`.
+"""
+function add_command_channels!(th, cfg::BenchConfig)
+    if cfg.gate_1064_v > 0
+        ao0, ao1 = command_channel_pair(cfg.command_channels)
+        DAQmx.add_ao_voltage(th, ao0; minv = 0.0, maxv = cfg.command_max_v)
+        DAQmx.add_ao_voltage(th, ao1; minv = 0.0, maxv = cfg.gate_1064_v)
+    else
+        DAQmx.add_ao_voltage(th, cfg.command_channels; minv = 0.0, maxv = cfg.command_max_v)
+    end
+    return th
 end
 
 function configure_output!(th, cfg::BenchConfig, buffer_samples::Integer)
@@ -183,11 +218,10 @@ function hw_prepare!(hw::NIHardware, buffer_samples::Integer; pass_ticks = nothi
             configure_output!(hw.lines, cfg, buffer_samples)
         end
 
-        # Declared 0…command_max_v: NI-DAQmx itself refuses any write outside
-        # that range (-200561), a second layer behind command_volts/check_slot.
-        with_context("creating the command AO task ($(cfg.command_channels), 0…$(cfg.command_max_v) V)") do
+        with_context("creating the command AO task ($(cfg.command_channels): command 0…$(cfg.command_max_v) V" *
+                     (cfg.gate_1064_v > 0 ? ", 1064 nm gate 0…$(cfg.gate_1064_v) V)" : ")")) do
             hw.commands = DAQmx.create_task("flimapp_commands")
-            DAQmx.add_ao_voltage(hw.commands, cfg.command_channels; minv = 0.0, maxv = cfg.command_max_v)
+            add_command_channels!(hw.commands, cfg)
             configure_output!(hw.commands, cfg, buffer_samples)
         end
 
@@ -362,7 +396,7 @@ function hw_zero!(hw::NIHardware)
         DAQmx.write_do_u8(th, UInt8[0]; autostart = true)
     end)
     attempt("command outputs", () -> DAQmx.withtask("flimapp_zero_commands") do th
-        DAQmx.add_ao_voltage(th, cfg.command_channels; minv = 0.0, maxv = cfg.command_max_v)
+        add_command_channels!(th, cfg)
         DAQmx.write_analog(th, zeros(2); nsamp_per_chan = 1, autostart = true)
     end)
     isempty(cfg.shutter_line) || attempt("shutter", () -> DAQmx.withtask("flimapp_zero_shutter") do th
@@ -451,8 +485,10 @@ function hw_write!(hw::SimulatedHardware, buffers::SlotBuffers)
     for v in buffers.galvos
         abs(v) <= cfg.galvo_limit_v || throw(simulated_error(-200561, "galvo sample $v V outside the declared range"))
     end
-    for v in buffers.commands
-        0.0 <= v <= cfg.command_max_v || throw(simulated_error(-200561, "command sample $v V outside the declared range"))
+    # The declared ranges, as add_command_channels! makes them: AO 1 up to gate_1064_v when it is the 1064 nm gate.
+    for (j, v) in enumerate(buffers.commands)
+        limit = j > n && cfg.gate_1064_v > 0 ? cfg.gate_1064_v : cfg.command_max_v
+        0.0 <= v <= limit || throw(simulated_error(-200561, "command sample $v V outside the declared range"))
     end
     @inbounds for j in 1:n
         idx = mod(hw.written + j - 1, hw.capacity) + 1

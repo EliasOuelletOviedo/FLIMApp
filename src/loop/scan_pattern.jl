@@ -79,7 +79,11 @@ struct ScanPattern
     x::Matrix{Float64}
     y::Matrix{Float64}
     lines::Matrix{UInt8}
+    image_mode::Bool
 end
+
+ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines) =
+    ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, false)
 
 slots_per_cycle(p::ScanPattern) = size(p.x, 2)
 slot_position(p::ScanPattern, s::Integer) = mod(s, slots_per_cycle(p)) + 1
@@ -121,6 +125,16 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
     end
     scan_bits = do_bit(DO_BIT_GATE) | do_bit(DO_BIT_ENABLE)
     off_roi = routing_byte(FLIMCore.CODE_HORS_ROI, request.invert_routing)
+
+    if request.image_mode
+        # The Realtime in images: the microscope's scanner images; the galvos
+        # stay at 0 V and the gate (and enable) high the whole slot — no
+        # pause; the slots only pace the commands (the protocol's voltages).
+        lines = fill(routing_byte(FLIMCore.CODE_SANS_ROI, request.invert_routing) | scan_bits, n, 1)
+        lines[1:n_pulse, 1] .|= pulse_bits(true)
+        return ScanPattern(rate, off_roi, false, [0], n_scan, n_shift, n, zeros(n_shift), zeros(n_shift),
+                           zeros(n, 1), zeros(n, 1), lines, true)
+    end
 
     if !scanning
         # Galvos still, same scan/pause rhythm: the no-ROI code during the
@@ -189,7 +203,8 @@ buffer_samples(b::SlotBuffers) = length(b.lines)
     prepare_slot!(buffers, pattern, s, command1_v, command2_v)
 
 Fill `buffers` with slot `s`: its ROI's galvo path and lines, the two
-command voltages during the scan and 0 V during the shift. No allocation.
+command voltages during the scan (the whole slot in images, where the gate
+stays high) and 0 V during the shift. No allocation.
 """
 function prepare_slot!(buffers::SlotBuffers, pattern::ScanPattern, s::Integer, command1_v::Float64, command2_v::Float64)
     n = pattern.slot_samples
@@ -201,7 +216,7 @@ function prepare_slot!(buffers::SlotBuffers, pattern::ScanPattern, s::Integer, c
     n_scan = pattern.scan_samples
     commands = buffers.commands
     @inbounds for j in 1:n
-        on = j <= n_scan
+        on = pattern.image_mode || j <= n_scan
         commands[j] = on ? command1_v : 0.0
         commands[n + j] = on ? command2_v : 0.0
     end

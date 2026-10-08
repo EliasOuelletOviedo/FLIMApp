@@ -221,6 +221,9 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                     # app.layout.plot1/plot2 directly, so the new selection
                     # must already be stored before it runs.
                     commit_layout_value!(symbol, selection)
+                    # Channel ratio: one numerator only — with both on, channel 2 goes off (it redraws).
+                    ch1, ch2 = layout_params[Symbol(symbol, :_ch1)], layout_params[Symbol(symbol, :_ch2)]
+                    selection == RATIO_PLOT && ch1.active[] && ch2.active[] && (ch2.active[] = false)
                     render_plot!(app, app_run, blocks, symbol)
                 end
 
@@ -228,6 +231,11 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
                 on(block.active) do state
                     commit_layout_value!(symbol, state)
                     plot_slot = symbol in (:plot1_ch1, :plot1_ch2) ? :plot1 : :plot2
+                    # Channel ratio: the two toggles exclusive — the one turned on is the numerator.
+                    if state && getfield(app.layout, plot_slot) == RATIO_PLOT
+                        other = layout_params[ratio_partner(symbol)]
+                        other.active[] && (other.active[] = false)
+                    end
                     render_plot!(app, app_run, blocks, plot_slot)
                 end
             end
@@ -242,3 +250,7 @@ function layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force::B
 
     return nothing
 end
+
+"""The other channel toggle of the same plot (:plot1_ch1 ↔ :plot1_ch2…): exclusive for the Channel ratio."""
+ratio_partner(symbol::Symbol) = Dict(:plot1_ch1 => :plot1_ch2, :plot1_ch2 => :plot1_ch1,
+                                     :plot2_ch1 => :plot2_ch2, :plot2_ch2 => :plot2_ch1)[symbol]

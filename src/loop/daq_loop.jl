@@ -211,9 +211,12 @@ once it has played).
 """
 function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s::Integer,
                      cfg::BenchConfig, ex::Exchange, written_commands::Matrix{Float64})
-    command1, command2 = command_values(ex, max(1, slot_roi(pattern, s)))
+    command1, command2 = pattern.image_mode ?
+        image_mode_commands(current_settings(ex), slot_start_s(pattern, s), cfg) :
+        command_values(ex, max(1, slot_roi(pattern, s)))
     command1_v = command_volts(command1, cfg)
-    command2_v = command_volts(command2, cfg)
+    # AO 1: the 1064 nm laser gate (`[limits] gate_1064_v`), high while the gate P0.0 is — or PI command 2.
+    command2_v = cfg.gate_1064_v > 0 ? cfg.gate_1064_v : command_volts(command2, cfg)
     prepare_slot!(buffers, pattern, s, command1_v, command2_v)
     check_slot(buffers, cfg)
     hw_write!(hw, buffers)
@@ -222,6 +225,28 @@ function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s
     written_commands[2, column] = command2_v
     return nothing
 end
+
+"""Time of slot `s`'s first sample from the start of the run's first sample (the entry first)."""
+slot_start_s(p::ScanPattern, s::Integer) = (entry_samples(p) + s * p.slot_samples) / p.sample_rate_hz
+
+"""
+    image_mode_commands(settings, t, cfg) -> (command1, command2)
+
+The Realtime in images (`[clamp] images`) has no PI: while the protocol is
+active, its value at `t` (s since the run started) is a voltage, written
+on the outputs whose controller is on (Out 1: `ch1_on`, Out 2: `ch2_on`);
+otherwise, and off the protocol (before its delay, after its repeats),
+0 V. In percent of `command_full_scale_v`, as the PI's commands, for
+`command_volts` — which keeps it within 0 V and `command_max_v`.
+"""
+function image_mode_commands(settings::AnalysisSettings, t::Real, full_scale_v::Real)
+    p = settings.protocol
+    volts = p.active ? protocol_setpoint_at(p, t) : NaN
+    percent = isfinite(volts) ? 100 * volts / full_scale_v : NaN
+    c = settings.controller
+    return (c.ch1_on ? percent : NaN, c.ch2_on ? percent : NaN)
+end
+image_mode_commands(settings::AnalysisSettings, t::Real, cfg::BenchConfig) = image_mode_commands(settings, t, cfg.command_full_scale_v)
 
 # Below this, a garbage-collector pause (a few hundred ms have been measured
 # during heavy fitting, see the Console panel) can miss a slot.

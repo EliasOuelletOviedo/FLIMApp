@@ -37,7 +37,7 @@ const BENCH_CONFIG_DEFAULTS = Dict{String, Dict{String, Any}}(
         "passes_terminal" => ""
     ),
     "timing" => Dict{String, Any}("sample_rate_hz" => 10_000.0, "block_ms" => 20, "lead_slots" => 0),
-    "limits" => Dict{String, Any}("galvo_v" => 5.0, "command_full_scale_v" => 5.0, "command_max_v" => 5.0),
+    "limits" => Dict{String, Any}("galvo_v" => 2.0, "command_full_scale_v" => 1.0, "command_max_v" => 1.0, "gate_1064_v" => 5.0),
     "sync" => Dict{String, Any}("pulse_s" => 0.001),
     "watchdog" => Dict{String, Any}("enabled" => true, "timeout_s" => 1.0, "lines" => "X6321/port0/line0:7"),
     "journal" => Dict{String, Any}("directory" => "", "readback" => true, "queue_capacity" => 4096, "flush_interval_s" => 1.0),
@@ -72,6 +72,7 @@ Base.@kwdef struct BenchConfig
     galvo_limit_v::Float64
     command_full_scale_v::Float64
     command_max_v::Float64
+    gate_1064_v::Float64
     sync_pulse_s::Float64
     watchdog_enabled::Bool
     watchdog_timeout_s::Float64
@@ -164,6 +165,8 @@ function bench_config_from_dict(raw::AbstractDict; source::AbstractString = "dic
         galvo_limit_v = positive("limits", "galvo_v"),
         command_full_scale_v = positive("limits", "command_full_scale_v"),
         command_max_v = positive("limits", "command_max_v"),
+        gate_1064_v = (v = Float64(get_value("limits", "gate_1064_v"));
+                       0 <= v <= 10 ? v : error("bench config: limits.gate_1064_v must be within 0 and 10 V (0: AO 1 is PI command 2)")),
         sync_pulse_s = positive("sync", "pulse_s"),
         watchdog_enabled = Bool(get_value("watchdog", "enabled")),
         watchdog_timeout_s = positive("watchdog", "timeout_s"),

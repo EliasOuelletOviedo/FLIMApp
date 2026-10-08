@@ -304,6 +304,12 @@ Le cumul depuis le début (`intensite_tot`, `somme_t_tot`, `dans_image`,
 Les événements du même tic peuvent arriver dans n'importe quel ordre et
 être coupés entre deux lectures : ceux du dernier tic lu attendent la
 lecture suivante (ou `terminer!`).
+
+Avec `rois_rangeur!` (le Realtime en images, `ImagesROI`) : chaque photon de
+l'image va aussi dans l'histogramme de chaque ROI qui contient son pixel,
+`histos_roi[canal, code + 1]` (`canaux` canaux de temps croissant, la
+colonne du code de la ROI, comme les passes `HistoClamp`), cumulé jusqu'à
+ce que l'appelant le remette à zéro.
 """
 mutable struct Rangeur
     nx::Int
@@ -340,6 +346,10 @@ mutable struct Rangeur
     somme_t_tot::Matrix{Float64}
     dans_image::Int
     trames_completes::Int
+    # ROI (rois_rangeur!) : bit k du pixel = ROI de code k ; vide : pas d'histogramme par ROI
+    roi_bits::Matrix{UInt16}
+    roi_groupe::Int
+    histos_roi::Matrix{UInt32}
 end
 
 function Rangeur(geo, tic_s, dt_ns, g::Geometrie)
@@ -350,7 +360,24 @@ function Rangeur(geo, tic_s, dt_ns, g::Geometrie)
                    Int64[], Int64[], Int64[], UInt16[],
                    0, -1, -1, Int64(0), false, 0, Int64(0),
                    zeros(UInt32, ny, nx), zeros(Float64, ny, nx), zeros(Int, 4096), 0, 0, 0, 0,
-                   zeros(UInt32, ny, nx), zeros(Float64, ny, nx), 0, 0)
+                   zeros(UInt32, ny, nx), zeros(Float64, ny, nx), 0, 0,
+                   zeros(UInt16, 0, 0), 16, zeros(UInt32, 0, 0))
+end
+
+"""
+    rois_rangeur!(r, bits; canaux=256)
+
+Range aussi chaque photon de l'image dans l'histogramme des ROI de son
+pixel : `bits[y, x]` (taille `ny × nx` de l'image), bit k pour la ROI de
+code k (1 à 15). `r.histos_roi` : `canaux × 16`, remis à zéro.
+"""
+function rois_rangeur!(r::Rangeur, bits::AbstractMatrix{UInt16}; canaux::Integer = 256)
+    size(bits) == (r.ny, r.nx) || error("ROI sur une image de $(size(bits, 2)) × $(size(bits, 1)) pixels, le scanner en donne $(r.nx) × $(r.ny)")
+    4096 % canaux == 0 || error("canaux : un diviseur de 4096")
+    r.roi_bits = Matrix{UInt16}(bits)
+    r.roi_groupe = 4096 ÷ canaux
+    r.histos_roi = zeros(UInt32, canaux, 16)
+    return r
 end
 
 """Déclin de tous les photons depuis le début, temps croissant (comme `ranger_photons`)."""
@@ -450,6 +477,14 @@ end
         r.somme_t[y + 1, x + 1] += v
         r.intensite_tot[y + 1, x + 1] += 1
         r.somme_t_tot[y + 1, x + 1] += v
+    end
+    if !isempty(r.roi_bits)
+        b = @inbounds r.roi_bits[y + 1, x + 1]
+        canal = (4095 - Int(adc)) ÷ r.roi_groupe + 1
+        while b != 0x0000
+            @inbounds r.histos_roi[canal, trailing_zeros(b) + 1] += 1
+            b &= b - 0x0001
+        end
     end
     r.dans_image += 1
     r.dans_image_trame += 1

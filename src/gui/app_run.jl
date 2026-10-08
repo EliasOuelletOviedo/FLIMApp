@@ -88,12 +88,24 @@ roi_channel_series(app_run) = Iterators.flatten((app_run.ch1_rois, app_run.ch2_r
 One plotted curve fed from a history: `points` is the Observable the line
 was drawn with, refilled in place from `xs`/`ys` (the history vectors
 themselves) by the refresh tick — one `notify` per tick, no new plot object.
+With `ratio` (the Channel ratio plot), the curve is `ys ./ den`, `den` the
+other channel's history at the same times.
 """
 struct SeriesLine
     points::Observable{Vector{Point2f}}
     xs::Vector{Float64}
     ys::Vector{Float64}
+    den::Vector{Float64}
+    ratio::Bool
 end
+
+SeriesLine(points, xs, ys) = SeriesLine(points, xs, ys, Float64[], false)
+
+"""Points a `SeriesLine` can show (the shortest of its histories)."""
+line_length(line::SeriesLine) = line.ratio ? min(length(line.xs), length(line.ys), length(line.den)) : min(length(line.xs), length(line.ys))
+
+"""The `i`-th value a `SeriesLine` shows: its history, or the ratio of its two."""
+@inline line_value(line::SeriesLine, i::Int) = line.ratio ? line.ys[i] / line.den[i] : line.ys[i]
 
 """One readback signal of the Readback plot, refilled from the latest slot."""
 struct ReadbackLine

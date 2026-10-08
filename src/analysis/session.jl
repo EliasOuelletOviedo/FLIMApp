@@ -152,6 +152,8 @@ function session_info(; mode::AbstractString, rois::Vector{RoiCoordinates}, orde
             "canaux" => spc.canaux_clamp,
             "inverser_routage" => spc.inverser_routage,
             "fin_par_m3" => spc.fin_par_m3,
+            "images" => spc.images,                              # the Realtime in images: whole images, ROI binning
+            "images_par_bloc" => spc.images_par_bloc,
             "code_hors_roi" => FLIMCore.CODE_HORS_ROI,
             "code_sans_roi" => FLIMCore.CODE_SANS_ROI,
             "spc_module" => Dict{String, Any}(FLIMCore.parametres_base(spc)),   # the DLL keys sent (QC-104: [qc] translated)
