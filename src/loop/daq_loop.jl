@@ -215,8 +215,8 @@ function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s
         image_mode_commands(current_settings(ex), slot_start_s(pattern, s), cfg) :
         command_values(ex, max(1, slot_roi(pattern, s)))
     command1_v = command_volts(command1, cfg)
-    # AO 1: the 1064 nm laser gate (`[limits] gate_1064_v`), high while the gate P0.0 is — or PI command 2.
-    command2_v = cfg.gate_1064_v > 0 ? cfg.gate_1064_v : command_volts(command2, cfg)
+    # AO 1: the 1064 nm laser gate (`[limits] gate_1064_v`), open only while the laser is to emit — or PI command 2.
+    command2_v = cfg.gate_1064_v > 0 ? gate_1064_volts(command1_v, cfg) : command_volts(command2, cfg)
     prepare_slot!(buffers, pattern, s, command1_v, command2_v)
     check_slot(buffers, cfg)
     hw_write!(hw, buffers)
@@ -225,6 +225,17 @@ function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s
     written_commands[2, column] = command2_v
     return nothing
 end
+
+"""
+    gate_1064_volts(command1_v, cfg)::Float64
+
+The 1064 nm laser gate on AO 1 for a slot whose 1064 nm power command (AO 0)
+is `command1_v`: `gate_1064_v` while the laser is to emit — a command above
+0 V — and 0 V when it is to be off (controller 1 off, no protocol or a
+protocol at 0 V, a PI at 0 %). `prepare_slot!` then puts it on the samples
+where the gate P0.0 is high, 0 V elsewhere.
+"""
+gate_1064_volts(command1_v::Real, cfg::BenchConfig)::Float64 = command1_v > 0 ? cfg.gate_1064_v : 0.0
 
 """Time of slot `s`'s first sample from the start of the run's first sample (the entry first)."""
 slot_start_s(p::ScanPattern, s::Integer) = (entry_samples(p) + s * p.slot_samples) / p.sample_rate_hz

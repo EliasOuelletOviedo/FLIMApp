@@ -300,9 +300,11 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
     (0x1100).
 - the **1064 nm laser gate**: AO 1 of the 6110 (`channels.commands`,
   `[limits] gate_1064_v` = 5 V in config/bench.toml), on the same sample
-  clock, at 5 V exactly while the gate P0.0 is high — during each scan, the
-  whole slot in images — and 0 V otherwise; AO 0 stays PI command 1
-  (0–1 V). `gate_1064_v = 0` makes AO 1 PI command 2 again.
+  clock, at 5 V while the laser is to emit — its power command on AO 0
+  above 0 V — and the gate P0.0 is high (during each scan, the whole slot
+  in images); 0 V otherwise, so closed whenever the command is 0 V
+  (controller 1 off, protocol inactive or at 0 V, PI at 0 %). AO 0 stays
+  PI command 1 (0–1 V). `gate_1064_v = 0` makes AO 1 PI command 2 again.
 - the **SPC engine** measures in FIFO mode (`[clamp]` in `config/spc.toml`,
   256 channels by default) and cuts each card's photon stream into passes
   at the markers the card itself time-stamped: a late read only fills the

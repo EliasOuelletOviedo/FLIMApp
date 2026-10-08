@@ -48,7 +48,7 @@ lead_slots = 0          # slots written ahead of the card; 0 = max(2, number of 
 galvo_v = 2.0                  # any galvo sample beyond this is refused
 command_full_scale_v = 1.0     # output for a 100 % PI command
 command_max_v = 1.0            # AO range declared to NI-DAQmx: it refuses any write beyond
-gate_1064_v = 5.0              # AO 1 of channels.commands: the 1064 nm laser gate, this voltage while the gate P0.0 is high (each scan; the whole slot in images), 0 V otherwise — same sample clock. 0: AO 1 is PI command 2
+gate_1064_v = 5.0              # AO 1 of channels.commands: the 1064 nm laser gate, this voltage while the laser is to emit (command on AO 0 above 0 V) and the gate P0.0 is high (each scan; the whole slot in images), 0 V otherwise — same sample clock. 0: AO 1 is PI command 2
 
 [sync]
 pulse_s = 0.001                # width of the sequence (P0.2) and ROI (P0.3) pulses

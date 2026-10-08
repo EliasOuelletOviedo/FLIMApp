@@ -453,6 +453,9 @@ end
     @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, cfg)
     # AO 1 is the 1064 nm gate ([limits] gate_1064_v): 0–5 V there, synchronized with the gate P0.0.
     @test cfg.gate_1064_v == 5.0 && FLIMApp.command_channel_pair("S6110/ao0:1") == ("S6110/ao0", "S6110/ao1")
+    # Closed whenever the 1064 nm laser is to be off: its power command at 0 V (controller off, no protocol, PI at 0 %).
+    @test FLIMApp.gate_1064_volts(0.3, cfg) == 5.0 && FLIMApp.gate_1064_volts(0.0, cfg) == 0.0
+    @test FLIMApp.gate_1064_volts(FLIMApp.command_volts(NaN, cfg), cfg) == 0.0
     @test_throws ErrorException FLIMApp.command_channel_pair("S6110/ao0")
     FLIMApp.prepare_slot!(buffers, pattern, 0, 0.5, cfg.gate_1064_v)
     @test FLIMApp.check_slot(buffers, cfg) === nothing                         # 5 V on AO 1 only
