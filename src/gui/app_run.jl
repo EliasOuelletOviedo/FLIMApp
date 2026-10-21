@@ -294,6 +294,11 @@ Runtime state of the GUI thread. NOT serialized.
   its debug report goes at the end
 - `worker_stats::WorkerStats`: the analysis worker's counters of the current
   run, diagnosed once a second (diagnostics.jl)
+- `image_mode::Bool`: the current (or last) run is a Realtime in images
+  (`[clamp] images`), its commands the protocol's voltages
+- `stimulation::Vector{Float64}`: per frame, 1 while a command is above 0
+  (the stimulation is on), NaN otherwise — what the plots highlight in
+  images, where there is no lifetime setpoint
 - `diagnosed_t::Float64`: the time of the last `EtatClamp` diagnosed
 """
 mutable struct AppRun
@@ -332,6 +337,8 @@ mutable struct AppRun
     run_dir::String
     worker_stats::WorkerStats
     diagnosed_t::Float64
+    image_mode::Bool
+    stimulation::Vector{Float64}
 end
 
 function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); source = "defaults"),
@@ -358,6 +365,8 @@ function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); s
         RoiCoordinates[],
         "",
         WorkerStats(),
-        0.0
+        0.0,
+        false,
+        Float64[]
     )
 end

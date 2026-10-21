@@ -50,6 +50,8 @@ function accumulate_frame!(app, app_run, record::FrameRecord)
     accumulate_roi_sample!(app, app_run.ch1_rois[index], sample.ch1, sample.timestamps)
     accumulate_roi_sample!(app, app_run.ch2_rois[index], sample.ch2, sample.timestamps)
     push!(app_run.protocol_setpoint, sample.protocol_setpoint)
+    on = (isfinite(sample.command1) && sample.command1 > 0) || (isfinite(sample.command2) && sample.command2 > 0)
+    push!(app_run.stimulation, on ? 1.0 : NaN)
     push!(app_run.command1, sample.command1)
     push!(app_run.command2, sample.command2)
     push!(app_run.timestamps, sample.timestamps)
@@ -111,6 +113,7 @@ are rebuilt (see `rebuild_roi_series!`).
 function reset_acquisition_state!(app, app_run; n_rois::Union{Nothing, Int} = nothing)
     rebuild_roi_series!(app, app_run; n_rois = n_rois)
     empty!(app_run.protocol_setpoint)
+    empty!(app_run.stimulation)
     empty!(app_run.command1)
     empty!(app_run.command2)
     empty!(app_run.timestamps)
@@ -413,6 +416,7 @@ function start_pressed(app, app_run, blocks)
 
         app_run.run_mode = "Realtime"
         app_run.run_rois = copy(rois)
+        app_run.image_mode = images
         prepare_run_display!(app, app_run, blocks; n_rois = split_rois ? length(rois) : 1)
         app_run.roi_order = order
 
@@ -584,6 +588,7 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
     end
 
     app_run.run_mode = "Playback"
+    app_run.image_mode = images
     app_run.run_rois = copy(session.rois)
     app_run.roi_order = order
     prepare_run_display!(app, app_run, blocks; n_rois = isempty(order) ? 1 : max(1, maximum(order)))

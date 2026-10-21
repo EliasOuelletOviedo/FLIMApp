@@ -383,6 +383,25 @@ function cellpose_venv_python_path()::String
     return Sys.iswindows() ? joinpath(venv_dir, "Scripts", "python.exe") : joinpath(venv_dir, "bin", "python3")
 end
 
+"""How to set the Cellpose environment up on this OS (the commands, with this computer's paths)."""
+function cellpose_setup_hint()::String
+    venv_dir = joinpath(user_data_dir(), "cellpose-env")
+    return Sys.iswindows() ?
+        "in a terminal: py -m venv \"$venv_dir\", then \"$(joinpath(venv_dir, "Scripts", "python.exe"))\" -m pip install cellpose" :
+        "in a terminal: python3 -m venv \"$venv_dir\" && \"$(joinpath(venv_dir, "bin", "python3"))\" -m pip install cellpose"
+end
+
+"""Why the last Cellpose run failed ("" after a success), and what it said when it worked — shown in the ROI popup."""
+const CELLPOSE_LAST_ERROR = Ref("")
+const CELLPOSE_LAST_INFO = Ref("")
+
+"""Record a Cellpose failure: the popup shows it, and it becomes a coded problem (ROI-01 environment, ROI-02 Cellpose)."""
+function cellpose_failed!(id::AbstractString, reason::AbstractString)
+    CELLPOSE_LAST_ERROR[] = String(reason)
+    report_problem!(id, reason; quiet_s = 0)
+    return nothing
+end
+
 """
     CELLPOSE_SEGMENT_SCRIPT::String
 
@@ -492,13 +511,16 @@ function run_cellpose_segmentation(
         model_type::AbstractString=CELLPOSE_MODEL_TYPE,
         diameter::Real=CELLPOSE_DIAMETER
     )::Union{Nothing, Matrix{Int32}}
+    CELLPOSE_LAST_ERROR[], CELLPOSE_LAST_INFO[] = "", ""
     if !isfile(script_path)
         @error "Cellpose wrapper script not found" path=script_path
+        cellpose_failed!("ROI-02", "wrapper script not found: $script_path")
         return nothing
     end
 
     if Sys.which(python_cmd) === nothing
-        @error "Cellpose virtual environment not found" expected_path=python_cmd hint="python3 -m venv ~/.flimapp/cellpose-env && ~/.flimapp/cellpose-env/bin/pip install cellpose"
+        @error "Cellpose virtual environment not found" expected_path=python_cmd hint=cellpose_setup_hint()
+        cellpose_failed!("ROI-01", "no Python at $python_cmd — set the Cellpose environment up once, " * cellpose_setup_hint())
         return nothing
     end
 
@@ -518,23 +540,37 @@ function run_cellpose_segmentation(
             p
         catch e
             @error "Failed to launch Cellpose" python_cmd=python_cmd error=string(e)
+            cellpose_failed!("ROI-01", "cannot launch $python_cmd: " * first(split(string(e), '\n')))
             return nothing
         end
 
         if !success(process)
-            @error "Cellpose segmentation failed" exit_code=process.exitcode stderr=strip(String(take!(stderr_io)))
+            stderr_text = strip(String(take!(stderr_io)))
+            @error "Cellpose segmentation failed" exit_code=process.exitcode stderr=stderr_text
+            # The script's own first line says what failed; the traceback is in the log.
+            first_line = isempty(stderr_text) ? "exit code $(process.exitcode)" : first(split(stderr_text, '\n'))
+            if process.exitcode == 3
+                cellpose_failed!("ROI-01", "Cellpose not usable in $python_cmd: $first_line — " * cellpose_setup_hint())
+            elseif process.exitcode == 5
+                cellpose_failed!("ROI-02", "$first_line (the first use downloads the model: internet needed)")
+            else
+                cellpose_failed!("ROI-02", "segmentation failed (exit code $(process.exitcode)): $first_line")
+            end
             return nothing
         end
 
         if !isfile(output_path)
             @error "Cellpose subprocess exited successfully but wrote no output" stderr=strip(String(take!(stderr_io)))
+            cellpose_failed!("ROI-02", "Cellpose ended without writing its masks")
             return nothing
         end
 
-        @info "Cellpose segmentation finished" output=strip(String(take!(stdout_io)))
+        CELLPOSE_LAST_INFO[] = String(strip(String(take!(stdout_io))))
+        @info "Cellpose segmentation finished" output=CELLPOSE_LAST_INFO[]
         return read_cellpose_masks(output_path)
     catch e
         @error "Cellpose segmentation failed" error=string(e)
+        cellpose_failed!("ROI-02", "segmentation failed: " * first(split(string(e), '\n')))
         return nothing
     finally
         rm(input_path; force=true)
@@ -1065,6 +1101,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         end
         cellpose_running[] = true
         cellpose_button.label[] = "Running..."
+        popup_status[] = "Cellpose: segmenting… (the first use downloads the model, about 1 GB; on the CPU it can take minutes)"
 
         # Segmentation is a slow (seconds-to-a-minute) external subprocess —
         # @async, not synchronous, for the same reason as start_pressed's own
@@ -1078,7 +1115,8 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             try
                 masks = run_cellpose_segmentation(intensity)
                 if masks === nothing
-                    return   # run_cellpose_segmentation already logged why
+                    popup_status[] = "Cellpose failed: " * CELLPOSE_LAST_ERROR[]   # logged, and a coded problem
+                    return
                 end
 
                 x_offset, y_offset = image_offset[]
@@ -1101,6 +1139,9 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
                 n_added = length(traced)
 
                 @info "Cellpose ROIs imported" found=length(labels) added=n_added
+                popup_status[] = isempty(labels) ?
+                    "Cellpose found no object ($(CELLPOSE_LAST_INFO[])): too few photons in the image? Take a longer one" :
+                    "Cellpose: $(length(labels)) object(s), $n_added ROI(s) added ($(CELLPOSE_LAST_INFO[]))"
             finally
                 cellpose_running[] = false
                 cellpose_button.label[] = "Cellpose"

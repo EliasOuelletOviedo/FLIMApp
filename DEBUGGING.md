@@ -136,6 +136,8 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 |---|---|---|
 | GUI-01 | Error in a GUI handler | The message gives the handler's source file and line; the debug log has the stack trace. |
 | GUI-02 | Error in the display refresh | The debug log has the stack trace; the display may stop updating. |
+| ROI-01 | Cellpose: its Python environment is missing or broken | Set it up once (the message gives the commands with this computer's paths): a venv in ~/.flimapp/cellpose-env (Windows: %USERPROFILE%\.flimapp\cellpose-env, python in Scripts\python.exe) with pip install cellpose. scripts/cellpose_check.jl says what's missing. |
+| ROI-02 | Cellpose: segmentation failed | The message gives Cellpose's own error, the debug log its traceback. The first use downloads the model (internet); scripts/cellpose_check.jl tries a segmentation outside the app. |
 
 ### Playback
 

@@ -248,6 +248,23 @@ end
     sample = AcquisitionSample(frame, ChannelFrame(), 12.0, NaN, 1.0, 4.0, UInt32(7), 6, 0.05, 1.0, true, 0.0)
     FLIMApp.accumulate_frame!(app, app_run, FLIMApp.FrameRecord(sample, 1))
     @test app_run.command1 == [12.0] && app_run.protocol_setpoint == [4.0] && app_run.i == 7
+    @test app_run.stimulation == [1.0]                   # a command above 0: stimulating
+
+    # In images, the plots highlight the stimulation (no lifetime setpoint there).
+    highlight = FLIMApp.PlotSlot()
+    highlight.spans = FLIMApp.SetpointSpans(FLIMApp.Observable([NaN]), FLIMApp.Observable([NaN]))
+    stored = (copy(app_run.timestamps), copy(app_run.protocol_setpoint), copy(app_run.stimulation))
+    append!(empty!(app_run.timestamps), [1.0, 2.0, 3.0, 4.0])
+    append!(empty!(app_run.protocol_setpoint), fill(NaN, 4))
+    append!(empty!(app_run.stimulation), [NaN, 1.0, 1.0, NaN])
+    FLIMApp.refresh_plot_slot!(app, app_run, highlight)
+    @test all(isnan, highlight.spans.starts[])                                    # clamp: only the setpoint counts
+    app_run.image_mode = true
+    FLIMApp.refresh_plot_slot!(app, app_run, highlight)
+    @test !isempty(highlight.spans.starts[]) && first(highlight.spans.starts[]) == 2.0
+    app_run.image_mode = false
+    append!(empty!(app_run.timestamps), stored[1]); append!(empty!(app_run.protocol_setpoint), stored[2])
+    append!(empty!(app_run.stimulation), stored[3])
     @test length(series1.timestamps) == 2
 
     # Curves are refilled in place from the histories, windowed and decimated.
@@ -1559,6 +1576,37 @@ end
 
         # Subprocess launches but exits nonzero -> nothing, not thrown.
         @test FLIMApp.run_cellpose_segmentation(image; python_cmd="/usr/bin/false", script_path=stub_path) === nothing
+        @test occursin("exit code 1", FLIMApp.CELLPOSE_LAST_ERROR[])               # shown in the ROI popup (ROI-02)
+        @test FLIMApp.run_cellpose_segmentation(image; python_cmd=joinpath(tempname(), "python3"), script_path=stub_path) === nothing
+        @test occursin("no Python at", FLIMApp.CELLPOSE_LAST_ERROR[]) && occursin("pip install cellpose", FLIMApp.CELLPOSE_LAST_ERROR[])
+
+        # The real cellpose_segment.py, with a stand-in `cellpose` package: the mask comes back
+        # in place (numpy's tofile writes C order whatever the layout — it scrambled the masks),
+        # and an unknown model falls back to what this Cellpose version has.
+        has_numpy = success(pipeline(`python3 -c "import numpy"`; stdout = devnull, stderr = devnull))
+        if has_numpy
+            fake = mktempdir()
+            mkpath(joinpath(fake, "cellpose"))
+            write(joinpath(fake, "cellpose", "__init__.py"), "__version__ = '0-test'\n")
+            write(joinpath(fake, "cellpose", "core.py"), "def use_gpu():\n    return False\n")
+            write(joinpath(fake, "cellpose", "models.py"), """
+                import numpy as np
+                class CellposeModel:
+                    def __init__(self, gpu=False, pretrained_model=None, model_type=None):
+                        if pretrained_model not in (None, "cpsam"):
+                            raise ValueError("unknown model")
+                    def eval(self, img, diameter=None, **kw):
+                        return ((img > 0).astype(np.int32), None, None)
+                """)
+            real_script = joinpath(@__DIR__, "..", "scripts", "cellpose_segment.py")
+            wide = Float64[-1 2 0 7; 3 -4 5 -1; 0 6 -2 1]                   # not square: any scrambling shows
+            masks = withenv("PYTHONPATH" => fake) do
+                FLIMApp.run_cellpose_segmentation(wide; python_cmd = "python3", script_path = real_script, model_type = "cpsam_v2")
+            end
+            @test masks == Int32.(wide .> 0)
+            @test occursin("model cpsam", FLIMApp.CELLPOSE_LAST_INFO[]) && FLIMApp.CELLPOSE_LAST_ERROR[] == ""
+        end
+        FLIMApp.clear_problems!(("ROI-",))
     finally
         rm(stub_path; force=true)
     end

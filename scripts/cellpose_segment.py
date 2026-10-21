@@ -15,6 +15,11 @@ needed for Cellpose's own (row, col) convention.
 Usage:
     python cellpose_segment.py <input.bin> <output.bin> <pretrained_model> <diameter>
 
+The model: <pretrained_model> if this Cellpose has it, else "cpsam" (4.x),
+else "cyto3" (3.x); on the GPU when PyTorch sees one. Exit codes: 2 usage,
+3 Cellpose/PyTorch not importable, 4 segmentation error, 5 no model loads
+(the first use downloads the weights: internet needed).
+
 <diameter> of 0 lets Cellpose auto-estimate the typical object size from the
 image itself.
 
@@ -42,11 +47,43 @@ def read_image(path):
 
 
 def write_masks(path, masks_xy):
-    """Write (n_cols, n_rows) int32 header+data, Fortran order (see module docstring)."""
+    """
+    Write (n_cols, n_rows) int32 header+data, Fortran order (see module docstring).
+    `ravel(order="F")`: `tofile` always writes C order, whatever the array's
+    memory layout — `asfortranarray(...).tofile` would scramble the mask.
+    """
     n_cols, n_rows = masks_xy.shape
     with open(path, "wb") as f:
         np.array([n_cols, n_rows], dtype=np.int64).tofile(f)
-        np.asfortranarray(masks_xy.astype(np.int32)).tofile(f)
+        masks_xy.astype(np.int32).ravel(order="F").tofile(f)
+
+
+def load_model(models, requested):
+    """
+    The requested model, else what this Cellpose version has: "cpsam" (4.x),
+    then the classic "cyto3" (3.x, model_type=). Returns (model, name, kwargs
+    for eval). Raises with every attempt's error if none loads.
+    """
+    gpu = False
+    try:
+        from cellpose import core
+        gpu = bool(core.use_gpu())
+    except Exception:
+        pass
+    errors = []
+    attempts = [(requested, {"pretrained_model": requested}, {}),
+                ("cpsam", {"pretrained_model": "cpsam"}, {}),
+                ("cyto3", {"model_type": "cyto3"}, {"channels": [0, 0]})]
+    seen = set()
+    for name, kwargs, eval_kwargs in attempts:
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            return models.CellposeModel(gpu=gpu, **kwargs), name, eval_kwargs, gpu
+        except Exception as e:
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+    raise RuntimeError("no Cellpose model could be loaded -- " + " | ".join(errors))
 
 
 def main():
@@ -62,30 +99,41 @@ def main():
     diameter = None if diameter <= 0 else diameter
 
     try:
+        import cellpose
         from cellpose import models
-    except ImportError as e:
-        print(f"Cellpose is not installed in this Python environment: {e}", file=sys.stderr)
+    except Exception as e:   # ImportError, or a PyTorch DLL that fails to load (OSError on Windows)
+        print(f"Cellpose (or PyTorch) cannot be imported by {sys.executable}: {type(e).__name__}: {e}", file=sys.stderr)
+        traceback.print_exc()
         return 3
+    version = getattr(cellpose, "__version__", None)
+    if version is None:
+        try:
+            from importlib.metadata import version as _v
+            version = _v("cellpose")
+        except Exception:
+            version = "?"
 
     image_xy = read_image(input_path)   # (n_cols, n_rows) -- FLIMApp's own (x, y) convention
     image_hw = image_xy.T               # Cellpose expects (height, width)
 
     try:
-        model = models.CellposeModel(pretrained_model=pretrained_model)
-        # No `channels=` here: 4.x's SAM-based models auto-detect/don't use
-        # the older per-channel cyto convention (channels still exists as a
-        # kwarg but defaults to None -- forcing the old [0, 0] risks a
-        # value it no longer expects rather than a missing one).
-        result = model.eval(image_hw, diameter=diameter)
+        model, name, eval_kwargs, gpu = load_model(models, pretrained_model)
+    except Exception as e:
+        print(f"Cellpose {version}: {e}", file=sys.stderr)
+        return 5
+    try:
+        # No `channels=` for 4.x's SAM-based models (they don't use the old
+        # per-channel convention); "cyto3" (3.x) gets the grayscale [0, 0].
+        result = model.eval(image_hw, diameter=diameter, **eval_kwargs)
         masks_hw = result[0]
     except Exception:
-        print("Cellpose segmentation failed:", file=sys.stderr)
+        print(f"Cellpose {version} segmentation failed (model {name}, GPU {gpu}):", file=sys.stderr)
         traceback.print_exc()
         return 4
 
     write_masks(output_path, masks_hw.T)   # back to (n_cols, n_rows) for Julia
     n_objects = int(masks_hw.max())
-    print(f"Cellpose found {n_objects} object(s)")
+    print(f"Cellpose {version}, model {name}, {'GPU' if gpu else 'CPU'}: found {n_objects} object(s)")
     return 0
 
 

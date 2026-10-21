@@ -388,6 +388,7 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol;
         add_setpoint_highlight!(axis, plot)
         draw_roi_metric_plot!(axis, plot, app_run, :photons, :photons_smooth, show_ch1, show_ch2)
     elseif selection == RATIO_PLOT
+        add_setpoint_highlight!(axis, plot)
         draw_ratio_plot!(axis, plot, app_run, show_ch1, show_ch2)
     elseif selection == "Readback"
         draw_readback_plot!(axis, plot, app_run)
@@ -415,9 +416,11 @@ function refresh_plot_slot!(app, app_run, plot::PlotSlot)
     end
 
     if plot.spans !== nothing
-        n = min(length(app_run.timestamps), length(app_run.protocol_setpoint))
+        # Highlighted: the protocol's setpoint periods — in images, the stimulation (a command above 0 V).
+        marks = app_run.image_mode ? app_run.stimulation : app_run.protocol_setpoint
+        n = min(length(app_run.timestamps), length(marks))
         start = isfinite(window_s) && n > 0 ? searchsortedfirst(view(app_run.timestamps, 1:n), app_run.timestamps[n] - window_s) : 1
-        starts, ends = protocol_setpoint_spans(view(app_run.timestamps, start:n), view(app_run.protocol_setpoint, start:n))
+        starts, ends = protocol_setpoint_spans(view(app_run.timestamps, start:n), view(marks, start:n))
         if isempty(starts)
             starts, ends = [NaN], [NaN]
         end
