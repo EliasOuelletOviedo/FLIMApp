@@ -101,7 +101,7 @@ const PROBLEM_LIST = Problem[
     Problem("IMG-02", "Scanner setting not in the table: image lines guessed",
             "Measure this setting with scripts/spc/horloges_scanner.jl and add [lines per frame, image lines, top lines] to reglages_scanner in config/spc.toml ([imagerie])."),
     Problem("IMG-03", "Galvo scan (ROI popup): lines missing from the image",
-            "Each line is one pass: the pass signal (PFI13) on M0 — and on M3 with [clamp] fin_par_m3 = true — as in Realtime (PASS-02 to PASS-04, scripts/test_passes.jl). The message gives the lines the card saw; the DAQ loop must have played the whole frame (no fault, no STOP)."),
+            "Each line is one pass: the pass signal (PFI13) must reach M0 of every card of [verification] series — and M3 with [clamp] fin_par_m3 = true —, as in Realtime (PASS-02 to PASS-04, scripts/test_passes.jl): QC-104, pins 12 (and 10) of its connector; two SPC-150N, M0 of both cards, not the QC-104's connector. The SPC alerts give the line markers (M0, M3) each card saw: 0 means the signal doesn't reach that card. The DAQ loop must have played the whole frame (no fault, no STOP)."),
     # --- Pass signal (counter → marker M0, and M3 with fin_par_m3) ---
     Problem("PASS-01", "No photon on a card during the Realtime measurement",
             "Laser and detectors on, CFD rate in the top bar, CFD/SYNC thresholds; the 850 nm gate (P0.0) high during scans."),

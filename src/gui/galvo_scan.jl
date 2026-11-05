@@ -197,9 +197,9 @@ function galvo_scan_tick!(app_run)
             stop_galvo_scan!(app_run, "failed: DAQ fault — " * loop.message)
         elseif daq == LOOP_READY && loop.message == "galvo scan finished"
             isnan(scan.daq_done_t) && (scan.daq_done_t = now)
-            if imaging && now - scan.daq_done_t > GALVO_SCAN_GRACE_S
+            if imaging && now - scan.daq_done_t > GALVO_SCAN_GRACE_S && !scan.stop_sent
                 report_problem!("IMG-03", "galvo scan: the NI played its $lines lines, the SPC card didn't see the end of " *
-                                          "every one of them in $(GALVO_SCAN_GRACE_S) s"; quiet_s = 0)
+                                          "every one of them in $(GALVO_SCAN_GRACE_S) s — the SPC alerts give the line markers each card saw"; quiet_s = 0)
                 stop_galvo_scan!(app_run, "ended: the SPC card missed the end of some lines (IMG-03)")
             end
         elseif daq == LOOP_READY || daq == LOOP_DISCONNECTED
