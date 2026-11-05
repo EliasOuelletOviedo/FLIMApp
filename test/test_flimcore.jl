@@ -27,6 +27,13 @@ reglages_test(; kw...) = FLIMCore.Reglages(; dossier = mktempdir(), seuil_cfd = 
                                            series = ["3N0317", "3N0318"], fin_par_m3 = false, kw...)
 
 """
+La SPC-QC-104 du banc (3T0089, IN1 et IN2, fin des passes par M3) : les
+tests de la QC-104 la nomment, quelle que soit la carte par défaut de la
+branche (FLIMApp-SPC-QC-104 ou FLIMApp-SPC-150N).
+"""
+qc_banc(; kw...) = FLIMCore.Reglages(; source = "qc104", series = ["3T0089/IN1", "3T0089/IN2"], fin_par_m3 = true, kw...)
+
+"""
 La géométrie automatique (toute la ligne, toutes les lignes, sans marge) :
 l'image 100 × 48 de `flux_test`, quels que soient les défauts de `Geometrie`
 (ceux du banc : 1024 × 512, marges de 21 pixels et 32 lignes).
@@ -91,18 +98,22 @@ end
     @test_throws ErrorException FLIMCore.reglages_depuis_dict(Dict("single" => Dict("resolution_adc" => 12)))   # 256 canaux seulement
     @test_throws ErrorException FLIMCore.reglages_depuis_dict(Dict("banc" => Dict("x" => 1)))
 
-    # Le fichier livré est celui qu'écrit ecrire_reglages avec les défauts.
+    # Le fichier livré est celui qu'écrit ecrire_reglages avec les défauts : la carte de la branche,
+    # la QC-104 (une entrée par canal, fin des passes par M3) ou les deux SPC-150N (un n° de série
+    # par carte, M0 seul).
     livre = joinpath(@__DIR__, "..", "config", "spc.toml")
     @test isfile(livre)
     d = FLIMCore.lire_reglages(livre)
     @test all(f -> f == :fichier || getfield(d, f) == getfield(FLIMCore.Reglages(), f), fieldnames(FLIMCore.Reglages))
+    @test FLIMCore.source_materielle(d) && length(d.series) == 2 && d.fin_par_m3 == FLIMCore.est_qc104(d)
+    @test all(s -> (FLIMCore.voie_qc(s) !== nothing) == FLIMCore.est_qc104(d), d.series)
 
     # Paramètres imposés par chaque mesure, par-dessus ceux de la carte : la QC-104 du banc ([qc]
     # traduit), ou [spc_module] pour les SPC-150N.
-    @test d.source == "qc104" && d.series == ["3T0089/IN1", "3T0089/IN2"] && d.fin_par_m3
-    p, imposes = FLIMCore.parametres_imagerie(d, FLIMCore.Geometrie(ligne_front_montant = false))
-    @test p["mode"] == 1 && p["routing_mode"] == 0x4600 && p["tac_range"] == d.qc_plage_tdc_ns && haskey(imposes, "macro_time_clk")
-    @test p["cfd_limit_low"] == d.qc_seuil_mV[1] && p["cfd_limit_high"] == d.qc_seuil_mV[2] && p["sync_threshold"] == d.qc_seuil_mV[4]
+    q = qc_banc()
+    p, imposes = FLIMCore.parametres_imagerie(q, FLIMCore.Geometrie(ligne_front_montant = false))
+    @test p["mode"] == 1 && p["routing_mode"] == 0x4600 && p["tac_range"] == q.qc_plage_tdc_ns && haskey(imposes, "macro_time_clk")
+    @test p["cfd_limit_low"] == q.qc_seuil_mV[1] && p["cfd_limit_high"] == q.qc_seuil_mV[2] && p["sync_threshold"] == q.qc_seuil_mV[4]
     @test FLIMCore.parametres_imagerie(FLIMCore.Reglages(source = "cartes"), FLIMCore.Geometrie())[1]["tac_range"] == d.spc["tac_range"]
     p, _ = FLIMCore.parametres_single(d, 2.5)
     @test p["mode"] == 0 && p["collect_time"] == 2.5 && p["stop_on_ovfl"] == 1
@@ -399,7 +410,7 @@ end
     @test FLIMCore.CODE_SANS_ROI == 1 != FLIMCore.CODE_HORS_ROI
     p, _ = FLIMCore.parametres_clamp(FLIMCore.Reglages(fin_par_m3 = false))
     @test p["mode"] == 1 && p["routing_mode"] == 0x1100                  # M0 seul, front montant
-    @test FLIMCore.parametres_clamp(FLIMCore.Reglages())[1]["routing_mode"] == 0x1900   # défaut : M0 et M3, M3 descendant
+    @test FLIMCore.parametres_clamp(FLIMCore.Reglages(fin_par_m3 = true))[1]["routing_mode"] == 0x1900   # M0 et M3, M3 descendant
     @test FLIMCore.parametres_clamp(FLIMCore.Reglages(); tous_marqueurs = true)[1]["routing_mode"] == 0x7F00   # test : M0–M3
 
     # Photons pile sur M0 : dans la passe ; pile sur M3 : dehors ; entre deux passes : hors passe ;
@@ -814,7 +825,7 @@ function vers_qc(flux; plage_ns = 16.384, fenetre_ns = 12.5)
     return e.mots
 end
 
-reglages_qc(; kw...) = FLIMCore.Reglages(; dossier = mktempdir(), seuil_cfd = 10.0, kw...)
+reglages_qc(; kw...) = qc_banc(; dossier = mktempdir(), seuil_cfd = 10.0, kw...)
 
 @testset "SPC-QC-104 : format FIFO, d'après la DLL" begin
     # Chaque enregistrement de qc4 décodé comme la DLL (l'arbitre) : temps, microtemps, routage, entrée, marqueurs.
@@ -836,32 +847,34 @@ reglages_qc(; kw...) = FLIMCore.Reglages(; dossier = mktempdir(), seuil_cfd = 10
 end
 
 @testset "SPC-QC-104 : réglages" begin
-    r = FLIMCore.Reglages()
+    r = qc_banc()
     @test r.source == "qc104" && FLIMCore.est_qc104(r) && FLIMCore.source_materielle(r) && r.fin_par_m3
     @test FLIMCore.voie_qc("3T0089/IN2") == (serie = "3T0089", entree = 2) && FLIMCore.voie_qc("3N0317") === nothing
     @test FLIMCore.serie_carte("3T0089/IN1") == "3T0089" && FLIMCore.serie_carte("3N0317") == "3N0317"
     @test FLIMCore.nom_fichier_serie("3T0089/IN1") == "3T0089_IN1"
     # [qc] traduit : IN1, IN2 (les canaux) et le SYNC actifs, routage sur IN1 et IN2 ; les clés de la SPC-150 ont un autre sens.
-    p = FLIMCore.parametres_base(FLIMCore.Reglages(qc_seuil_mV = [-60.0, -55.0, -50.0, -70.0], qc_decalage_ns = [1.024, 0.0, 0.0, 0.512]))
+    p = FLIMCore.parametres_base(qc_banc(qc_seuil_mV = [-60.0, -55.0, -50.0, -70.0], qc_decalage_ns = [1.024, 0.0, 0.0, 0.512]))
     @test p["tdc_control"] == FLIMCore.SPCLite.controle_tdc((true, true, false, true), (true, true, false), false)
     @test p["cfd_limit_low"] == -60.0 && p["cfd_limit_high"] == -55.0 && p["sync_threshold"] == -70.0
     @test p["tdc_offset1"] == 1.024 && p["tdc_offset4"] == 0.512 && p["tac_range"] == 16.384 && p["tac_limit_low"] == 5.0
     @test !haskey(p, "tac_gain")                                     # pas de clé de la SPC-150N
-    @test FLIMCore.parametres_base(FLIMCore.Reglages(series = ["3T0089/IN3"]))["tdc_control"] ==
+    @test FLIMCore.parametres_base(qc_banc(series = ["3T0089/IN3"]))["tdc_control"] ==
           FLIMCore.SPCLite.controle_tdc((false, false, true, true), (false, false, true), false)
     @test FLIMCore.temps_taux_s(r) == r.qc_temps_taux_s
-    # Ce que la carte ne prendrait pas est refusé, lisiblement.
+    # Ce que la carte ne prendrait pas est refusé, lisiblement (la QC-104 du banc, puis la clé en défaut).
     lire(d) = FLIMCore.reglages_depuis_dict(d)
-    @test_throws ErrorException lire(Dict("verification" => Dict("series" => ["3N0317", "3N0318"])))      # pas des entrées
-    @test_throws ErrorException lire(Dict("verification" => Dict("series" => ["3T0089/IN1", "3T0089/IN1"])))
-    @test_throws ErrorException lire(Dict("verification" => Dict("series" => ["3T0089/IN1", "3T0090/IN2"])))
-    @test_throws ErrorException lire(Dict("qc" => Dict("seuil_mV" => [-50.0, -50.0, -50.0])))
-    @test_throws ErrorException lire(Dict("qc" => Dict("seuil_mV" => [-50.0, -600.0, -50.0, -50.0])))
-    @test_throws ErrorException lire(Dict("qc" => Dict("fenetre_ns" => 20.0)))                             # plus longue que la plage
-    @test_throws ErrorException lire(Dict("qc" => Dict("taux" => [1, 1, 2, 3])))
+    lire_qc(d) = lire(merge(Dict("source" => Dict("type" => "qc104"), "verification" => Dict("series" => ["3T0089/IN1", "3T0089/IN2"])), d))
+    @test lire_qc(Dict()).source == "qc104"
+    @test_throws ErrorException lire_qc(Dict("verification" => Dict("series" => ["3N0317", "3N0318"])))      # pas des entrées
+    @test_throws ErrorException lire_qc(Dict("verification" => Dict("series" => ["3T0089/IN1", "3T0089/IN1"])))
+    @test_throws ErrorException lire_qc(Dict("verification" => Dict("series" => ["3T0089/IN1", "3T0090/IN2"])))
+    @test_throws ErrorException lire_qc(Dict("qc" => Dict("seuil_mV" => [-50.0, -50.0, -50.0])))
+    @test_throws ErrorException lire_qc(Dict("qc" => Dict("seuil_mV" => [-50.0, -600.0, -50.0, -50.0])))
+    @test_throws ErrorException lire_qc(Dict("qc" => Dict("fenetre_ns" => 20.0)))                             # plus longue que la plage
+    @test_throws ErrorException lire_qc(Dict("qc" => Dict("taux" => [1, 1, 2, 3])))
     @test lire(Dict("source" => Dict("type" => "cartes"), "verification" => Dict("series" => ["3N0317", "3N0318"]))).source == "cartes"
     # Écrit puis relu à l'identique, [qc] compris.
-    r2 = FLIMCore.Reglages(qc_seuil_mV = [-61.5, -52.0, -50.0, -70.9], qc_taux = [1, 2, 3, 4], qc_fenetre_ns = 12.48)
+    r2 = qc_banc(qc_seuil_mV = [-61.5, -52.0, -50.0, -70.9], qc_taux = [1, 2, 3, 4], qc_fenetre_ns = 12.48)
     chemin = joinpath(mktempdir(), "spc.toml")
     FLIMCore.ecrire_reglages(chemin, r2)
     relu = FLIMCore.lire_reglages(chemin)

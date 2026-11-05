@@ -118,7 +118,7 @@ une copie) à chaque mesure.
 Base.@kwdef mutable struct Reglages
     fichier::String = ""
     # [source]
-    source::String = "qc104"
+    source::String = "cartes"
     rejeu::Vector{String} = String[]
     vitesse::Float64 = 1.0
     connexion_au_demarrage::Bool = true
@@ -138,7 +138,7 @@ Base.@kwdef mutable struct Reglages
     qc_temps_taux_s::Float64 = 1.0
     qc_taux::Vector{Int} = [2, 3, 4, 1]
     # [verification]
-    series::Vector{String} = ["3T0089/IN1", "3T0089/IN2"]
+    series::Vector{String} = ["3N0317", "3N0318"]
     seuil_cfd::Float64 = 10.0
     # [imagerie]
     modules_imagerie::Vector{Int} = [0, 1]
@@ -170,7 +170,7 @@ Base.@kwdef mutable struct Reglages
     images::Bool = false
     images_par_bloc::Int = 17
     inverser_routage::Bool = true
-    fin_par_m3::Bool = true
+    fin_par_m3::Bool = false
     # [enregistrement]
     dossier::String = ""
     flux_brut::Bool = true

@@ -12,7 +12,7 @@
 # est signalée par le tableau « demandé → appliqué ».
 
 [source]
-type = "qc104"                   # "qc104" (la SPC-QC-104), "cartes" (les SPC-150N), "rejeu" (fichiers .spc ci-dessous) ou "simulation"
+type = "cartes"                  # "qc104" (la SPC-QC-104), "cartes" (les SPC-150N), "rejeu" (fichiers .spc ci-dessous) ou "simulation"
 rejeu = []                       # fichiers .spc à rejouer, un par carte (écrits par l'imagerie, avec leur _acquisition.ini)
 vitesse = 1.0                    # rejeu et simulation : 1 = temps réel ; 0 = le plus vite possible
 connexion_au_demarrage = true    # le GUI lance le moteur et vérifie les cartes à l'ouverture
@@ -44,7 +44,7 @@ temps_taux_s = 1.0               # s, intégration des compteurs de taux (rate_c
 taux = [2, 3, 4, 1]              # quelle valeur de SPC_read_rates (1 à 8) est IN1, IN2, IN3, SYNC : [2, 3, 4, 1] confirmé au banc le 2026-10-07 (comparé au flux)
 
 [verification]
-series = ["3T0089/IN1", "3T0089/IN2"] # canal 1 puis canal 2 : "<n° de série>/IN<entrée>" pour la QC-104 (3T0089/IN1), le n° de série de chaque carte pour les SPC-150N
+series = ["3N0317", "3N0318"]    # canal 1 puis canal 2 : "<n° de série>/IN<entrée>" pour la QC-104 (3T0089/IN1), le n° de série de chaque carte pour les SPC-150N
 seuil_cfd = 10.0                 # /s : en dessous, détecteurs éteints (Enable outputs dans le logiciel DCC ?)
 
 [imagerie]
@@ -79,7 +79,7 @@ irf_histogrammes_max = 600       # … au plus ce nombre de Singles : au-delà, 
 canaux = 256                     # canaux des déclins du Realtime (les 4096 du FIFO regroupés) : 256, la résolution de l'IRF
 images = false                   # Realtime en images : galvos arrêtés, le scanner du microscope balaie l'image entière ; un histogramme par ROI (ses pixels) tous les images_par_bloc images, le protocole donnant la tension de commande (pas de PI)
 images_par_bloc = 17             # images additionnées pour chaque histogramme de ROI du Realtime en images
-fin_par_m3 = true                # false : M0 seul, chaque passe dure le scan programmé ; true : sa fin vient de M3 (le même signal de passe câblé aussi sur M3, front descendant)
+fin_par_m3 = false               # false : M0 seul, chaque passe dure le scan programmé ; true : sa fin vient de M3 (le même signal de passe câblé aussi sur M3, front descendant)
 inverser_routage = true          # la NI écrit NON(c) sur P0.4-P0.7 et la carte, aux entrées actives à 0 V, lit c
 
 [enregistrement]
