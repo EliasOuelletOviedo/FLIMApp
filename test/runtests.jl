@@ -41,6 +41,13 @@ irf_info_for(settings) = Dict{String, Any}(
                    for serial in settings.series],
     "dcc" => Dict{String, Any}(settings.dcc))
 
+"""
+The bench's SPC-QC-104 (3T0089, IN1 and IN2, passes ended by M3): the QC-104
+tests name it, whichever card is the branch's default (FLIMApp-SPC-QC-104 or
+FLIMApp-SPC-150N).
+"""
+qc_bench_settings(; kw...) = FLIMCore.Reglages(; source = "qc104", series = ["3T0089/IN1", "3T0089/IN2"], fin_par_m3 = true, kw...)
+
 @testset "FLIMApp" begin
 
 @testset "protocol schedule math" begin
@@ -1417,7 +1424,7 @@ end
     for t in 1:60_000
         FLIMCore.photon_qc!(e, 40t, 250 + (t % 7) * 3 + (t % 2) * 40; entree = 1 + t % 2)     # a narrow peak on each input
     end
-    spc = FLIMCore.Reglages(dossier = mktempdir(), seuil_cfd = 10.0)
+    spc = qc_bench_settings(dossier = mktempdir(), seuil_cfd = 10.0)
     engine = FLIMCore.demarrer_moteur(spc; source = FLIMCore.SourceQC(FLIMCore.QCRejeu(e.mots)))
     @test timedwait(() -> FLIMCore.etat_moteur(engine) == :pret, 30.0) === :ok
     FLIMCore.commander!(engine, FLIMCore.Single(0.05, 1))
@@ -1444,7 +1451,9 @@ end
     # at the bench: each channel takes its input's curve, from the picked file or the one named for its
     # channel, spread onto the 12.5 ns window; recorded with the settings SPCM had (its setup text included).
     sdt = joinpath(@__DIR__, "data", "qc104", "irf_16x_750nm_ch1.sdt")
+    # The bench's QC-104: config/spc.toml's [qc] (the SPCM values), its inputs as channels.
     bench = FLIMCore.lire_reglages(joinpath(@__DIR__, "..", "config", "spc.toml"))
+    bench.source, bench.series, bench.fin_par_m3 = "qc104", ["3T0089/IN1", "3T0089/IN2"], true
     irfs, channels = FLIMApp.read_sdt_irf_qc(sdt, bench)
     @test [c["serial"] for c in channels] == ["3T0089/IN1", "3T0089/IN2"]
     @test [c["file"] for c in channels] == ["irf_16x_750nm_ch1.sdt", "irf_16x_750nm_ch2.sdt"]
@@ -1836,11 +1845,11 @@ include("test_flimcore.jl")
     # channel's timing offset (its input's [qc] decalage_ns).
     @test !FLIMApp.spc_edit_offset!(view, 1, 1.024)                        # the simulation has no QC-104 input
     qc_path = joinpath(mktempdir(), "spc.toml")
-    FLIMCore.ecrire_reglages(qc_path, FLIMCore.Reglages(dossier = mktempdir()))
+    FLIMCore.ecrire_reglages(qc_path, qc_bench_settings(dossier = mktempdir()))
     qc_view = FLIMApp.SpcView(qc_path, nothing)
     @test FLIMApp.spc_edit_offset!(qc_view, 2, 2.048) && FLIMCore.lire_reglages(qc_path).qc_decalage_ns[2] == 2.048
     @test !FLIMApp.spc_edit_offset!(qc_view, 1, 40.0) && FLIMCore.lire_reglages(qc_path).qc_decalage_ns[1] == 0.512
-    FLIMApp.spc_adopt_settings!(qc_view, FLIMCore.Reglages(dossier = mktempdir(), qc_decalage_ns = [1.024, 0.0, 0.0, 0.0]))
+    FLIMApp.spc_adopt_settings!(qc_view, qc_bench_settings(dossier = mktempdir(), qc_decalage_ns = [1.024, 0.0, 0.0, 0.0]))
     @test FLIMCore.lire_reglages(qc_path).qc_decalage_ns[1] == 1.024 && qc_view.settings.qc_decalage_ns[1] == 1.024
     @test FLIMApp.spc_edit_setting!(view, :binning_temps, 8)
     @test FLIMCore.lire_reglages(path).binning_temps == 8

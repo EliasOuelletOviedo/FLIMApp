@@ -2,6 +2,12 @@
 
 **Fluorescence Lifetime Imaging Microscopy** - A Julia-based analysis and visualization platform for FLIM data.
 
+> **Branch `FLIMApp-SPC-QC-104`**: configured for the **SPC-QC-104**
+> (`config/spc.toml`: `[source] type = "qc104"`, `[verification] series =
+> ["3T0089/IN1", "3T0089/IN2"]`, `[clamp] fin_par_m3 = true`). The branch
+> `FLIMApp-SPC-150N` is configured for the two SPC-150N. Both have the same
+> code: FLIMCore drives either card, chosen by `[source] type`.
+
 ## Overview
 
 This application provides:
