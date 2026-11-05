@@ -245,15 +245,18 @@ reglages_jls(g::Geometrie, binning_temps, photons_min) =
      decalage_pixels = g.decalage_pixels, lignes_par_image = g.lignes_par_image,
      decalage_lignes = g.decalage_lignes, ligne_front_montant = g.ligne_front_montant,
      trame_front_montant = g.trame_front_montant, binning_temps = binning_temps, photons_min = photons_min)
+reglages_jls(b::BalayageGalvos, binning_temps, photons_min) =
+    (balayage_galvos = true, pixels = b.pixels, lignes = b.lignes, scan_s = b.scan_s, periode_s = b.periode_s,
+     fin_par_m3 = b.fin_par_m3, binning_temps = binning_temps, photons_min = photons_min)
 
 """
     ecrire_resultats_img(prefixe, res, dt_ns, m, g, binning_temps, photons_min) -> (bas, haut)
 
 Fichiers d'une acquisition traitée, comme imagerie_photons.jl :
 *_intensite.bmp, *_temps_moyen.bmp, *_declin.svg et *.jls. `res` a les
-champs de `ranger_photons`.
+champs de `ranger_photons` (ou `ranger_balayage`, pour une image des galvos).
 """
-function ecrire_resultats_img(prefixe, res, dt_ns, m, g::Geometrie, binning_temps, photons_min)
+function ecrire_resultats_img(prefixe, res, dt_ns, m, g::Union{Geometrie,BalayageGalvos}, binning_temps, photons_min)
     bas, haut = images_bmp(prefixe, res, binning_temps, photons_min)
     t_ns, regroupe = declin_regroupe(res.declin, dt_ns)
     svg_declin_img(prefixe * "_declin.svg", t_ns, regroupe,

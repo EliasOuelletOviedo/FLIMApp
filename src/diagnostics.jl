@@ -100,6 +100,8 @@ const PROBLEM_LIST = Problem[
             "Scanner running? Its line clock on M1 and frame clock on M2 of the cards; ligne_/trame_front_montant in [imagerie]."),
     Problem("IMG-02", "Scanner setting not in the table: image lines guessed",
             "Measure this setting with scripts/spc/horloges_scanner.jl and add [lines per frame, image lines, top lines] to reglages_scanner in config/spc.toml ([imagerie])."),
+    Problem("IMG-03", "Galvo scan (ROI popup): lines missing from the image",
+            "Each line is one pass: the pass signal (PFI13) on M0 — and on M3 with [clamp] fin_par_m3 = true — as in Realtime (PASS-02 to PASS-04, scripts/test_passes.jl). The message gives the lines the card saw; the DAQ loop must have played the whole frame (no fault, no STOP)."),
     # --- Pass signal (counter → marker M0, and M3 with fin_par_m3) ---
     Problem("PASS-01", "No photon on a card during the Realtime measurement",
             "Laser and detectors on, CFD rate in the top bar, CFD/SYNC thresholds; the 850 nm gate (P0.0) high during scans."),
@@ -389,12 +391,14 @@ end
 The problem code of an SPC engine alert or check problem (FLIMCore writes
 them in French): SYNC → SPC-03, CFD → SPC-04, FIFO → SPC-07, a setting
 not applied → SPC-05, a card not ready, locked or missing → SPC-01, a
-serial number → SPC-02, the imaging clocks → IMG-01, the passes → PASS-0x,
-the settings file → ENV-04; any other → SPC-06.
+serial number → SPC-02, the imaging clocks → IMG-01, the galvo scan's
+lines (« balayage des galvos ») → IMG-03, the passes → PASS-0x, the
+settings file → ENV-04; any other → SPC-06.
 """
 function alert_problem_id(text::AbstractString)::String
     t = lowercase(text)
     has(x) = occursin(x, t)
+    has("balayage des galvos") && return "IMG-03"
     has("sync") && (has("perdu") || has("état") || has("laser allumé")) && return "SPC-03"
     has("[qc] taux") && return "SPC-09"
     startswith(t, "qc-104 :") && return "SPC-10"

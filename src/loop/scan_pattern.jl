@@ -36,6 +36,12 @@ cycle and the galvos stay at 0 V, but the slot keeps the same rhythm: gate
 high for `scan_time`, low for the pause (`shift_time`); the routing lines
 carry `FLIMCore.CODE_SANS_ROI` during the scan, the reserved code during
 the pause.
+
+The ROI popup's galvo scan (`RasterRequest`) is one frame, one slot per
+line: the line's ramp (gate and pass signal high, `CODE_SANS_ROI`), then
+the flyback to the next line's start (gate low, the reserved code) — after
+the last line, back to 0 V. It plays once (`total_slots`): the loop ends by
+itself after the last line.
 """
 
 # Port-0 lines: bit b of each sample drives line P0.b. Bits 0, 2, 3 and 4–7
@@ -80,10 +86,11 @@ struct ScanPattern
     y::Matrix{Float64}
     lines::Matrix{UInt8}
     image_mode::Bool
+    raster::Bool
 end
 
-ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines) =
-    ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, false)
+ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, image_mode = false) =
+    ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, image_mode, false)
 
 slots_per_cycle(p::ScanPattern) = size(p.x, 2)
 slot_position(p::ScanPattern, s::Integer) = mod(s, slots_per_cycle(p)) + 1
@@ -91,6 +98,8 @@ slot_roi(p::ScanPattern, s::Integer) = p.roi_order[slot_position(p, s)]
 slot_visit(p::ScanPattern, s::Integer) = s ÷ slots_per_cycle(p)
 entry_samples(p::ScanPattern) = length(p.entry_x)
 slot_duration_s(p::ScanPattern) = p.slot_samples / p.sample_rate_hz
+"""Slots the scan plays before ending by itself: one frame for the galvo scan, unlimited (`typemax`) otherwise."""
+total_slots(p::ScanPattern) = p.raster ? slots_per_cycle(p) : typemax(Int)
 
 """Half-cosine move from `a` to `b` filling `out`: zero speed at both ends (sequence.jl's `deplacement`)."""
 function half_cosine_move!(out::AbstractVector{Float64}, a::Real, b::Real)
@@ -181,6 +190,65 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
 
     return ScanPattern(rate, off_roi, true, [s.roi_index for s in segments], n_scan, n_shift, n,
                        entry_x, entry_y, x, y, lines)
+end
+
+"""Share of each galvo-scan line spent on the flyback to the next line's start (half-cosine move)."""
+const RASTER_FLYBACK_FRACTION = 0.15
+
+"""
+    raster_timing(request, rate) -> (n_scan, n_shift)
+
+Samples of each galvo-scan line at `rate`: the line period that fits the
+frame in `request.duration_s`, `RASTER_FLYBACK_FRACTION` of it for the
+flyback, the rest for the ramp. The SPC engine is told the same timing
+(`FLIMCore.BalayageGalvos`).
+"""
+function raster_timing(request::RasterRequest, rate::Real)
+    line = round(Int, request.duration_s * rate / request.lines)
+    n_shift = round(Int, RASTER_FLYBACK_FRACTION * line)
+    return line - n_shift, n_shift
+end
+
+"""
+    build_scan_pattern(request::RasterRequest, cfg)::ScanPattern
+
+The galvo scan's frame, one slot per line (`raster_timing`). Pixel `k` of a
+line is at `to_voltage(k, pixels, …)`, the ROIs' own mapping; the ramp
+crosses it at constant speed, sample `j` at the voltage of the middle of
+its own time in the line, so a photon's place in the line's pass is its
+pixel. Y holds the line's voltage during the ramp and moves to the next
+line during the flyback; the last flyback returns to 0 V. Throws like the
+ROI pattern: a ramp or flyback shorter than 2 samples, a galvo voltage past
+the limits.
+"""
+function build_scan_pattern(request::RasterRequest, cfg::BenchConfig)::ScanPattern
+    rate = cfg.sample_rate_hz
+    n_scan, n_shift = raster_timing(request, rate)
+    min(request.pixels, request.lines) >= 2 || throw(SafetyError("galvo scan: at least 2 pixels and 2 lines"))
+    min(n_scan, n_shift) >= 2 ||
+        throw(SafetyError("galvo scan: $(request.lines) lines in $(request.duration_s) s leave a ramp of $n_scan and a flyback of $n_shift samples; 2 at least"))
+    n = n_scan + n_shift
+    P, L = request.pixels, request.lines
+    vx(c) = to_voltage(c, P, request.v_min_x, request.v_max_x) / 1000
+    vy(c) = to_voltage(c, L, request.v_min_y, request.v_max_y) / 1000
+    ramp = [vx(clamp(-0.5 + P * (j - 0.5) / n_scan, 0, P - 1)) for j in 1:n_scan]
+    line_bits = routing_byte(FLIMCore.CODE_SANS_ROI, request.invert_routing) | do_bit(DO_BIT_GATE) | do_bit(DO_BIT_ENABLE)
+    off = routing_byte(FLIMCore.CODE_HORS_ROI, request.invert_routing)
+    x, y = zeros(n, L), zeros(n, L)
+    lines = zeros(UInt8, n, L)
+    for k in 1:L
+        last_line = k == L
+        x[1:n_scan, k] .= ramp
+        y[1:n_scan, k] .= vy(k - 1)
+        half_cosine_move!(view(x, n_scan+1:n, k), ramp[end], last_line ? 0.0 : ramp[1])
+        half_cosine_move!(view(y, n_scan+1:n, k), vy(k - 1), last_line ? 0.0 : vy(k))
+        lines[1:n_scan, k] .= line_bits
+        lines[n_scan+1:n, k] .= off | do_bit(DO_BIT_ENABLE)
+    end
+    entry_x = half_cosine_move!(zeros(n_shift), 0.0, ramp[1])
+    entry_y = half_cosine_move!(zeros(n_shift), 0.0, vy(0))
+    check_galvo_path(vcat(vec(x), entry_x), vcat(vec(y), entry_y), cfg)
+    return ScanPattern(rate, off, true, zeros(Int, L), n_scan, n_shift, n, entry_x, entry_y, x, y, lines, false, true)
 end
 
 """

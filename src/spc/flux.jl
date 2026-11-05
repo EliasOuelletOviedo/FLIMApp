@@ -70,11 +70,12 @@ end
     ecrire_acquisition_ini(chemin, m, tic_s, fenetre_ns, duree_s, deborde; geometrie, dcc)
 
 Ce qu'il faut pour retraiter le .spc sans les cartes (section
-[acquisition], relue par `retraiter`), plus la géométrie utilisée et les
-réglages DCC déclarés : la trace de l'acquisition.
+[acquisition], relue par `retraiter`), plus la géométrie utilisée
+([geometrie], ou [balayage] pour une image des galvos) et les réglages DCC
+déclarés : la trace de l'acquisition.
 """
 function ecrire_acquisition_ini(chemin, m, tic_s, fenetre_ns, duree_s, deborde;
-                                geometrie::Union{Nothing,Geometrie} = nothing,
+                                geometrie::Union{Nothing,Geometrie,BalayageGalvos} = nothing,
                                 dcc::AbstractDict = Dict{String,Any}(),
                                 clamp::AbstractDict = Dict{String,Any}())
     open(chemin, "w") do io
@@ -87,8 +88,8 @@ function ecrire_acquisition_ini(chemin, m, tic_s, fenetre_ns, duree_s, deborde;
         println(io, "fifo_deborde = ", deborde ? 1 : 0)
         if geometrie !== nothing
             println(io)
-            println(io, "[geometrie]")
-            for f in fieldnames(Geometrie)
+            println(io, geometrie isa BalayageGalvos ? "[balayage]" : "[geometrie]")
+            for f in fieldnames(typeof(geometrie))
                 v = getfield(geometrie, f)
                 println(io, f, " = ", v isa Bool ? Int(v) : v)
             end

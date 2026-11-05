@@ -166,6 +166,29 @@ ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_
                 scan_time_ms, shift_time_ms, image_size, invert_routing, false)
 
 """
+    RasterRequest
+
+The ROI popup's galvo scan (its "Galvo scan" button): one frame of `lines`
+lines of `pixels` pixels in about `duration_s`, over the ROI galvo range
+(`v_min_x` … `v_max_y`, mV) with the ROIs' own pixel -> voltage mapping
+(`to_voltage`, roi_geometry.jl) — the image it gives is where the galvos
+go. Each line: a ramp with the 850 nm gate and the pass signal high, then
+a flyback with both low (`raster_timing`). The commands and the 1064 nm
+gate stay at 0 V; the scan ends by itself after the last line.
+`invert_routing` as in `ScanRequest`.
+"""
+struct RasterRequest
+    v_min_x::Int64
+    v_max_x::Int64
+    v_min_y::Int64
+    v_max_y::Int64
+    pixels::Int
+    lines::Int
+    duration_s::Float64
+    invert_routing::Bool
+end
+
+"""
     AnalysisSettings
 
 The settings the analysis worker reads on every frame: copies, never
@@ -212,7 +235,7 @@ abstract type LoopCommand end
 struct ConnectCommand <: LoopCommand end
 struct DisconnectCommand <: LoopCommand end
 struct StartCommand <: LoopCommand
-    request::ScanRequest
+    request::Union{ScanRequest, RasterRequest}
 end
 struct AcknowledgeCommand <: LoopCommand end
 struct QuitCommand <: LoopCommand end

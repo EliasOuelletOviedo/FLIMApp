@@ -33,8 +33,10 @@ const SPC_ALERT_HISTORY = 30
 
 const SPC_ENGINE_STATE_NAMES = Dict(
     :demarrage => "starting…", :pret => "ready", :imagerie => "imaging",
-    :single => "Single", :clamp => "Realtime", :arrete => "stopped"
+    :single => "Single", :clamp => "Realtime", :galvos => "galvo scan", :arrete => "stopped"
 )
+
+const SPC_MEASUREMENT_NAMES = Dict(:imagerie => "imaging", :single => "Single", :clamp => "Realtime", :galvos => "galvo scan")
 
 """Frames summed into the ROI popup's image ("Image" button, gui/roi_popup.jl)."""
 const ROI_IMAGE_FRAMES = 100
@@ -428,14 +430,31 @@ stream (for the ROI popup's per-ROI decays): the result arrives as one
 otherwise why not (engine missing or busy).
 """
 function spc_request_roi_image!(view::SpcView; frames::Integer = ROI_IMAGE_FRAMES)::String
+    return spc_request_image!(view, FLIMCore.Imagerie(FLIMCore.geometrie(view.settings); trames = frames, garder_mots = true))
+end
+
+"""
+    spc_request_galvo_image!(view, balayage)::String
+
+Ask the engine for the image of the NI galvos' scan (`FLIMCore.ImageGalvos`,
+the ROI popup's Galvo scan, gui/galvo_scan.jl): it arrives in
+`view.roi_image` like the Image button's. "" when sent, otherwise why not.
+"""
+spc_request_galvo_image!(view::SpcView, balayage::FLIMCore.BalayageGalvos)::String =
+    spc_request_image!(view, FLIMCore.ImageGalvos(balayage))
+
+function spc_request_image!(view::SpcView, command::FLIMCore.Commande)::String
     state = spc_state(view)
     state == :none && return "SPC engine not running: CONNECT it in the SPC window"
     state == :pret || return "SPC engine busy ($(SPC_ENGINE_STATE_NAMES[state]))"
+    view.roi_image_pending && return "an image is already on its way"
     empty!(view.roi_image_parts)
-    view.roi_image_pending = spc_command!(view, FLIMCore.Imagerie(FLIMCore.geometrie(view.settings);
-                                                                    trames = frames, garder_mots = true))
+    view.roi_image_pending = spc_command!(view, command)
     return view.roi_image_pending ? "" : "SPC engine not taking commands"
 end
+
+"""What an engine `Fin` ended, for the journal and the SPC window."""
+spc_measurement_name(mesure::Symbol)::String = get(SPC_MEASUREMENT_NAMES, mesure, "engine")
 
 """Stop the engine at shutdown (window closed); returns the stopping task, if any."""
 function stop_spc!(view::SpcView)
@@ -467,6 +486,12 @@ function spc_tick!(view::SpcView, now_ns::UInt64)
         if FLIMCore.etat_moteur(engine) == :arrete && !isready(engine.resultats)
             view.engine = nothing
             view.texts_dirty = true
+            # Stopped during an image (an error): the ROI popup gets what came, and isn't left waiting.
+            if view.roi_image_pending
+                view.roi_image_pending = false
+                view.roi_image[] = copy(view.roi_image_parts)
+                empty!(view.roi_image_parts)
+            end
             # stopped on its own (an error): arreter_moteur also takes it off the atexit list
             (view.stopping === nothing || istaskdone(view.stopping)) &&
                 (view.stopping = errormonitor(Threads.@spawn FLIMCore.arreter_moteur(engine)))
@@ -579,12 +604,12 @@ function spc_handle_result!(view::SpcView, r::FLIMCore.Fin)
         view.irf_acquisition = false
         view.irf_fin = r                                     # the refresh tick imports it
     end
-    if view.roi_image_pending && r.mesure == :imagerie
+    if view.roi_image_pending && r.mesure in (:imagerie, :galvos)
         view.roi_image_pending = false
         view.roi_image[] = copy(view.roi_image_parts)        # the ROI popup listens
         empty!(view.roi_image_parts)
     end
-    what = r.mesure == :imagerie ? "imaging" : r.mesure == :single ? "Single" : r.mesure == :clamp ? "Realtime" : "engine"
+    what = spc_measurement_name(r.mesure)
     spc_journal!(view, r.erreur ? :error : :info, "SPC $what ended: $(r.raison); $(length(r.fichiers)) file(s)" *
                                                   (isempty(r.fichiers) ? "" : " in $(dirname(first(r.fichiers)))"))
     view.texts_dirty = true
@@ -833,7 +858,7 @@ function spc_update_texts!(view::SpcView)
     fin = view.last_fin
     if fin !== nothing && fin.mesure != :moteur
         push!(lines, "")
-        what = fin.mesure == :imagerie ? "imaging" : fin.mesure == :single ? "Single" : "Realtime"
+        what = spc_measurement_name(fin.mesure)
         push!(lines, "Last $what: $(fin.raison)" *
                      (isempty(fin.fichiers) ? "" : " — files in $(dirname(first(fin.fichiers)))"))
     end

@@ -129,6 +129,30 @@ Plan.pdf:
   pass's ROI from the routing code its photons carry (`pass_roi`). The NI
   writes NOT(code) (`inverser_routage`): the card reads the ROI's drawn
   index; code 0 (undriven lines) is reserved, hence 15 ROIs at most.
+- **Galvo scan (`ImageGalvos`)**: the ROI popup's reference image.
+  - **NI side** (`build_scan_pattern(::RasterRequest)`): one frame, one
+    slot per line. Each slot is a ramp over the ROI galvo range with the
+    ROIs' own `to_voltage`, then a flyback.
+    - The pass counter is unchanged, so one pass per line: M0 at the
+      ramp's start, M3 at its end.
+    - The DAQ loop plays the frame once (`total_slots`) and ends on
+      "galvo scan finished". It writes nothing to the journal (not a run)
+      and holds the commands at 0 V.
+  - **Card side**: the engine records FIFO with the pass markers
+    (`parametres_clamp`), keeps the stream, and ends once every card has
+    seen the end of every line (`_balayage_vu`). Then `ranger_balayage`
+    (spc/balayage.jl) places the photons:
+    - line = M0's distance from the first M0, in line periods (the median
+      M0 interval), so a lost M0 doesn't shift the rest;
+    - column = (t − M0) / (M3 − M0) × pixels, as the card measured it, so
+      there is no NI/card clock drift;
+    - passes past the last line (the counter restarting once before the
+      loop stops) are ignored.
+  - **Result**: an `ImageSomme` with `geometrie::BalayageGalvos`, so
+    `histogrammes_pixels` dispatches to the galvo method.
+  - **GUI side** (`gui/galvo_scan.jl`): it arms the engine, starts the
+    frame once the engine counts, and stops the other part when one stops
+    (`galvo_scan_tick!`).
 - **Playback**: the same engine on `source_session(dir; vitesse)` (the
   recorded streams), the same worker (`drive_outputs = false`: simulated PI),
   `source_done` ending it once the replay is over; the session's settings

@@ -45,6 +45,23 @@ Base.@kwdef struct Geometrie
     reglages_scanner::Vector{NTuple{3,Int}} = copy(REGLAGES_SCANNER)
 end
 
+"""
+    BalayageGalvos(; pixels=1024, lignes=1024, scan_s, periode_s, fin_par_m3=true)
+
+Une image faite par les galvos de la NI (bouton « Galvo scan » de la
+fenêtre ROI ; balayage.jl) : `lignes` lignes de `pixels` pixels, une rampe
+de `scan_s` par ligne — le signal de passe haut, M0 à son début, M3 à sa
+fin —, une ligne toutes les `periode_s` (rampe et retour). `fin_par_m3` :
+la fin de chaque ligne vient de M3 ; sinon, `scan_s` après son M0.
+"""
+Base.@kwdef struct BalayageGalvos
+    pixels::Int = 1024
+    lignes::Int = 1024
+    scan_s::Float64
+    periode_s::Float64
+    fin_par_m3::Bool = true
+end
+
 """Le réglage du scanner de `g` qui a `lignes_trame` lignes par trame, ou `nothing`."""
 function reglage_scanner(g::Geometrie, lignes_trame::Integer)
     k = findfirst(e -> e[1] == lignes_trame, g.reglages_scanner)

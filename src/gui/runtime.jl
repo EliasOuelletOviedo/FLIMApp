@@ -197,7 +197,8 @@ end
 What keeps the Realtime in images from starting ("" if nothing): the
 protocol, active, gives the command voltage — each of its values must lie
 within 0 V and `command_max_v`; and the ROIs must have been drawn on an
-image (the ROI popup's Image button), whose pixels they bin.
+image of the microscope's scanner (the ROI popup's Image button), whose
+pixels they bin — not on the galvo scan's, whose pixels are the galvos'.
 """
 function images_start_refusal(app, app_run)::String
     limit = app_run.config.command_max_v
@@ -208,9 +209,15 @@ function images_start_refusal(app, app_run)::String
     split_rois = app.roi.active && !isempty(app_run.rois[])
     split_rois && minimum(app_run.imported_image_size) <= 0 &&
         return "Realtime in images: no image for the ROIs — take one with the ROI popup's Image button"
+    split_rois && app_run.roi_image_source == :galvos &&
+        return "Realtime in images: the ROIs were drawn on the galvo scan, in the galvos' coordinates — " *
+               "draw them on an image of the scanner (ROI popup's Image button)"
     return ""
 end
 
+
+"""What made the ROIs' image, for run.toml: "scanner" (Image button), "galvo scan" (Galvo scan button), "" (none)."""
+roi_image_source_name(source::Symbol)::String = source == :galvos ? "galvo scan" : source == :scanner ? "scanner" : ""
 
 """Modes of the mode menu: Playback with the session's settings (to reproduce it) or the current ones (to try others)."""
 const PLAYBACK_SESSION_MODE = "Playback: session"
@@ -254,6 +261,8 @@ function run_info(app, app_run, order::Vector{Int}; mode::AbstractString = "Real
         mode = playback ? "Playback" : mode, rois = app_run.run_rois, order, roi_active = !isempty(order),
         roi_settings,
         image_size = playback ? session.image_size : app_run.imported_image_size,
+        image_source = playback ? String(get(get(session.info, "roi", Dict{String, Any}()), "image_source", "")) :
+                       roi_image_source_name(app_run.roi_image_source),
         spc = app_run.spc.settings, spc_settings_path = app_run.spc.settings_path,
         layout = settings === nothing ? app.layout : settings.layout,
         protocol = settings === nothing ? app.protocol : settings.protocol,
@@ -371,6 +380,11 @@ function start_pressed(app, app_run, blocks)
     if app_run.irf_reload_pending               # picked during the previous run, or a session's IRF in use
         app_run.irf_reload_pending = false
         init_irf_runtime!(app_run.spc.settings; ask = false)
+    end
+
+    if app_run.galvo_scan !== nothing
+        show_status!(blocks, "Galvo scan running (ROI popup): wait for its end, or stop it")
+        return
     end
 
     mode = blocks.mode_menu.selection[]

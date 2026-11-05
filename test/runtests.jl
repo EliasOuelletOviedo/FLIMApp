@@ -587,6 +587,146 @@ end
     @test any(l -> occursin("missed deadline", l), readlines(joinpath(run_dir, "log.txt")))
 end
 
+@testset "Galvo scan: the frame, played once by the DAQ loop" begin
+    cfg = test_bench_config()
+    request = FLIMApp.RasterRequest(-1000, 1000, -500, 700, 64, 48, 2.4, true)
+    pattern = FLIMApp.build_scan_pattern(request, cfg)
+    n_scan, n_shift = FLIMApp.raster_timing(request, cfg.sample_rate_hz)
+    @test (pattern.scan_samples, pattern.shift_samples) == (n_scan, n_shift) == (425, 75)    # 50 ms lines, 15 % flyback
+    @test pattern.raster && FLIMApp.slots_per_cycle(pattern) == 48 && FLIMApp.total_slots(pattern) == 48
+    @test FLIMApp.total_slots(FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(FLIMApp.RoiCoordinates[], Int[], false, -1000, 1000,
+                                                                            -1000, 1000, 20, 3, 95, 5, (1024, 1024)), cfg)) == typemax(Int)
+    # The ROIs' own pixel -> voltage mapping: each ramp sample sits in the pixel of the middle of its time in the line.
+    vx(c) = FLIMApp.to_voltage(c, 64, -1000, 1000) / 1000
+    ramp = pattern.x[1:n_scan, 1]
+    for j in (1, 2, 200, n_scan)
+        pixel = floor(Int, 64 * (j - 0.5) / n_scan)
+        lo, hi = minmax(vx(pixel - 0.5), vx(pixel + 0.5))
+        @test lo <= ramp[j] <= hi
+    end
+    @test all(k -> pattern.x[1:n_scan, k] == ramp, 1:48)
+    @test all(k -> all(==(FLIMApp.to_voltage(k - 1, 48, -500, 700) / 1000), pattern.y[1:n_scan, k]), 1:48)
+    # The flyback to the next line's start; after the last line, back to 0 V; the entry onto the first.
+    @test pattern.x[end, 1] ≈ ramp[1] && pattern.y[end, 1] ≈ FLIMApp.to_voltage(1, 48, -500, 700) / 1000
+    @test pattern.x[end, 48] == 0.0 && pattern.y[end, 48] == 0.0
+    @test pattern.entry_x[1] == 0.0 && pattern.entry_x[end] ≈ ramp[1] && pattern.entry_y[end] ≈ FLIMApp.to_voltage(0, 48, -500, 700) / 1000
+    # 850 nm gate and code 1 during the ramp, the reserved code during the flyback, no sync pulse.
+    buffers = FLIMApp.SlotBuffers(pattern.slot_samples)
+    FLIMApp.prepare_slot!(buffers, pattern, 5, 0.0, 0.0)
+    bit(b) = (buffers.lines .>> b) .& 0x01
+    @test all(==(1), bit(FLIMApp.DO_BIT_GATE)[1:n_scan]) && all(==(0), bit(FLIMApp.DO_BIT_GATE)[n_scan+1:end])
+    @test all(==(0), bit(FLIMApp.DO_BIT_ROI)) && all(==(0), bit(FLIMApp.DO_BIT_SEQUENCE)) && all(==(1), bit(FLIMApp.DO_BIT_ENABLE))
+    codes = buffers.lines .>> FLIMApp.DO_ROI_CODE_SHIFT
+    @test all(==(~UInt8(FLIMCore.CODE_SANS_ROI) & 0x0f), codes[1:n_scan]) && all(==(0x0f), codes[n_scan+1:end])
+    # Refused before reaching the card: past the galvo limit, or lines too short for the pass counter.
+    @test_throws FLIMApp.SafetyError FLIMApp.build_scan_pattern(FLIMApp.RasterRequest(-2500, 1000, -1000, 1000, 64, 48, 2.4, true), cfg)
+    @test_throws FLIMApp.SafetyError FLIMApp.build_scan_pattern(FLIMApp.RasterRequest(-1000, 1000, -1000, 1000, 64, 48, 0.01, true), cfg)
+
+    # The loop plays the frame once — commands and 1064 nm gate at 0 V, about a second written ahead — and ends by itself.
+    ex = FLIMApp.Exchange(cfg)
+    hw = FLIMApp.SimulatedHardware(cfg; realtime=false)
+    loop = Threads.@spawn FLIMApp.daq_loop(cfg, ex; hardware=hw)
+    await(f; timeout=30.0) = timedwait(f, timeout; pollint=0.005) === :ok
+    FLIMApp.send_command!(ex, FLIMApp.ConnectCommand())
+    @test await(() -> FLIMApp.loop_status(ex).state == FLIMApp.LOOP_READY)
+    @test FLIMApp.lead_slots(pattern, cfg) == 21
+    FLIMApp.set_command_values!(ex, 80.0, 80.0)               # left over from a run: not for the galvo scan
+    FLIMApp.send_command!(ex, FLIMApp.StartCommand(request))
+    @test await(() -> FLIMApp.loop_status(ex) == FLIMApp.LoopStatus(FLIMApp.LOOP_READY, "galvo scan finished"))
+    summaries = FLIMApp.SlotSummary[]
+    FLIMApp.take_new!(summaries, ex.slots, 0)
+    @test [s.slot for s in summaries] == 0:47 && all(s -> s.command1_v == 0.0 && s.command2_v == 0.0, summaries)
+    @test hw.written == FLIMApp.entry_samples(pattern) + 48 * pattern.slot_samples && hw.zero_count == 2
+    # Not a run: nothing for the journal but its two events.
+    entries = FLIMApp.drain_journal!(FLIMApp.JournalEntry[], ex.journal)
+    @test all(e -> e isa FLIMApp.JournalEvent, entries) && any(e -> occursin("galvo scan finished: 48 lines", e.message), entries)
+    FLIMApp.send_command!(ex, FLIMApp.QuitCommand())
+    @test await(() -> istaskdone(loop))
+end
+
+@testset "Galvo scan: the ROI popup's button, without a window" begin
+    # Both parts on the simulated cards, as the button and the refresh tick
+    # drive them: the SPC engine armed first, the frame started once it
+    # counts, the image back through app_run.spc.roi_image, both stopped together.
+    cfg = test_bench_config()
+    app = AppState(true)
+    app_run = AppRun(cfg)
+    path = joinpath(mktempdir(), "spc.toml")
+    FLIMCore.ecrire_reglages(path, FLIMCore.Reglages(source = "simulation", dossier = mktempdir(), seuil_cfd = 10.0))
+    app_run.spc = FLIMApp.SpcView(path, app_run.exchange.journal)
+    ex = app_run.exchange
+    loop = Threads.@spawn FLIMApp.daq_loop(cfg, ex; hardware=FLIMApp.SimulatedHardware(cfg; realtime=true, strict_timing=false))
+    tick() = (FLIMApp.spc_tick!(app_run.spc, time_ns()); FLIMApp.galvo_scan_tick!(app_run))
+    await(f; timeout=60.0) = timedwait(() -> (tick(); f()), timeout; pollint = 0.02) === :ok
+    status = FLIMApp.Observable("")
+    statuses, outcomes, images = String[], String[], Any[]
+    FLIMApp.Observables.on(s -> push!(statuses, s), status)
+    FLIMApp.Observables.on(p -> push!(images, p), app_run.spc.roi_image)
+    start!(; duration_s) = FLIMApp.start_galvo_scan!(app, app_run, status; size = 32, duration_s,
+                                                     on_end = outcome -> push!(outcomes, outcome))
+    try
+        @test occursin("DAQ not ready", FLIMApp.galvo_scan_refusal(app, app_run))
+        FLIMApp.send_command!(ex, FLIMApp.ConnectCommand())
+        @test await(() -> FLIMApp.loop_status(ex).state == FLIMApp.LOOP_READY)
+        @test occursin("SPC engine not running", FLIMApp.galvo_scan_refusal(app, app_run))
+        FLIMApp.spc_connect!(app_run.spc)
+        @test await(() -> FLIMApp.spc_state(app_run.spc) == :pret)
+        app.roi.v_max_x = 2500
+        @test occursin("past the 2.0 V limit", FLIMApp.galvo_scan_refusal(app, app_run))
+        app.roi.v_max_x = 1000
+        app_run.running[] = true
+        @test occursin("a run is going on", FLIMApp.galvo_scan_refusal(app, app_run))
+        app_run.running[] = false
+        @test FLIMApp.galvo_scan_refusal(app, app_run) == ""
+
+        # The button's frame: the 1024 × 1024 calibration frame over the popup's range in 60 s; the engine told the same lines.
+        request = FLIMApp.galvo_scan_request(app, app_run)
+        @test (request.pixels, request.lines, request.duration_s) == (1024, 1024, 60.0)
+        @test (request.v_min_x, request.v_max_x, request.v_min_y, request.v_max_y) == (app.roi.v_min_x, app.roi.v_max_x, app.roi.v_min_y, app.roi.v_max_y)
+        geometry = FLIMApp.galvo_scan_geometry(request, cfg, app_run.spc.settings)
+        @test geometry.scan_s ≈ 498 / cfg.sample_rate_hz && geometry.periode_s ≈ 586 / cfg.sample_rate_hz
+        @test geometry.fin_par_m3 == app_run.spc.settings.fin_par_m3 && (geometry.pixels, geometry.lignes) == (1024, 1024)
+
+        # A 32-line frame in 1.6 s: armed, played, imaged, over.
+        @test start!(duration_s = 1.6) == ""
+        @test occursin("already running", FLIMApp.galvo_scan_refusal(app, app_run))
+        @test !isempty(FLIMApp.spc_request_roi_image!(app_run.spc))                       # the Image button waits too
+        @test await(() -> app_run.galvo_scan === nothing)
+        @test outcomes == [""] && any(s -> startswith(s, "Galvo scan: line"), statuses)
+        @test FLIMApp.loop_status(ex) == FLIMApp.LoopStatus(FLIMApp.LOOP_READY, "galvo scan finished")
+        parts = only(images)
+        @test sort(collect(keys(parts))) == [0, 1] && all(p -> p.geometrie isa FLIMCore.BalayageGalvos && size(p.intensite) == (32, 32), values(parts))
+        image = FLIMApp.RoiImage(FLIMApp.roi_image_parts(parts, "Channel 1"), 1)
+        @test FLIMApp.roi_image_source(image) == :galvos && size(image.intensity) == (32, 32) && sum(image.intensity) > 0
+        # Per-ROI decays from the galvo scan's stream, as from the scanner's: a ROI over the whole image gets every photon.
+        whole = FLIMApp.roi_pixel_mask([-0.5, 31.5, 31.5, -0.5, -0.5], [-0.5, -0.5, 31.5, 31.5, -0.5], 32, 32)
+        @test length(whole) == 32 * 32 && sum(only(FLIMApp.roi_histograms(image, [whole]))) == sum(image.intensity)
+
+        # Stopped mid-frame (the button again): both parts stop, the lines scanned still come back.
+        @test start!(duration_s = 6.4) == ""
+        @test await(() -> FLIMApp.loop_status(ex).state == FLIMApp.LOOP_RUNNING)
+        sleep(0.5)
+        FLIMApp.stop_galvo_scan!(app_run, "stopped")
+        @test await(() -> app_run.galvo_scan === nothing)
+        @test outcomes == ["", "stopped"] && FLIMApp.loop_status(ex) == FLIMApp.LoopStatus(FLIMApp.LOOP_READY, "stopped")
+        @test length(images) == 2 && 0 < sum(first(values(images[2])).intensite) < sum(first(values(parts)).intensite) * 4
+
+        # ROIs drawn on a galvo scan are in the galvos' coordinates: not for the Realtime in images.
+        app.roi.active = true
+        app_run.rois[] = [square_roi(5.0, 5.0)]
+        app_run.roi_image_source = :galvos
+        @test occursin("galvo scan", FLIMApp.images_start_refusal(app, app_run))
+        app_run.roi_image_source = :scanner
+        @test FLIMApp.images_start_refusal(app, app_run) == ""
+        @test FLIMApp.roi_image_source_name(:galvos) == "galvo scan" && FLIMApp.roi_image_source_name(:none) == ""
+    finally
+        FLIMApp.spc_disconnect!(app_run.spc)
+        app_run.spc.stopping === nothing || timedwait(() -> istaskdone(app_run.spc.stopping), 10.0)
+        FLIMApp.send_command!(ex, FLIMApp.QuitCommand())
+        timedwait(() -> istaskdone(loop), 10.0)
+    end
+end
+
 @testset "DAQ loop without the NI driver" begin
     # Connecting fails into a disconnected state with the reason — RECONNECT
     # retries; no fault, nothing throws.
@@ -667,6 +807,8 @@ end
     @test FLIMApp.alert_problem_id("module 0 : SYNC perdu (pas de signal) : laser coupé") == "SPC-03"
     @test FLIMApp.alert_problem_id("module 1 : chute du CFD (12 /s, seuil 100 /s)") == "SPC-04"
     @test FLIMApp.alert_problem_id("module 0 : FIFO débordé, des photons sont perdus") == "SPC-07"
+    @test FLIMApp.alert_problem_id("balayage des galvos, module 0 : 40 lignes sur 48 : signal de passe (M0, M3) à vérifier") == "IMG-03"
+    @test FLIMApp.alert_problem_id("balayage des galvos : délai de 30 s dépassé sans voir la fin de toutes les lignes") == "IMG-03"
     @test FLIMApp.alert_problem_id("module 0 : réglage non appliqué, tac_gain demandé 4, appliqué 2") == "SPC-05"
     @test FLIMApp.alert_problem_id("canal 2 : carte n° 3N0318 introuvable ou pas prête") == "SPC-02"
     @test FLIMApp.alert_problem_id("module 1 verrouillé par un autre programme (SPCM ouvert ?)") == "SPC-01"

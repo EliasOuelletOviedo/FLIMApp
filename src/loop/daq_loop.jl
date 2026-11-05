@@ -205,14 +205,15 @@ end
     write_slot!(hw, buffers, pattern, s, cfg, ex, written_commands)
 
 Prepare slot `s` with the latest PI commands of the ROI it scans (each ROI
-has its own controllers; ROI 1 without ROI scanning), check it, write it,
+has its own controllers; ROI 1 without ROI scanning; none in the galvo
+scan, whose commands and 1064 nm gate stay at 0 V), check it, write it,
 and remember the command voltages it carries (for its summary, published
 once it has played).
 """
 function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s::Integer,
                      cfg::BenchConfig, ex::Exchange, written_commands::Matrix{Float64})
-    command1, command2 = pattern.image_mode ?
-        image_mode_commands(current_settings(ex), slot_start_s(pattern, s), cfg) :
+    command1, command2 = pattern.raster ? (NaN, NaN) :
+        pattern.image_mode ? image_mode_commands(current_settings(ex), slot_start_s(pattern, s), cfg) :
         command_values(ex, max(1, slot_roi(pattern, s)))
     command1_v = command_volts(command1, cfg)
     # AO 1: the 1064 nm laser gate (`[limits] gate_1064_v`), open only while the laser is to emit — or PI command 2.
@@ -264,14 +265,29 @@ image_mode_commands(settings::AnalysisSettings, t::Real, cfg::BenchConfig) = ima
 const SHORT_DEADLINE_S = 0.5
 
 """
+    lead_slots(pattern, cfg)::Int
+
+Slots written ahead of the card: `timing.lead_slots`, or (0) one cycle of
+ROIs, two at least. The galvo scan's lines are all known in advance: about
+a second of them, so its deadline is far from any garbage-collector pause.
+"""
+function lead_slots(pattern::ScanPattern, cfg::BenchConfig)::Int
+    pattern.raster && return max(2, ceil(Int, 1.0 / slot_duration_s(pattern)) + 1)
+    return cfg.lead_slots == 0 ? max(2, slots_per_cycle(pattern)) : cfg.lead_slots
+end
+
+"""
     run_scan!(hw, cfg, ex, request)
 
 RUNNING: play `request`'s slots until the stop flag is set or something
-fails; then STOPPING (tasks cleared, outputs zeroed) and back to READY, or
-FAULT on error. A request the safety checks refuse never reaches the card
-and leaves the loop READY.
+fails — the galvo scan (`RasterRequest`) also ends by itself after its last
+line —; then STOPPING (tasks cleared, outputs zeroed) and back to READY
+("stopped", or "galvo scan finished"), or FAULT on error. A request the
+safety checks refuse never reaches the card and leaves the loop READY. The
+galvo scan isn't a run: its slots and readback go to the display only, not
+to the journal.
 """
-function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRequest)
+function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::Union{ScanRequest, RasterRequest})
     pattern = try
         build_scan_pattern(request, cfg)
     catch e
@@ -291,7 +307,8 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
     # Everything the iterations use is allocated here, once.
     n = pattern.slot_samples
     n_entry = entry_samples(pattern)
-    lead = cfg.lead_slots == 0 ? max(2, slots_per_cycle(pattern)) : cfg.lead_slots
+    total = total_slots(pattern)
+    lead = lead_slots(pattern, cfg)
     deadline_s = (lead - 1) * slot_duration_s(pattern)
     n_signals = length(cfg.readback_signals)
     buffers = SlotBuffers(n)
@@ -300,12 +317,14 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
     written_commands = zeros(2, lead + 1)
     # Enough slot buffers for the journal to fall three batches behind.
     n_pool = max(8, ceil(Int, 3 * cfg.journal_flush_s / slot_duration_s(pattern)) + 2)
-    pool = cfg.journal_readback ? ReadbackPool(n_signals, max(n, n_entry), n_pool) : nothing
+    pool = cfg.journal_readback && !pattern.raster ? ReadbackPool(n_signals, max(n, n_entry), n_pool) : nothing
     stride = max(1, cld(n, cfg.max_points_per_line))
     reset_readback_view!(ex.readback, cfg.readback_signals, cld(n, stride), stride / cfg.sample_rate_hz)
 
     pool === nothing || send_journal!(ex.journal, JournalReadbackStart(cfg.readback_signals, cfg.sample_rate_hz))
-    description = pattern.scanning ?
+    description = pattern.raster ?
+        "galvo scan, $total lines of $(round(1000 * slot_duration_s(pattern), digits=1)) ms ($(round(1000 * pattern.scan_samples / pattern.sample_rate_hz, digits=1)) ms ramp), $lead ahead" :
+        pattern.scanning ?
         "$(slots_per_cycle(pattern)) ROI(s), $(round(1000 * slot_duration_s(pattern), digits=1)) ms slots, $lead ahead" :
         "commands only, $(round(1000 * slot_duration_s(pattern), digits=1)) ms slots, $lead ahead"
     journal_event!(ex.journal, :info, "scan started: $description; deadline $(round(1000 * deadline_s, digits=1)) ms")
@@ -318,6 +337,7 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
 
     fault = nothing
     fault_backtrace = nothing
+    finished = false
     # What the loop was doing, for the fault message (literals: no allocation in the loop).
     step = Ref("preparing the tasks")
     s = 0
@@ -326,10 +346,10 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
         hw_prepare!(hw, n_entry + (lead + 2) * n; pass_ticks = (n_entry, pattern.scan_samples, pattern.shift_samples))
         step[] = "writing the entry and the first slots"
         n_entry > 0 && hw_write!(hw, entry_buffers(pattern))
-        for s in 0:lead-1
+        for s in 0:min(lead, total)-1
             write_slot!(hw, buffers, pattern, s, cfg, ex, written_commands)
         end
-        written = n_entry + lead * n
+        written = n_entry + min(lead, total) * n
         step[] = "starting the tasks"
         hw_go!(hw)
 
@@ -342,12 +362,17 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
             running = read_span!(hw, readback, n, cfg, ex, n_read)
             running || break
 
-            # End of slot s: the one iteration that has a deadline.
+            # End of slot s: the one iteration that has a deadline — none
+            # once a finite scan's last slot is written (margin Inf, no
+            # card call: the card plays what it has and may have run out).
             step[] = "writing the next slot"
             t0 = time_ns()
-            margin_s = (written - hw_generated(hw)) / cfg.sample_rate_hz
-            write_slot!(hw, buffers, pattern, s + lead, cfg, ex, written_commands)
-            written += n
+            margin_s = Inf
+            if s + lead < total
+                margin_s = (written - hw_generated(hw)) / cfg.sample_rate_hz
+                write_slot!(hw, buffers, pattern, s + lead, cfg, ex, written_commands)
+                written += n
+            end
             iteration_s = (time_ns() - t0) / 1e9
 
             column = mod(s, size(written_commands, 2)) + 1
@@ -355,10 +380,14 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
                                   written_commands[1, column], written_commands[2, column],
                                   iteration_s, margin_s, deadline_s)
             publish!(ex.slots, summary)
-            send_journal!(ex.journal, JournalVisit(summary, n_entry + s * n))
+            pattern.raster || send_journal!(ex.journal, JournalVisit(summary, n_entry + s * n))
             journal_readback!(ex, pool, readback, n)
             publish_readback_view!(ex.readback, readback, n, stride, s)
             s += 1
+            if s >= total
+                finished = true
+                break
+            end
         end
     catch e
         fault = ContextError("scan, slot $s, $(step[])", e, catch_backtrace())
@@ -376,8 +405,8 @@ function run_scan!(hw::Hardware, cfg::BenchConfig, ex::Exchange, request::ScanRe
     end
 
     if fault === nothing
-        set_loop_status!(ex, LOOP_READY, "stopped")
-        journal_event!(ex.journal, :info, "scan stopped")
+        set_loop_status!(ex, LOOP_READY, finished ? "galvo scan finished" : "stopped")
+        journal_event!(ex.journal, :info, finished ? "galvo scan finished: $total lines" : "scan stopped")
     else
         message = report_problem!(loop_problem_id(fault, :scan), describe_loop_error(fault); level = :error,
                                   key = "DAQ fault", quiet_s = 0, exception = (fault, fault_backtrace))

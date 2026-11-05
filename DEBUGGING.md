@@ -95,6 +95,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 |---|---|---|
 | IMG-01 | Imaging: no line or frame clock, no image | Scanner running? Its line clock on M1 and frame clock on M2 of the cards; ligne_/trame_front_montant in [imagerie]. |
 | IMG-02 | Scanner setting not in the table: image lines guessed | Measure this setting with scripts/spc/horloges_scanner.jl and add [lines per frame, image lines, top lines] to reglages_scanner in config/spc.toml ([imagerie]). |
+| IMG-03 | Galvo scan (ROI popup): lines missing from the image | Each line is one pass: the pass signal (PFI13) on M0 — and on M3 with [clamp] fin_par_m3 = true — as in Realtime (PASS-02 to PASS-04, scripts/test_passes.jl). The message gives the lines the card saw; the DAQ loop must have played the whole frame (no fault, no STOP). |
 
 ### Pass signal (counter → marker M0, and M3 with fin_par_m3)
 

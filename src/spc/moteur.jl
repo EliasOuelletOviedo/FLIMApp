@@ -55,7 +55,9 @@ Fin d'une acquisition d'imagerie, pour une carte : la somme de toutes ses
 trames (`intensite`, `somme_t`, `declin` comme une `ImageTrame`), et, si
 l'`Imagerie` le demandait (`garder_mots`), le flux FIFO rangé dans l'image
 (`mots`), avec la géométrie résolue (`geometrie`, tailles explicites) : de
-quoi refaire un déclin par groupe de pixels (`histogrammes_pixels`).
+quoi refaire un déclin par groupe de pixels (`histogrammes_pixels`). Une
+image des galvos (`ImageGalvos`) : une trame, sa géométrie le
+`BalayageGalvos`, le flux toujours gardé.
 `serie` et `canal` : la carte qui l'a faite (canal 0 : n° de série absent
 de [verification] series).
 """
@@ -69,7 +71,7 @@ struct ImageSomme <: Resultat
     dt_ns::Float64
     tic_s::Float64
     trames::Int
-    geometrie::Geometrie
+    geometrie::Union{Geometrie,BalayageGalvos}
     mots::Vector{UInt16}
 end
 
@@ -108,7 +110,7 @@ struct Alerte <: Resultat
 end
 Alerte(gravite::Symbol, carte::Integer, texte::AbstractString) = Alerte(gravite, Int(carte), String(texte), time())
 
-"""Fin d'une mesure (`mesure` :imagerie, :single) ou du moteur (:moteur), avec les fichiers écrits."""
+"""Fin d'une mesure (`mesure` :imagerie, :single, :clamp, :galvos) ou du moteur (:moteur), avec les fichiers écrits."""
 struct Fin <: Resultat
     mesure::Symbol
     raison::String
@@ -371,6 +373,28 @@ ImagesROI(g::Geometrie = Geometrie(); rois::AbstractVector = Vector{Tuple{Int,In
     ImagesROI(g, [Tuple{Int,Int}[(Int(p[1]), Int(p[2])) for p in roi] for roi in rois], (Int(taille[1]), Int(taille[2])),
               Int(trames), String(dossier))
 
+"""
+    ImageGalvos(balayage; dossier="", delai_s=NaN)
+
+L'image des galvos de la NI (bouton « Galvo scan » de la fenêtre ROI) :
+les cartes en FIFO avec le signal de passe (M0, et M3 avec `fin_par_m3`),
+comme le Realtime, pendant que la NI balaie les lignes de `balayage`
+(`BalayageGalvos`), une par passe. Finie quand chaque carte a vu la fin de
+toutes les lignes, sur `Arret`, ou au bout de `delai_s` (NaN : deux fois le
+balayage, plus 30 s). Puis, par carte, une `ImageSomme` (le flux gardé, la
+géométrie `balayage` : un déclin par ROI, `histogrammes_pixels`) et les
+fichiers de l'image dans `dossier` ("" : le sous-dossier galvos des
+acquisitions) ; enfin `Fin(:galvos)`. État du moteur : `:galvos`, une
+fois les cartes lancées — le GUI ne lance le balayage qu'alors : une ligne
+manquée au début décalerait l'image.
+"""
+struct ImageGalvos <: Commande
+    balayage::BalayageGalvos
+    dossier::String
+    delai_s::Float64
+end
+ImageGalvos(b::BalayageGalvos; dossier::AbstractString = "", delai_s::Real = NaN) = ImageGalvos(b, String(dossier), Float64(delai_s))
+
 """Arrête la mesure en cours (réponse : un `Fin`)."""
 struct Arret <: Commande end
 
@@ -421,7 +445,7 @@ mutable struct Moteur
     raison_arret::String          # écrite par la tâche avant de finir
 end
 
-"""État du moteur : :demarrage, :pret, :imagerie, :single, :clamp ou :arrete."""
+"""État du moteur : :demarrage, :pret, :imagerie, :single, :clamp, :galvos ou :arrete."""
 etat_moteur(m::Moteur) = @atomic m.etat
 _etat!(m::Moteur, e::Symbol) = (@atomic m.etat = e; nothing)
 
@@ -651,6 +675,8 @@ function _executer!(m::Moteur, src::Source, ctx::Contexte, c::Commande)
             _clamp!(m, src, ctx, c)
         elseif c isa ImagesROI
             _images_roi!(m, src, ctx, c)
+        elseif c isa ImageGalvos
+            _image_galvos!(m, src, ctx, c)
         elseif c isa Deverrouiller
             _deverrouiller!(m, src, ctx)
         end                                  # Arret sans mesure en cours : rien à faire
@@ -1146,6 +1172,180 @@ function _finir_acquisition!(m::Moteur, a::AcqModule, r::Reglages, g::Geometrie,
     publier!(m, Alerte(:info, a.carte, @sprintf("module %d : %d photons (%.3g /s), %d dans l'image, %d trames de %d × %d pixels, pertes %d",
                                                a.carte, res.photons, res.photons / max(duree, 1e-3), res.dans_image,
                                                res.trames, res.ny, res.nx, res.pertes)))
+    return nothing
+end
+
+# ---------------------------------------------------------------------
+# Image des galvos (ImageGalvos) : le repère des ROI
+# ---------------------------------------------------------------------
+
+"""Une carte pendant une image des galvos : son flux, gardé, et les marqueurs de passe comptés au fil des lectures."""
+mutable struct AcqGalvos
+    carte::Int
+    serie::String
+    prefixe::String
+    tic_s::Float64
+    fenetre_ns::Float64
+    ecrivain::Union{Nothing,EcrivainSpc}
+    mots::Vector{UInt16}
+    decodeur::Decodeur
+    debuts::Int
+    fins::Int
+    dernier_debut::Int64
+    deborde::Bool
+end
+
+"""La carte a-t-elle vu la fin de toutes les lignes ? Autant de M3 que de lignes, ou (M0 seul) la rampe de la dernière écoulée."""
+function _balayage_vu(a::AcqGalvos, b::BalayageGalvos)
+    a.debuts >= b.lignes || return false
+    b.fin_par_m3 && return a.fins >= b.lignes
+    return a.decodeur.base >= a.dernier_debut + round(Int64, b.scan_s / a.tic_s)
+end
+
+"""Lit le FIFO d'une carte : le flux gardé (et enregistré), les marqueurs de passe comptés."""
+function _lire_galvos!(src::Source, a::AcqGalvos, tampon::Vector{UInt16})
+    n = lire_mots!(src, a.carte, tampon)
+    n > 0 || return nothing
+    a.ecrivain === nothing || ajouter_spc!(a.ecrivain, tampon, n)
+    append!(a.mots, view(tampon, 1:n))
+    d = a.decodeur
+    decoder!(d, tampon, n)
+    debuts = d.marqueurs[MARQUEUR_DEBUT]
+    a.debuts += length(debuts)
+    a.fins += length(d.marqueurs[MARQUEUR_FIN])
+    isempty(debuts) || (a.dernier_debut = last(debuts))
+    foreach(empty!, d.marqueurs)
+    return nothing
+end
+
+function _image_galvos!(m::Moteur, src::Source, ctx::Contexte, c::ImageGalvos)
+    r = _reglages_courants!(m, ctx)
+    modules = _cartes_par_canal(ctx, r)
+    b = c.balayage
+    refus = isempty(modules) ? "image des galvos : aucune carte prête" : refus_balayage(b)
+    if !isempty(refus)
+        publier!(m, Alerte(:erreur, -1, refus))
+        publier!(m, Fin(:galvos, refus, true, String[], time()))
+        return nothing
+    end
+    parametres, _ = parametres_clamp(r; fin_par_m3 = b.fin_par_m3)
+    dossier = isempty(c.dossier) ? joinpath(dossier_spc(r), "galvos") : c.dossier
+    mkpath(dossier)
+    horodatage = Dates.format(now(), "yyyymmdd_HHMMSS")
+    delai = isfinite(c.delai_s) ? c.delai_s : 2 * b.lignes * b.periode_s + 30.0
+    tampon = zeros(UInt16, 1 << 20)
+    acqs = AcqGalvos[]
+    raison, erreur, arretee = "arrêtée", false, true
+    debut = time()
+    try
+        preparer_balayage!(src, modules, b)
+        for k in modules
+            serie = get(ctx.series, k, "")
+            prefixe = joinpath(dossier, "$(horodatage)_" * (isempty(serie) ? "module$k" : nom_fichier_serie(serie)))
+            lus = configurer!(src, k, parametres, prefixe * "_parametres.ini")
+            _signaler_tableau!(m, k, parametres, lus)
+            info = infos_fifo(src, k)
+            ecrivain = r.flux_brut ? ouvrir_spc(prefixe * ".spc", info.entete) : nothing
+            push!(acqs, AcqGalvos(k, serie, prefixe, info.horloge_macro_s, fenetre_tac(src, k, lus), ecrivain,
+                                  UInt16[], Decodeur(), 0, 0, typemin(Int64), false))
+            effacer_taux!(src, k)
+        end
+        foreach(a -> lancer!(src, a.carte), acqs)
+        debut = time()
+        _etat!(m, :galvos)                   # les cartes comptent : le GUI attend cet état pour lancer le balayage
+        prochain_taux = debut + PERIODE_TAUX
+        while true
+            m.arret[] && break
+            cmd = _prochaine_commande(m)
+            cmd isa Arret && break
+            cmd === nothing || _refuser!(m, cmd, "image des galvos en cours")
+            for a in acqs
+                _lire_galvos!(src, a, tampon)
+                if !a.deborde && (lire_etat(src, a.carte) & SPC_FOVFL) != 0
+                    a.deborde = true
+                    publier!(m, Alerte(:erreur, a.carte, "module $(a.carte) : FIFO débordé, des photons sont perdus : baisse la lumière"))
+                end
+            end
+            if all(a -> _balayage_vu(a, b), acqs)
+                raison, arretee = "$(b.lignes) lignes", false
+                break
+            end
+            if all(a -> epuisee(src, a.carte), acqs)
+                raison, arretee = "fin du rejeu", false
+                break
+            end
+            if time() - debut >= delai
+                raison, arretee = "délai de $(round(delai; digits = 1)) s dépassé", false
+                publier!(m, Alerte(:avertissement, -1, "balayage des galvos : $raison sans voir la fin de toutes les lignes " *
+                                                       "(la NI a-t-elle balayé ? le signal de passe arrive-t-il ?)"))
+                break
+            end
+            if time() >= prochain_taux
+                _taux!(m, src, ctx, modules, true)
+                prochain_taux += PERIODE_TAUX
+            end
+            sleep(0.005)
+        end
+    catch e
+        raison, erreur = _texte_erreur(e), true
+        @error "Image des galvos interrompue" exception = (e, catch_backtrace())
+        publier!(m, Alerte(:erreur, -1, "image des galvos interrompue : " * raison))
+    finally
+        for a in acqs
+            try
+                erreur || _lire_galvos!(src, a, tampon)    # avant l'arrêt, qui vide le FIFO
+            catch
+            end
+            try
+                stopper!(src, a.carte)
+            catch e
+                publier!(m, Alerte(:erreur, a.carte, "arrêt de la mesure : " * _texte_erreur(e)))
+            end
+        end
+    end
+    fichiers = String[]
+    duree = time() - debut
+    for a in acqs
+        try
+            _finir_galvos!(m, a, r, b, duree, fichiers, arretee)
+        catch e
+            erreur = true
+            @error "Fichiers du module $(a.carte)" exception = (e, catch_backtrace())
+            publier!(m, Alerte(:erreur, a.carte, "fichiers du module $(a.carte) : " * _texte_erreur(e)))
+        end
+    end
+    _publier_bilan!(m, src)
+    publier!(m, Fin(:galvos, raison, erreur, fichiers, time()))
+    _etat!(m, :pret)
+    return nothing
+end
+
+"""
+Fin d'une image des galvos pour une carte : l'image (`ranger_balayage`), son
+`ImageSomme`, ses fichiers, et les lignes qui manquent — un avertissement,
+sauf si la mesure a été arrêtée avant la fin (`arretee`).
+"""
+function _finir_galvos!(m::Moteur, a::AcqGalvos, r::Reglages, b::BalayageGalvos, duree, fichiers, arretee::Bool)
+    a.ecrivain === nothing || push!(fichiers, fermer_spc!(a.ecrivain))
+    push!(fichiers, ecrire_acquisition_ini(a.prefixe * "_acquisition.ini", a.carte, a.tic_s, a.fenetre_ns, duree, a.deborde;
+                                           geometrie = b, dcc = r.dcc))
+    isfile(a.prefixe * "_parametres.ini") && push!(fichiers, a.prefixe * "_parametres.ini")
+    dt_ns = a.fenetre_ns / 4096
+    res = ranger_balayage(a.mots, a.tic_s, dt_ns, b)
+    publier!(m, ImageSomme(a.carte, a.serie, canal_serie(r, a.serie), res.intensite, res.somme_t, res.declin, dt_ns,
+                           a.tic_s, res.trames, b, a.mots))
+    ecrire_resultats_img(a.prefixe, res, dt_ns, a.carte, b, r.binning_temps, r.photons_min)
+    append!(fichiers, a.prefixe .* ["_intensite.bmp", "_temps_moyen.bmp", "_declin.svg", ".jls"])
+    if res.lignes_vues < b.lignes || res.lignes_ecartees > 0
+        texte = "balayage des galvos, module $(a.carte) : $(res.lignes_vues) lignes sur $(b.lignes)" *
+                (res.lignes_ecartees > 0 ? ", $(res.lignes_ecartees) passe(s) écartée(s) (fin de passe manquante ou " *
+                                           "de durée inattendue, ligne vue deux fois)" : "")
+        publier!(m, arretee ? Alerte(:info, a.carte, texte * " : arrêté avant la fin") :
+                              Alerte(:avertissement, a.carte, texte * " : signal de passe (M0, M3) à vérifier"))
+    end
+    publier!(m, Alerte(:info, a.carte, @sprintf("module %d : %d photons (%.3g /s), %d dans l'image des galvos de %d × %d pixels, pertes %d",
+                                               a.carte, res.photons, res.photons / max(duree, 1e-3), res.dans_image,
+                                               b.pixels, b.lignes, res.pertes)))
     return nothing
 end
 

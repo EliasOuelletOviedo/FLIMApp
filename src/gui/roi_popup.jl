@@ -1,16 +1,21 @@
 """
 roi_popup.jl
 
-ROI popup: acquire an image with the SPC card (the "Image" button: 100
-frames with the scanner clocks, FLIMCore's `Imagerie`, the same rangement as
-imagerie_photons.jl), draw ROIs on it by hand, import them from ImageJ
-.roi/.zip files (via ImageJROI.jl) or segment them with Cellpose, and fit
-each ROI's lifetime on its own decay, rebuilt from the image's raw photon
-stream.
+ROI popup: acquire an image with the SPC card — the "Image" button: 100
+frames with the microscope scanner's clocks (FLIMCore's `Imagerie`, the
+same rangement as imagerie_photons.jl); or the "Galvo scan" button: the NI
+galvos raster the ROI field for 60 s (gui/galvo_scan.jl), an image in the
+galvos' own coordinates, the ROIs' reference —, draw ROIs on it by hand,
+import them from ImageJ .roi/.zip files (via ImageJROI.jl) or segment them
+with Cellpose, and fit each ROI's lifetime on its own decay, rebuilt from
+the image's raw photon stream.
 """
 
 """The Image button's label (it acquires `ROI_IMAGE_FRAMES` frames, gui/spc_view.jl)."""
 const IMAGE_BUTTON_LABEL = "Image ×$(ROI_IMAGE_FRAMES)"
+
+"""The Galvo scan button's label (one frame of `GALVO_SCAN_S`, gui/galvo_scan.jl)."""
+const GALVO_BUTTON_LABEL = "Galvo scan $(round(Int, GALVO_SCAN_S)) s"
 
 """
 Colorbar label of the popup's lifetime map: a preview to place ROIs — each
@@ -48,6 +53,10 @@ function RoiImage(parts::Vector{FLIMCore.ImageSomme}, channel::Integer)
     sum_t = permutedims(reduce(+, (p.somme_t for p in parts)))
     return RoiImage(intensity, sum_t, parts, Int(channel), [p.carte for p in parts], minimum(p.trames for p in parts))
 end
+
+"""What made a ROI image: the NI galvos' scan (`:galvos`) or the microscope's scanner (`:scanner`)."""
+roi_image_source(image::RoiImage)::Symbol =
+    any(p -> p.geometrie isa FLIMCore.BalayageGalvos, image.streams) ? :galvos : :scanner
 
 """
     roi_image_parts(parts, choice)::Vector{FLIMCore.ImageSomme}
@@ -647,10 +656,11 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
 
     # Which card the image shows (channel 1, the FLIM channel, by default).
     channel_menu = Menu(buttons_layout[5, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ROI_IMAGE_CHANNELS, :default => "Channel 1"))...)
+    galvo_button = Button(buttons_layout[5, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => GALVO_BUTTON_LABEL))...)
 
-    # What the Image button did last (acquiring, size, photons, or why not).
-    popup_status = Observable("Image: $(ROI_IMAGE_FRAMES) frames from the SPC card (scanner running)")
-    Label(buttons_layout[5, 2:4], popup_status; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :left, :tellwidth => false))...)
+    # What the Image and Galvo scan buttons did last (acquiring, size, photons, or why not).
+    popup_status = Observable("Image: $(ROI_IMAGE_FRAMES) frames of the scanner · Galvo scan: the NI galvos over X/Y min/max, the ROIs' reference")
+    Label(buttons_layout[6, 1:4], popup_status; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :left, :tellwidth => false))...)
 
     image_plot = Ref{Any}(nothing)
     # Every ROI currently shown on image_axis (imported or manually drawn),
@@ -669,8 +679,8 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # switches between them).
     roi_image = Ref{Union{Nothing, RoiImage}}(nothing)
     image_parts = Ref{Union{Nothing, Dict{Int, FLIMCore.ImageSomme}}}(nothing)
-    # An Image request is out (the engine is acquiring).
-    image_requested = Ref(false)
+    # The image request out, if any: :scanner (Image button), :galvos (Galvo scan button), :none.
+    image_requested = Ref(:none)
     # Grayscale intensity image for the currently displayed image, cached
     # alongside roi_image so update_lifetime_overlay! (below) can redraw
     # the overlay without recomputing it.
@@ -907,16 +917,45 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # result comes back through the refresh tick into app_run.spc.roi_image,
     # listened to below (and released when this popup closes).
     on(im_import_button.clicks) do _
-        image_requested[] && return
-        reason = spc_request_roi_image!(app_run.spc)
+        image_requested[] == :none || return
+        reason = app_run.galvo_scan === nothing ? spc_request_roi_image!(app_run.spc) : "a galvo scan is running"
         if !isempty(reason)
             popup_status[] = "Image: " * reason
             @warn "Cannot acquire the ROI image" reason=reason
             return
         end
-        image_requested[] = true
+        image_requested[] = :scanner
         im_import_button.label[] = "Acquiring…"
         popup_status[] = "Acquiring $(ROI_IMAGE_FRAMES) frames…"
+    end
+
+    # Galvo scan: the NI galvos raster the ROI field (X/Y min/max) for
+    # GALVO_SCAN_S while the SPC card counts (gui/galvo_scan.jl) — the
+    # ROIs' reference image, in the galvos' own coordinates. It comes back
+    # through app_run.spc.roi_image like the Image button's; the refresh
+    # tick follows the scan and calls galvo_scan_ended! at its end. A second
+    # click stops it (the image of the lines scanned still comes).
+    function galvo_scan_ended!(outcome::AbstractString)
+        galvo_button.label[] = GALVO_BUTTON_LABEL
+        image_requested[] == :galvos && (image_requested[] = :none)      # no image came back
+        isempty(outcome) || (popup_status[] = "Galvo scan $outcome")
+        return nothing
+    end
+
+    on(galvo_button.clicks) do _
+        if app_run.galvo_scan !== nothing
+            stop_galvo_scan!(app_run, "stopped")
+            return
+        end
+        reason = image_requested[] == :none ? start_galvo_scan!(app, app_run, popup_status; on_end = galvo_scan_ended!) :
+                                              "an image is on its way"
+        if !isempty(reason)
+            popup_status[] = "Galvo scan: " * reason
+            @warn "Cannot start the galvo scan" reason=reason
+            return
+        end
+        image_requested[] = :galvos
+        galvo_button.label[] = "Stop scan"
     end
 
     # Show the menu's channel of the last acquisition: base image, lifetime
@@ -940,6 +979,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         roi_image[] = image
         intensity = image.intensity
         intensity_image[] = intensity
+        source = roi_image_source(image)
 
         n_cols, n_rows = size(intensity)
         canvas_size = max(n_cols, n_rows)
@@ -951,6 +991,8 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         # un-padded pixel space) at Start-button time, long after this popup
         # and its local x_offset/y_offset above have gone away.
         app_run.imported_image_size = (n_cols, n_rows)
+        # The galvo scan's pixels are the galvos': the Realtime in images refuses ROIs drawn on it.
+        app_run.roi_image_source = source
 
         # Grayscale base image: always drawn, never hidden by the lifetime
         # toggle below — the lifetime map (if any) is a separate heatmap
@@ -965,19 +1007,23 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         # passed low-to-high (their own convention for "not reversed"), which
         # would silently undo the yreversed=true set at axis construction.
         image_axis.limits[] = (0, canvas_size, 0, canvas_size)
-        image_axis.title[] = "ROI image — $choice"
+        image_axis.title[] = (source == :galvos ? "Galvo scan — " : "ROI image — ") * choice
 
-        popup_status[] = "$choice (card $cards): $(image.frames) frames, $(round(Int, sum(intensity))) photons, $n_cols × $n_rows pixels"
-        @info "ROI image shown" channel=choice cards=image.cards frames=image.frames size=size(intensity)
+        popup_status[] = source == :galvos ?
+            "$choice (card $cards): galvo scan of $n_cols × $n_rows pixels, $(round(Int, sum(intensity))) photons — ROIs drawn here land where the galvos point" :
+            "$choice (card $cards): $(image.frames) frames, $(round(Int, sum(intensity))) photons, $n_cols × $n_rows pixels"
+        @info "ROI image shown" channel=choice cards=image.cards frames=image.frames size=size(intensity) source=source
         return nothing
     end
 
     image_listener = on(app_run.spc.roi_image) do parts
-        image_requested[] || return
-        image_requested[] = false
+        kind = image_requested[]
+        kind == :none && return
+        image_requested[] = :none
         im_import_button.label[] = IMAGE_BUTTON_LABEL
         if parts === nothing || isempty(parts) || all(p -> isempty(p.mots), values(parts))
-            popup_status[] = "No image: no line/frame clock? (see the SPC window's alerts)"
+            popup_status[] = kind == :galvos ? "Galvo scan: no image (see the SPC window's alerts)" :
+                                               "No image: no line/frame clock? (see the SPC window's alerts)"
             return
         end
         image_parts[] = parts
@@ -1173,6 +1219,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     on(events(popup_figure).window_open) do is_open
         is_open && return
         off(image_listener)          # app_run.spc.roi_image outlives this popup
+        stop_galvo_scan!(app_run, "stopped: ROI popup closed")   # no one left to show its image
         if roi_popup_screen[] === popup_screen
             roi_popup_screen[] = nothing
         end

@@ -20,6 +20,7 @@
 #   preparer_memoire!(s, m, bits, bits_routage) -> (canaux, courbes)
 #   effacer_page!(s, m) ; lire_histo(s, m, n; bloc)
 #   preparer_passes!(s, modules, codes, scan_s, pause_s)   simulation : les passes à fabriquer
+#   preparer_balayage!(s, modules, b)   simulation : le balayage des galvos à fabriquer
 #   verrouilles(s), forcer!(s, modules)
 #   mesurer_taux!(s, modules, duree_s) -> Dict ou nothing   (QC-104 : photons comptés dans le flux)
 #   message_ouverture(s)     ce que `ouvrir!` a vu d'anormal ("" : rien)
@@ -375,6 +376,26 @@ function preparer_passes!(s::SourceRejeu, modules, codes, scan_s, pause_s)
                                        tic_s = f.tic_s, fenetre_ns = f.fenetre_ns, graine = 100 + i,
                                        photons_pause_par_s = 1e4,
                                        tau_ns = (code, t) -> 1.8 + 0.25 * code + 0.15 * i + 0.2 * sin(2π * t / 15))
+        s.flux[m] = FluxRejeu(mots, f.entete, f.tic_s, f.fenetre_ns; serie = f.serie)
+    end
+    return nothing
+end
+
+"""
+Simulation : remplace le flux de chaque module par un balayage des galvos
+(`flux_balayage_synthetique` : des cellules, une ligne par passe), pour
+l'image des galvos (`ImageGalvos`) sans les cartes. Sans effet sur un rejeu
+de fichiers, ni sur les cartes.
+"""
+preparer_balayage!(::Source, modules, b::BalayageGalvos) = nothing
+
+function preparer_balayage!(s::SourceRejeu, modules, b::BalayageGalvos)
+    s.nom == "simulation" || return nothing
+    for (i, m) in enumerate(modules)
+        f = s.flux[m]
+        mots = flux_balayage_synthetique(b; tic_s = f.tic_s, fenetre_ns = f.fenetre_ns, graine = 200 + i,
+                                         photons_par_ligne = 8 * b.pixels, photons_retour_par_s = 1e4,
+                                         tau_ns = (1.6 + 0.3i, 3.2))
         s.flux[m] = FluxRejeu(mots, f.entete, f.tic_s, f.fenetre_ns; serie = f.serie)
     end
     return nothing

@@ -300,6 +300,12 @@ Runtime state of the GUI thread. NOT serialized.
   (the stimulation is on), NaN otherwise — what the plots highlight in
   images, where there is no lifetime setpoint
 - `diagnosed_t::Float64`: the time of the last `EtatClamp` diagnosed
+- `galvo_scan::Union{Nothing, GalvoScan}`: the ROI popup's galvo scan while
+  it runs (gui/galvo_scan.jl); START waits for it
+- `roi_image_source::Symbol`: what made the image the ROIs are drawn on —
+  `:scanner` (the microscope's scanner, Image button), `:galvos` (the NI
+  galvos, Galvo scan button: the ROIs in the galvos' own coordinates) —,
+  `:none` before any
 """
 mutable struct AppRun
     config::BenchConfig
@@ -339,6 +345,8 @@ mutable struct AppRun
     diagnosed_t::Float64
     image_mode::Bool
     stimulation::Vector{Float64}
+    galvo_scan::Union{Nothing, GalvoScan}     # the ROI popup's galvo scan while it runs (gui/galvo_scan.jl)
+    roi_image_source::Symbol                  # what made the ROIs' image: :scanner (Image button), :galvos (Galvo scan), :none
 end
 
 function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); source = "defaults"),
@@ -367,6 +375,8 @@ function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); s
         WorkerStats(),
         0.0,
         false,
-        Float64[]
+        Float64[],
+        nothing,
+        :none
     )
 end

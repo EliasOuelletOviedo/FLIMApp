@@ -367,6 +367,45 @@ segmented gets its lifetime fitted on its own decay, rebuilt from the raw
 photon stream. Both cards see the same pixels, so a ROI holds for both
 channels; the session records the channel its fit used.
 
+The popup's **Galvo scan 60 s** button makes the ROIs' reference image
+with the NI galvos themselves. They raster 1024 lines of 1024 pixels over
+the popup's X/Y min/max, one frame in 60 s. The pixel → voltage mapping is
+the one START uses for the ROIs (`to_voltage`, on the 1024 × 1024
+calibration frame), so a ROI drawn on this image lands where the galvos
+point, whatever the scanner image and the calibration between the two.
+
+How the frame is played and imaged:
+
+- **Each line**: a ramp of about 50 ms, then a flyback of about 9 ms.
+  - During the ramp, the 850 nm gate P0.0 and the pass signal are high,
+    and the routing code is 1.
+  - During the flyback, both are low and the code is the reserved one.
+  - Command 1 and the 1064 nm gate stay at 0 V for the whole frame; the
+    sync pulses (P0.2, P0.3) stay low.
+  - After the last line, the galvos return to 0 V and the scan ends by
+    itself.
+- **SPC side**: the card records in FIFO, as in Realtime, and the engine
+  (`ImageGalvos`) places each photon.
+  - Its line is the rank of its pass, counted on the M0 cadence, so a
+    lost M0 doesn't shift the following lines.
+  - Its column is its time since M0 over the M3 − M0 length the card
+    measured itself (M0 + the ramp with `fin_par_m3 = false`).
+  - The SPC engine is armed first, and the frame starts only once it
+    counts.
+- **Result**: the image, with its raw stream, comes back like the Image
+  button's. The channel menu, lifetime preview, Cellpose and per-ROI fits
+  work the same.
+  - Each card's files go to `<recording folder>/galvos/` (`.spc`,
+    `_acquisition.ini` with a `[balayage]` section, BMP images, decay,
+    `.jls`).
+  - `run.toml` records the image source (`roi.image_source`).
+
+Clicking the button again (or closing the popup) stops the scan; the lines
+already scanned are still shown. START waits for the scan to end. The
+Realtime in images refuses ROIs drawn on a galvo scan, because they are in
+the galvos' coordinates rather than the scanner's. Lines missing from the
+image are reported as IMG-03.
+
 ## Playback (START, mode "Playback: session" or "Playback: current")
 
 Every Realtime run is a session, under `<recording folder>/sessions/`:

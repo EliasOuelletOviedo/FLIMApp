@@ -109,19 +109,22 @@ end
 samples_of(ms::Real, rate_hz::Real) = round(Int, ms * rate_hz / 1000)
 
 """
-    session_info(; mode, rois, order, roi_active, roi_settings, image_size, spc, spc_settings_path,
+    session_info(; mode, rois, order, roi_active, roi_settings, image_size, image_source, spc, spc_settings_path,
                  layout, protocol, controller, irf_source, daq, sample_rate_hz)::Dict{String, Any}
 
 A session's run.toml: mode, code versions, the ROIs with their routing codes
 and fitted channel, the pixel -> galvo calibration (voltage range, image
-size, calibration reference, `roi_scan_segments`), the SPC settings
+size, calibration reference, `roi_scan_segments`) and what made the ROIs'
+image (`image_source`: "scanner", "galvo scan" — the galvos' own
+coordinates —, "" unknown), the SPC settings
 ([spc_module], declared [dcc], routing), the DAQ (`daq`, plus the sample
 rate and the scan and pause in samples — the programmed pass length), the
 layout, protocol and controller settings at START (`settings_dict`: what
 Playback reapplies by default), and the IRF's source.
 """
 function session_info(; mode::AbstractString, rois::Vector{RoiCoordinates}, order::Vector{Int}, roi_active::Bool,
-                      roi_settings::RoiSettings, image_size::Tuple{Int, Int}, spc::FLIMCore.Reglages,
+                      roi_settings::RoiSettings, image_size::Tuple{Int, Int}, image_source::AbstractString = "",
+                      spc::FLIMCore.Reglages,
                       spc_settings_path::AbstractString = "", layout::LayoutSettings = LayoutSettings(),
                       protocol::ProtocolSettings, controller::ControllerSettings, irf_source::AbstractString = "",
                       daq::Dict{String, Any} = Dict{String, Any}(), sample_rate_hz::Real = 10_000.0)::Dict{String, Any}
@@ -141,6 +144,7 @@ function session_info(; mode::AbstractString, rois::Vector{RoiCoordinates}, orde
             "drawn" => length(rois),
             "galvo_range_mV" => [roi_settings.v_min_x, roi_settings.v_max_x, roi_settings.v_min_y, roi_settings.v_max_y],
             "image_size" => collect(image_size),
+            "image_source" => String(image_source),
             "calibration_size" => roi_voltage_calibration_size,
             "points_per_roi" => protocol.points_per_roi,
             "spiral_turns" => protocol.spiral_turns

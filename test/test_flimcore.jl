@@ -1059,4 +1059,87 @@ end
     @test FLIMCore.identifier(s, 0).serie == "3T0099/IN1"
 end
 
+@testset "image des galvos : une ligne par passe, la colonne d'après M3 − M0" begin
+    b = FLIMCore.BalayageGalvos(pixels = 64, lignes = 48, scan_s = 0.004, periode_s = 0.005)
+    scan, periode, t0 = round(Int64, b.scan_s / TIC_TEST), round(Int64, b.periode_s / TIC_TEST), Int64(1000)
+    places = [(0, 0), (63, 0), (10, 10), (5, 11), (40, 20), (31, 47), (63, 47)]       # (pixel, ligne), à partir de 0
+    # Un photon au milieu de chaque pixel de `places`, un pendant chaque retour (code réservé) ; la NI repart une fois après la dernière ligne.
+    function flux_main(; sans_m0 = Int[], sans_m3 = Int[])
+        e = FLIMCore.EncodeurFifo()
+        for ligne in 0:b.lignes - 1
+            debut = t0 + ligne * periode
+            ligne in sans_m0 || FLIMCore.marqueur!(e, debut, 0b0001)
+            for (x, y) in places
+                y == ligne && FLIMCore.photon!(e, debut + floor(Int64, (x + 0.5) * scan / b.pixels), 4095 - 200; routage = 1)
+            end
+            ligne in sans_m3 || FLIMCore.marqueur!(e, debut + scan, 0b1000)
+            FLIMCore.photon!(e, debut + scan + 10, 4095 - 200; routage = FLIMCore.CODE_HORS_ROI)
+        end
+        FLIMCore.marqueur!(e, t0 + b.lignes * periode, 0b0001)
+        return e.mots
+    end
+    pixels_allumes(res) = sort([(x - 1, y - 1) for y in 1:b.lignes, x in 1:b.pixels if res.intensite[y, x] > 0])
+    sans_m3 = FLIMCore.BalayageGalvos(pixels = 64, lignes = 48, scan_s = 0.004, periode_s = 0.005, fin_par_m3 = false)
+    for g in (b, sans_m3)
+        res = FLIMCore.ranger_balayage(flux_main(), TIC_TEST, DT_TEST, g)
+        @test pixels_allumes(res) == sort(places) && res.lignes_vues == 48 && res.lignes_ecartees == 0
+        @test res.dans_image == length(places) && res.photons == length(places) + 48   # les retours : hors de l'image
+        @test size(res.intensite) == (48, 64) && sum(res.declin) == res.photons
+    end
+    # Un M0 perdu : sa ligne manque, les suivantes restent à leur place.
+    res = FLIMCore.ranger_balayage(flux_main(sans_m0 = [10]), TIC_TEST, DT_TEST, b)
+    @test pixels_allumes(res) == sort(filter(!=((10, 10)), places)) && res.lignes_vues == 47
+    # Un M3 perdu (fin par M3) : la passe est écartée ; M0 seul ne le voit pas.
+    res = FLIMCore.ranger_balayage(flux_main(sans_m3 = [20]), TIC_TEST, DT_TEST, b)
+    @test pixels_allumes(res) == sort(filter(!=((40, 20)), places)) && res.lignes_ecartees == 1
+    @test pixels_allumes(FLIMCore.ranger_balayage(flux_main(sans_m3 = [20]), TIC_TEST, DT_TEST, sans_m3)) == sort(places)
+    # Un déclin par groupe de pixels (les ROI de la fenêtre ROI), comme pour une image du scanner.
+    etiquettes = zeros(Int, 48, 64)
+    etiquettes[1, 1] = 1
+    etiquettes[48, 32:64] .= 2
+    H = FLIMCore.histogrammes_pixels(flux_main(), TIC_TEST, b, etiquettes, 2)
+    @test vec(sum(H; dims = 1)) == [1.0, 2.0] && H[200 ÷ 16 + 1, 1] == 1.0
+    @test_throws ErrorException FLIMCore.histogrammes_pixels(flux_main(), TIC_TEST, b, zeros(Int, 64, 64), 1)
+    @test !isempty(FLIMCore.refus_balayage(FLIMCore.BalayageGalvos(scan_s = 0.06, periode_s = 0.05)))
+end
+
+@testset "moteur : image des galvos simulée, le repère des ROI" begin
+    b = FLIMCore.BalayageGalvos(pixels = 64, lignes = 48, scan_s = 0.004, periode_s = 0.005)
+    m = FLIMCore.demarrer_moteur(reglages_test(source = "simulation", vitesse = 0.0))
+    @test attendre_etat(m, :pret)
+    images = FLIMCore.ImageSomme[]
+    alertes = FLIMCore.Alerte[]
+    garder(x) = (x isa FLIMCore.ImageSomme && push!(images, x); x isa FLIMCore.Alerte && push!(alertes, x); nothing)
+    FLIMCore.commander!(m, FLIMCore.ImageGalvos(b))
+    fin = jusqu_a_fin(m, :galvos; garder)
+    @test !fin.erreur && fin.raison == "48 lignes" && all(a -> a.gravite == :info, alertes)
+    @test [i.carte for i in images] == [0, 1] && all(i -> size(i.intensite) == (48, 64) && i.geometrie == b && i.trames == 1, images)
+    # Le flux gardé redonne l'image ; les cellules simulées y sont plus claires que le fond.
+    img = images[1]
+    @test FLIMCore.ranger_balayage(img.mots, img.tic_s, img.dt_ns, b).intensite == img.intensite
+    cx, cy, _ = FLIMCore.CELLULES_SIMULEES[3]
+    autour(x, y) = sum(img.intensite[y - 2:y + 2, x - 2:x + 2])
+    @test autour(round(Int, cx * 64), round(Int, cy * 48)) > 3 * autour(4, 4)
+    # Les fichiers de l'image, avec le balayage dans l'_acquisition.ini.
+    ini = only(filter(f -> endswith(f, "_acquisition.ini") && occursin("3N0317", f), fin.fichiers))
+    @test occursin("[balayage]", read(ini, String)) && any(f -> endswith(f, "_intensite.bmp"), fin.fichiers)
+
+    # Arrêtée avant la fin : l'image des lignes vues, sans avertissement.
+    m.source.vitesse = 1.0
+    lent = FLIMCore.BalayageGalvos(pixels = 64, lignes = 48, scan_s = 0.04, periode_s = 0.05)
+    empty!(images); empty!(alertes)
+    FLIMCore.commander!(m, FLIMCore.ImageGalvos(lent))
+    @test attendre_etat(m, :galvos)
+    sleep(0.6)
+    FLIMCore.commander!(m, FLIMCore.Arret())
+    fin = jusqu_a_fin(m, :galvos; garder)
+    @test !fin.erreur && fin.raison == "arrêtée" && all(a -> a.gravite == :info, alertes)
+    @test length(images) == 2 && 0 < count(>(0), sum(images[1].intensite; dims = 2)) < 48
+
+    # Un balayage impossible : refusé, le moteur reste prêt.
+    FLIMCore.commander!(m, FLIMCore.ImageGalvos(FLIMCore.BalayageGalvos(lignes = 0, scan_s = 0.04, periode_s = 0.05)))
+    @test jusqu_a_fin(m, :galvos).erreur && attendre_etat(m, :pret)
+    @test FLIMCore.arreter_moteur(m)
+end
+
 end # @testset FLIMCore

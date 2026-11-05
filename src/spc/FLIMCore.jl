@@ -7,7 +7,8 @@ couches, toutes sans affichage ni exécution au chargement :
 
 - fonctions pures tirées des scripts imagerie_photons.jl et
   histogrammes_single.jl (branche NI-PCIe-6321) : réglages (config/spc.toml),
-  flux .spc, rangement des photons en pixels, en bloc ou trame par trame,
+  flux .spc, rangement des photons en pixels, en bloc ou trame par trame —
+  ou ligne par ligne d'un balayage des galvos de la NI (balayage.jl) —,
   fichiers de sortie ;
 - sources de photons derrière une même interface : la QC-104 (une carte
   virtuelle par entrée, au flux d'une SPC-150N : source_qc.jl), les
@@ -44,12 +45,13 @@ using .SPCLite: Decodeur, decoder!, ecrire_ini, lire_ini, comparer_parametres, e
                 SPC_TIME_OVER, SPC_COLTIM_OVER, SPC_CMD_STOP
 
 """Version de FLIMCore : à augmenter à chaque changement, pour `garde_version`."""
-const VERSION_CORE = 10
+const VERSION_CORE = 11
 
 include("reglages.jl")
 include("flux.jl")
 include("rangement.jl")
 include("passes.jl")
+include("balayage.jl")
 include("sorties.jl")
 include("sources.jl")
 include("source_qc.jl")
@@ -61,6 +63,7 @@ export Geometrie, REGLAGES_SCANNER, reglage_scanner, Reglages, lire_reglages, ec
        parametres_base, temps_taux_s, est_qc104, source_materielle, voie_qc, serie_carte, nom_fichier_serie
 export ecrire_spc, lire_spc, flux_synthetique, EncodeurFifo, photon!, marqueur!
 export Passes, passes!, terminer_passes!, flux_passes_synthetique
+export BalayageGalvos, lignes_balayage, ranger_balayage, parcourir_balayage, flux_balayage_synthetique
 export ranger_photons, histogrammes_pixels, Rangeur, rois_rangeur!, ranger!, terminer!, declin_total, temps_moyen, traiter, retraiter, mesurer_horloges, profil_trame
 export Source, SourceCartes, SourceRejeu, source_rejeu, source_simulation, source_session, source_depuis
 export SourceQC, CarteQC, QCDll, QCRejeu, source_qc_brut, EncodeurQC, photon_qc!, marqueur_qc!, avancer_qc!
@@ -68,7 +71,7 @@ export Moteur, demarrer_moteur, arreter_moteur, verifier, commander!, rendre!, r
        attendre_fin, afficher_etat
 export Resultat, ImageTrame, ImageSomme, HistoSingle, HistoClamp, Taux, Alerte, Fin, EtatCartes, EtatCarte,
        EtatClamp, CompteursCarte
-export Commande, Imagerie, Single, Clamp, ImagesROI, Arret, Verifier, Deverrouiller, RAISON_CIBLE_ATTEINTE
+export Commande, Imagerie, Single, Clamp, ImagesROI, ImageGalvos, Arret, Verifier, Deverrouiller, RAISON_CIBLE_ATTEINTE
 export garde_version
 
 """
