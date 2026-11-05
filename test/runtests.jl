@@ -734,6 +734,30 @@ end
     end
 end
 
+@testset "Galvo scan: lines the SPC card missed, reported once" begin
+    # The NI has played its frame; the SPC engine still waits for the end of a line (a card without
+    # M0): after the grace period, IMG-03 once and the engine stopped — not once per refresh tick.
+    cfg = test_bench_config()
+    app_run = AppRun(cfg)
+    ex = app_run.exchange
+    request = FLIMApp.RasterRequest(-1000, 1000, -1000, 1000, 32, 32, 1.6, true)
+    outcomes = String[]
+    t = time()
+    app_run.galvo_scan = FLIMApp.GalvoScan(request, FLIMApp.galvo_scan_geometry(request, cfg, app_run.spc.settings),
+                                           FLIMApp.Observable(""), o -> push!(outcomes, o), t - 70, t - 69, true, t - 69, true,
+                                           t - FLIMApp.GALVO_SCAN_GRACE_S - 1, 0, false, "")
+    FLIMApp.set_loop_status!(ex, FLIMApp.LOOP_READY, "galvo scan finished")
+    app_run.spc.roi_image_pending = true                       # the engine's image still to come
+    FLIMApp.clear_problems!(("IMG-",))
+    foreach(_ -> FLIMApp.galvo_scan_tick!(app_run), 1:4)
+    record = only(filter(r -> r.id == "IMG-03", FLIMApp.problem_records()))
+    @test record.count == 1 && app_run.galvo_scan.stop_sent && ex.stop[]
+    app_run.spc.roi_image_pending = false                      # the engine's end: the scan is over
+    FLIMApp.galvo_scan_tick!(app_run)
+    @test app_run.galvo_scan === nothing && outcomes == ["ended: the SPC card missed the end of some lines (IMG-03)"]
+    FLIMApp.clear_problems!(("IMG-",))
+end
+
 @testset "DAQ loop without the NI driver" begin
     # Connecting fails into a disconnected state with the reason — RECONNECT
     # retries; no fault, nothing throws.
@@ -816,6 +840,8 @@ end
     @test FLIMApp.alert_problem_id("module 0 : FIFO débordé, des photons sont perdus") == "SPC-07"
     @test FLIMApp.alert_problem_id("balayage des galvos, module 0 : 40 lignes sur 48 : signal de passe (M0, M3) à vérifier") == "IMG-03"
     @test FLIMApp.alert_problem_id("balayage des galvos : délai de 30 s dépassé sans voir la fin de toutes les lignes") == "IMG-03"
+    @test FLIMApp.alert_problem_id("balayage des galvos, module 1 (3N0318) : aucun début de ligne (M0) depuis 5 s — le signal de passe (PFI13) arrive-t-il sur le M0 de cette carte ?") == "IMG-03"
+    @test FLIMApp.alert_problem_id("balayage des galvos, module 1 (3N0318) : 0 lignes sur 1024, 0 débuts de ligne (M0) vus : le signal de passe (PFI13) n'arrive pas sur le M0 de cette carte") == "IMG-03"
     @test FLIMApp.alert_problem_id("module 0 : réglage non appliqué, tac_gain demandé 4, appliqué 2") == "SPC-05"
     @test FLIMApp.alert_problem_id("canal 2 : carte n° 3N0318 introuvable ou pas prête") == "SPC-02"
     @test FLIMApp.alert_problem_id("module 1 verrouillé par un autre programme (SPCM ouvert ?)") == "SPC-01"

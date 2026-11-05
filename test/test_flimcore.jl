@@ -1155,4 +1155,41 @@ end
     @test FLIMCore.arreter_moteur(m)
 end
 
+@testset "image des galvos : M0 seul sans photon après la dernière ligne, une carte sans M0" begin
+    # M0 seul : la dernière ligne finit à l'heure du PC quand la carte n'écrit plus rien (porte 850 nm fermée).
+    b = FLIMCore.BalayageGalvos(pixels = 64, lignes = 48, scan_s = 0.004, periode_s = 0.005, fin_par_m3 = false)
+    acq(debuts, fins, vu_t) = FLIMCore.AcqGalvos(0, "", "", TIC_TEST, 12.5, nothing, UInt16[], FLIMCore.Decodeur(),
+                                                 debuts, fins, Int64(10^9), false, vu_t, false)
+    @test !FLIMCore._balayage_vu(acq(48, 0, time()), b)                       # sa rampe n'est pas finie
+    @test FLIMCore._balayage_vu(acq(48, 0, time() - b.scan_s - FLIMCore.MARGE_FIN_GALVOS_S), b)
+    @test !FLIMCore._balayage_vu(acq(47, 0, time() - 10), b)                  # une ligne de moins
+    avec_m3 = FLIMCore.BalayageGalvos(pixels = 64, lignes = 48, scan_s = 0.004, periode_s = 0.005)
+    @test !FLIMCore._balayage_vu(acq(48, 47, time() - 10), avec_m3) && FLIMCore._balayage_vu(acq(48, 48, NaN), avec_m3)
+
+    # Une carte sans M0 (le signal de passe ne lui arrive pas) : son image est vide, et un avertissement
+    # le dit avec ses marqueurs — même arrêtée après la durée du balayage (par le GUI, la NI ayant fini).
+    e = FLIMCore.EncodeurFifo()
+    for t in 1:2000
+        FLIMCore.photon!(e, 4000t, 3000)
+    end
+    flux = Dict(0 => FLIMCore.FluxRejeu(FLIMCore.flux_balayage_synthetique(b; photons_par_ligne = 200), 0x1, TIC_TEST, 12.5; serie = "3N0317"),
+                1 => FLIMCore.FluxRejeu(e.mots, 0x1, TIC_TEST, 12.5; serie = "3N0318"))
+    m = FLIMCore.demarrer_moteur(reglages_test(); source = FLIMCore.SourceRejeu(flux; vitesse = 1.0))
+    @test attendre_etat(m, :pret)
+    alertes = FLIMCore.Alerte[]
+    images = FLIMCore.ImageSomme[]
+    garder(x) = (x isa FLIMCore.Alerte && push!(alertes, x); x isa FLIMCore.ImageSomme && push!(images, x); nothing)
+    FLIMCore.commander!(m, FLIMCore.ImageGalvos(b))
+    @test attendre_etat(m, :galvos)
+    sleep(0.6)                                                                  # plus que les 0,24 s du balayage
+    FLIMCore.commander!(m, FLIMCore.Arret())
+    fin = jusqu_a_fin(m, :galvos; garder)
+    avertis = [a.texte for a in alertes if a.gravite == :avertissement]
+    @test !fin.erreur && length(avertis) == 1                                   # la carte 0 a toutes ses lignes
+    @test occursin("module 1 (3N0318) : 0 lignes sur 48, 0 débuts de ligne (M0) vus", only(avertis)) &&
+          occursin("n'arrive pas sur le M0", only(avertis))
+    @test [i.carte for i in images] == [0, 1] && sum(images[1].intensite) > 0 && sum(images[2].intensite) == 0
+    @test FLIMCore.arreter_moteur(m)
+end
+
 end # @testset FLIMCore
