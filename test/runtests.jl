@@ -681,6 +681,8 @@ end
         app.roi.v_max_x = 2500
         @test occursin("past the 2.0 V limit", FLIMApp.galvo_scan_refusal(app, app_run))
         app.roi.v_max_x = 1000
+        @test occursin("past the 2.0 V limit", FLIMApp.galvo_scan_refusal(app, app_run; range_mV = (-2500, 1000, -1000, 1000)))
+        @test FLIMApp.galvo_scan_refusal(app, app_run; range_mV = (-2000, 2000, -2000, 2000)) == ""
         app_run.running[] = true
         @test occursin("a run is going on", FLIMApp.galvo_scan_refusal(app, app_run))
         app_run.running[] = false
@@ -756,6 +758,64 @@ end
     FLIMApp.galvo_scan_tick!(app_run)
     @test app_run.galvo_scan === nothing && outcomes == ["ended: the SPC card missed the end of some lines (IMG-03)"]
     FLIMApp.clear_problems!(("IMG-",))
+end
+
+@testset "Galvo calibration: a galvo scan registered on a scanner image" begin
+    # A field of cells seen by the scanner (pixel s at x0 + s dx) and by the galvos (voltage V
+    # at k V + o; to_voltage's sign mirrors X here): the registration finds galvo pixel
+    # g = a s + b, and two rounds — the full ±2 V, then round 1's range — give the range where
+    # the galvo scan coincides with the scanner image, within a pixel.
+    alea = FLIMCore.Alea(7)
+    u() = FLIMCore._uniforme!(alea)
+    gauss() = sqrt(-2log(1 - u())) * cos(2π * u())
+    poisson(λ) = λ < 30 ? (L = exp(-λ); k = 0; p = u(); while p > L; k += 1; p *= u(); end; k) :
+                          max(0, round(Int, λ + sqrt(λ) * gauss()))
+    cells = [(2.4u() - 1.2, 2.4u() - 1.2, 0.012 + 0.03u(), 0.5 + u()) for _ in 1:400]
+    field(x, y) = 0.05 + sum(b * exp(-((x - cx)^2 + (y - cy)^2) / (2r^2)) for (cx, cy, r, b) in cells
+                             if abs(x - cx) < 4r && abs(y - cy) < 4r; init = 0.0)
+    N = 512
+    render(position, photons) = [poisson(photons * field(position(i - 1, j - 1)...)) for i in 1:N, j in 1:N]
+    sc = (x0 = -0.45, dx = 1.0 / (N - 1), y0 = -0.38, dy = 0.9 / (N - 1))
+    scanner = render((i, j) -> (sc.x0 + i * sc.dx, sc.y0 + j * sc.dy), 6.0)
+    gv = (kx = 0.55, ox = 0.03, ky = -0.5, oy = -0.02)
+    galvo(r) = render((i, j) -> (gv.kx * FLIMApp.to_voltage(i, N, r[1], r[2]) / 1000 + gv.ox,
+                                 gv.ky * FLIMApp.to_voltage(j, N, r[3], r[4]) / 1000 + gv.oy), 2.0)
+    # Where the galvo scan coincides with the scanner image (the ROIs' mapping: pixel c at to_voltage(c, …)).
+    vx0, vy0 = -(sc.x0 - gv.ox) * 1000 / gv.kx, -(sc.y0 - gv.oy) * 1000 / gv.ky
+    truth = (vx0, vx0 - sc.dx * 1000 / gv.kx * (N - 1), vy0, vy0 - sc.dy * 1000 / gv.ky * (N - 1))
+    mv_per_px = abs.((truth[2] - truth[1], truth[4] - truth[3])) ./ (N - 1)
+    start = (-2000, 2000, -2000, 2000)
+    reg1 = FLIMApp.register_galvo_on_scanner(scanner, galvo(start); bin = 4)
+    a_true = (-sc.dx * 1000 / gv.kx * (N - 1) / 4000, -sc.dy * 1000 / gv.ky * (N - 1) / 4000)   # galvo px per scanner px
+    @test reg1.a[1] < 0 < reg1.a[2] && all(abs.(reg1.a .- a_true) ./ abs.(a_true) .< 0.01) && FLIMApp.calibration_refusal(reg1, 1) == ""
+    range1 = FLIMApp.calibrated_galvo_range(start, reg1, (N, N); galvo_size = (N, N), calibration_size = N)
+    @test all(abs.(range1 .- truth) .<= 4 .* (mv_per_px[1], mv_per_px[1], mv_per_px[2], mv_per_px[2]))
+    reg2 = FLIMApp.register_galvo_on_scanner(scanner, galvo(range1); bin = 2, scales = (0.8, 1.25), steps = 9, mirrors = false)
+    @test all(abs.(reg2.a .- 1) .< 0.01) && all(abs.(reg2.b) .< 3) && reg2.ncc > reg1.ncc && FLIMApp.calibration_refusal(reg2, 2) == ""
+    range2 = FLIMApp.calibrated_galvo_range(range1, reg2, (N, N); galvo_size = (N, N), calibration_size = N)
+    @test all(abs.(range2 .- truth) .<= 1.5 .* (mv_per_px[1], mv_per_px[1], mv_per_px[2], mv_per_px[2]))
+    # Unrelated images don't match: no unique correlation peak. And round 2, from round 1's range,
+    # must find nearly the identity.
+    noise = [Float64(poisson(3.0)) for _ in 1:N, _ in 1:N]
+    @test occursin("doesn't match", FLIMApp.calibration_refusal(FLIMApp.register_galvo_on_scanner(noise, galvo(start); bin = 4, steps = 9), 1))
+    @test occursin("wrong place", FLIMApp.calibration_refusal((reg2..., a = (1.3, 1.0)), 2)) &&
+          FLIMApp.calibration_refusal((reg2..., a = (1.3, 1.0)), 1) == ""
+
+    # The range math: an identity registration keeps the range; a scanner image shorter than the
+    # calibration frame sits centered in it (roi_scan_segments), so found at b = the centering.
+    identity = (a = (1.0, 1.0), b = (0.0, 0.0))
+    r = (-1000, 1000, -500, 700)
+    @test FLIMApp.calibrated_galvo_range(r, identity, (N, N); galvo_size = (N, N), calibration_size = N) == r
+    @test FLIMApp.calibrated_galvo_range(r, (a = (1.0, 1.0), b = (0.0, N / 4)), (N, N ÷ 2); galvo_size = (N, N), calibration_size = N) == r
+    @test FLIMApp.galvo_on_scanner(scanner, identity, (N, N)) == scanner
+    overlay = FLIMApp.calibration_overlay(scanner, scanner)
+    @test size(overlay) == (N, N) && all(c -> c.r == c.g == c.b, overlay)                  # coinciding: white to black
+
+    # The galvo scan over another range than the popup's (the calibration's first round).
+    cfg = test_bench_config()
+    app, app_run = AppState(true), AppRun(cfg)
+    @test FLIMApp.galvo_scan_request(app, app_run; range_mV = start).v_min_x == -2000 &&
+          FLIMApp.galvo_scan_request(app, app_run).v_min_x == app.roi.v_min_x
 end
 
 @testset "DAQ loop without the NI driver" begin
