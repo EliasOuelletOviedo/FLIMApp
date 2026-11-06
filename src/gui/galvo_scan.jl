@@ -54,17 +54,21 @@ mutable struct GalvoScan
     outcome::String
 end
 
-"""
-    galvo_scan_request(app, app_run; size=roi_voltage_calibration_size, duration_s=GALVO_SCAN_S)::RasterRequest
+"""The popup's galvo range (`app.roi`, mV): `(v_min_x, v_max_x, v_min_y, v_max_y)`."""
+roi_galvo_range(app)::NTuple{4, Int} = (app.roi.v_min_x, app.roi.v_max_x, app.roi.v_min_y, app.roi.v_max_y)
 
-The galvo scan of the ROI field: the popup's galvo range (`app.roi`, mV),
-the size of the frame the ROIs' voltage mapping is calibrated on
-(`roi_voltage_calibration_size` pixels and lines), one frame in
-`GALVO_SCAN_S`. `size` and `duration_s` shrink it for the tests.
 """
-galvo_scan_request(app, app_run; size::Integer = roi_voltage_calibration_size, duration_s::Real = GALVO_SCAN_S)::RasterRequest =
-    RasterRequest(app.roi.v_min_x, app.roi.v_max_x, app.roi.v_min_y, app.roi.v_max_y,
-                  size, size, duration_s, app_run.spc.settings.inverser_routage)
+    galvo_scan_request(app, app_run; size=roi_voltage_calibration_size, duration_s=GALVO_SCAN_S, range_mV=roi_galvo_range(app))::RasterRequest
+
+The galvo scan of the ROI field: the popup's galvo range (`app.roi`, mV;
+`range_mV`, another one: the calibration's), the size of the frame the
+ROIs' voltage mapping is calibrated on (`roi_voltage_calibration_size`
+pixels and lines), one frame in `GALVO_SCAN_S`. `size` and `duration_s`
+shrink it for the tests.
+"""
+galvo_scan_request(app, app_run; size::Integer = roi_voltage_calibration_size, duration_s::Real = GALVO_SCAN_S,
+                   range_mV = roi_galvo_range(app))::RasterRequest =
+    RasterRequest(range_mV..., size, size, duration_s, app_run.spc.settings.inverser_routage)
 
 """
     galvo_scan_geometry(request, cfg, settings)::FLIMCore.BalayageGalvos
@@ -81,13 +85,13 @@ function galvo_scan_geometry(request::RasterRequest, cfg::BenchConfig, settings:
 end
 
 """
-    galvo_scan_refusal(app, app_run)::String
+    galvo_scan_refusal(app, app_run; range_mV=roi_galvo_range(app))::String
 
 Why the galvo scan can't start now ("" if it can): offline, a run going on,
 a galvo scan already running, the DAQ loop not ready, the SPC engine not
 ready, or the galvo range past `[limits] galvo_v`.
 """
-function galvo_scan_refusal(app, app_run)::String
+function galvo_scan_refusal(app, app_run; range_mV = roi_galvo_range(app))::String
     isempty(app_run.offline) || return app_run.offline
     (app_run.running[] || app_run.run_open) && return "a run is going on: STOP it first"
     app_run.galvo_scan === nothing || return "a galvo scan is already running"
@@ -97,25 +101,26 @@ function galvo_scan_refusal(app, app_run)::String
     spc == :pret || return spc == :none ? "SPC engine not running: CONNECT it in the SPC window" :
                            "SPC engine busy ($(SPC_ENGINE_STATE_NAMES[spc]))"
     limit = app_run.config.galvo_limit_v
-    peak = maximum(abs, (app.roi.v_min_x, app.roi.v_max_x, app.roi.v_min_y, app.roi.v_max_y)) / 1000
+    peak = maximum(abs, range_mV) / 1000
     peak <= limit || return "the galvo range reaches $peak V, past the $limit V limit: change X/Y min/max"
     return ""
 end
 
 """
-    start_galvo_scan!(app, app_run, status; on_end=outcome -> nothing, size, duration_s)::String
+    start_galvo_scan!(app, app_run, status; on_end=outcome -> nothing, size, duration_s, range_mV)::String
 
 The "Galvo scan" button: "" when started, otherwise why not
 (`galvo_scan_refusal`, or the SPC engine's refusal). Arms the SPC engine
 (`spc_request_galvo_image!`, whose image reaches the popup through
-`app_run.spc.roi_image`) and leaves the rest to `galvo_scan_tick!`. `size`
-and `duration_s`: `galvo_scan_request`'s.
+`app_run.spc.roi_image`) and leaves the rest to `galvo_scan_tick!`. `size`,
+`duration_s` and `range_mV`: `galvo_scan_request`'s.
 """
 function start_galvo_scan!(app, app_run, status::Observable{String}; on_end::Function = outcome -> nothing,
-                           size::Integer = roi_voltage_calibration_size, duration_s::Real = GALVO_SCAN_S)::String
-    refusal = galvo_scan_refusal(app, app_run)
+                           size::Integer = roi_voltage_calibration_size, duration_s::Real = GALVO_SCAN_S,
+                           range_mV = roi_galvo_range(app))::String
+    refusal = galvo_scan_refusal(app, app_run; range_mV)
     isempty(refusal) || return refusal
-    request = galvo_scan_request(app, app_run; size, duration_s)
+    request = galvo_scan_request(app, app_run; size, duration_s, range_mV)
     geometry = galvo_scan_geometry(request, app_run.config, app_run.spc.settings)
     reason = spc_request_galvo_image!(app_run.spc, geometry)
     isempty(reason) || return reason

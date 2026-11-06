@@ -62,6 +62,8 @@ include("exchange.jl")
 include("smoothing.jl")
 include("protocol.jl")
 include("roi_geometry.jl")
+# Galvo calibration: a galvo scan registered on a scanner image (pure, FFT-based)
+include("calibration.jl")
 
 # ImageJ .roi/.zip parser
 include("io/ImageJROI.jl")

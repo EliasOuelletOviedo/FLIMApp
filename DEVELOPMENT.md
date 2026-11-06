@@ -153,6 +153,20 @@ Plan.pdf:
   - **GUI side** (`gui/galvo_scan.jl`): it arms the engine, starts the
     frame once the engine counts, and stops the other part when one stops
     (`galvo_scan_tick!`).
+- **Galvo calibration** (`src/calibration.jl`, pure; the ROI popup's
+  "Calibrate galvos" sequences it).
+  - **Registration:** `register_galvo_on_scanner` registers a galvo scan
+    on a scanner image (both as photon counts, the two channels summed).
+    It bins, takes the square root, band-passes with a difference of
+    Gaussians, then runs a masked NCC by FFT (`best_shift`, Padfield 2012)
+    for each scale. A log grid of isotropic scales (mirrors included) runs
+    on about 128 px images; then each axis is refined by pattern search,
+    down to 0.1 %.
+  - **Model:** galvo pixel `g = a s + b` per axis.
+  - **New range:** `calibrated_galvo_range` turns `(a, b)` into the
+    X/Y range of the ROIs' `to_voltage` mapping, centering included.
+  - **Tests:** synthetic cells, imaged with known scales, offsets and a
+    mirror, recovered within a pixel after two rounds.
 - **Playback**: the same engine on `source_session(dir; vitesse)` (the
   recorded streams), the same worker (`drive_outputs = false`: simulated PI),
   `source_done` ending it once the replay is over; the session's settings

@@ -406,6 +406,50 @@ Realtime in images refuses ROIs drawn on a galvo scan, because they are in
 the galvos' coordinates rather than the scanner's. Lines missing from the
 image are reported as IMG-03.
 
+The popup's **Calibrate galvos** button finds the X/Y min/max that make
+the galvos land on the scanner image's pixels. ROIs drawn on an Image ×100
+then go where the galvos point. It goes in three steps:
+
+1. **Polygon image:** the first click takes an Image ×100 with the polygon
+   scanner (100 frames, line and frame clocks on M1/M2).
+2. **Microscope change:** the button becomes **Start galvo scans**. Switch
+   the microscope to the galvo-galvo path, then click it.
+3. **Two galvo rounds,** both registered on that one polygon image (no
+   switching back):
+   - round 1: a galvo scan of 60 s over the full ±2 V (`[limits]
+     galvo_v`) in X and Y;
+   - round 2: a galvo scan over round 1's range, for a finer adjustment.
+
+How each round adjusts the range:
+
+- **Registration:** the galvo scan is registered on the scanner image,
+  always on the sum of the two channels (`register_galvo_on_scanner`,
+  `src/calibration.jl`).
+  - Both images are band-passed, so the cells count rather than the
+    illumination or the pixel noise.
+  - A masked normalized cross-correlation (FFT) gives, for each scale, the
+    best offset.
+  - On each axis it finds a scale and an offset, including a mirror; round
+    2 only searches near scale 1.
+- **New range:** `calibrated_galvo_range` turns the scale and offset into
+  the voltages, with the same pixel → voltage mapping the ROIs use. The
+  range is written to X/Y min/max (and saved) as soon as each round finds
+  it.
+- **Refusals:** a round is refused if the two images don't match, or if
+  the scanner field needs more than ±2 V.
+  - A match has a unique correlation peak: the best correlation at another
+    offset is at most 0.55 of it (0.2 to 0.4 for the same field, 0.65 to
+    0.95 for unrelated images), and the correlation is at least 0.15.
+  - Round 2, which starts from round 1's range, must find nearly the
+    identity: scales within 10 % of 1 and offsets under 64 px. Otherwise
+    round 1 matched the wrong place.
+
+At the end the popup shows the round 2 overlay (scanner in green, galvos
+in magenta, white where they coincide) and the correction round 2 made.
+`app.log` records the result. During an acquisition, a click on the button
+stops it; closing the popup stops it at any step, including while it waits
+for the microscope. The range is left as the last finished round set it.
+
 ## Playback (START, mode "Playback: session" or "Playback: current")
 
 Every Realtime run is a session, under `<recording folder>/sessions/`:
