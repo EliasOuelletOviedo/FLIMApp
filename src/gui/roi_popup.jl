@@ -17,6 +17,34 @@ const IMAGE_BUTTON_LABEL = "Image ×$(ROI_IMAGE_FRAMES)"
 """The Galvo scan button's label (one frame of `GALVO_SCAN_S`, gui/galvo_scan.jl)."""
 const GALVO_BUTTON_LABEL = "Galvo scan $(round(Int, GALVO_SCAN_S)) s"
 
+"""The Calibrate button's label: the galvo calibration's two rounds (calibration.jl)."""
+const CALIBRATE_BUTTON_LABEL = "Calibrate galvos"
+
+"""Its label once the polygon image is taken: the microscope switched to the galvos by hand, the galvo scans go on."""
+const CALIBRATION_CONTINUE_LABEL = "Start galvo scans"
+
+"""The galvo calibration stopped by its button (or the popup closed)."""
+struct CalibrationStopped <: Exception end
+
+"""
+    calibration_overlay(scanner, galvo)::Matrix{RGBf}
+
+The calibration's check, both on the scanner's pixels: the scanner image in
+green, the galvo scan (`galvo_on_scanner`) in magenta — white where they
+coincide. Each at the square root of its counts, up to its 99.5th
+percentile.
+"""
+function calibration_overlay(scanner::AbstractMatrix{<:Real}, galvo::AbstractMatrix{<:Real})::Matrix{RGBf}
+    function scaled(img)
+        v = sqrt.(max.(Float64.(img), 0.0))
+        positive = filter(>(0), vec(v))
+        top = isempty(positive) ? 1.0 : max(quantile(positive, 0.995), 1e-9)
+        return clamp.(v ./ top, 0.0, 1.0)
+    end
+    s, g = scaled(scanner), scaled(galvo)
+    return [RGBf(g[i], s[i], g[i]) for i in CartesianIndices(s)]
+end
+
 """
 Colorbar label of the popup's lifetime map: a preview to place ROIs — each
 pixel's mean arrival time minus the IRF's (`pixel_lifetime_map`), not a fit.
@@ -657,6 +685,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # Which card the image shows (channel 1, the FLIM channel, by default).
     channel_menu = Menu(buttons_layout[5, 1]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => ROI_IMAGE_CHANNELS, :default => "Channel 1"))...)
     galvo_button = Button(buttons_layout[5, 2]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => GALVO_BUTTON_LABEL))...)
+    calibrate_button = Button(buttons_layout[5, 3]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => CALIBRATE_BUTTON_LABEL))...)
 
     # What the Image and Galvo scan buttons did last (acquiring, size, photons, or why not).
     popup_status = Observable("Image: $(ROI_IMAGE_FRAMES) frames of the scanner · Galvo scan: the NI galvos over X/Y min/max, the ROIs' reference")
@@ -681,6 +710,15 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     image_parts = Ref{Union{Nothing, Dict{Int, FLIMCore.ImageSomme}}}(nothing)
     # The image request out, if any: :scanner (Image button), :galvos (Galvo scan button), :none.
     image_requested = Ref(:none)
+    # The galvo calibration (its button): its task while it runs, its stop
+    # request, and the overlay of its last result on image_axis.
+    calibration_task = Ref{Union{Nothing, Task}}(nothing)
+    calibration_cancel = Ref(false)
+    # Between the polygon image and the galvo scans: waiting for the button (the microscope changed by hand).
+    calibration_waiting = Ref(false)
+    calibration_continue = Ref(false)
+    calibration_plot = Ref{Any}(nothing)
+    calibrating() = (t = calibration_task[]; t !== nothing && !istaskdone(t))
     # Grayscale intensity image for the currently displayed image, cached
     # alongside roi_image so update_lifetime_overlay! (below) can redraw
     # the overlay without recomputing it.
@@ -917,7 +955,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # result comes back through the refresh tick into app_run.spc.roi_image,
     # listened to below (and released when this popup closes).
     on(im_import_button.clicks) do _
-        image_requested[] == :none || return
+        (image_requested[] == :none && !calibrating()) || return
         reason = app_run.galvo_scan === nothing ? spc_request_roi_image!(app_run.spc) : "a galvo scan is running"
         if !isempty(reason)
             popup_status[] = "Image: " * reason
@@ -947,7 +985,8 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             stop_galvo_scan!(app_run, "stopped")
             return
         end
-        reason = image_requested[] == :none ? start_galvo_scan!(app, app_run, popup_status; on_end = galvo_scan_ended!) :
+        reason = calibrating() ? "the calibration is running" :
+                 image_requested[] == :none ? start_galvo_scan!(app, app_run, popup_status; on_end = galvo_scan_ended!) :
                                               "an image is on its way"
         if !isempty(reason)
             popup_status[] = "Galvo scan: " * reason
@@ -956,6 +995,173 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         end
         image_requested[] = :galvos
         galvo_button.label[] = "Stop scan"
+    end
+
+    # Calibrate galvos: the polygon scanner's image (the Image button's 100
+    # frames, line and frame clocks on M1/M2); then, the microscope switched
+    # to the galvos by hand and the button clicked again, two rounds of a
+    # galvo scan (GALVO_SCAN_S) registered on that image, on the sum of the
+    # two channels (register_galvo_on_scanner, calibration.jl): the X/Y
+    # min/max become the range where the galvos land on the scanner's
+    # pixels (calibrated_galvo_range). Round 1 scans the full ±[limits]
+    # galvo_v, round 2 the range of round 1, for precision; each round's
+    # range is applied as soon as it is found. During an acquisition, a
+    # click stops it, the range left as the last round finished it; closing
+    # the popup does too, while it waits as well.
+    galvo_limit_mV = round(Int, 1000 * app_run.config.galvo_limit_v)
+    calibration_start = (-galvo_limit_mV, galvo_limit_mV, -galvo_limit_mV, galvo_limit_mV)
+
+    # Wait for `done()`, yielding to the refresh tick (which drives both acquisitions).
+    function calibration_wait(done, timeout_s::Real, what::AbstractString)
+        t0 = time()
+        while !done()
+            calibration_cancel[] && throw(CalibrationStopped())
+            time() - t0 > timeout_s && error("$what: nothing after $(round(Int, timeout_s)) s")
+            sleep(0.1)
+        end
+        return nothing
+    end
+
+    # The sum of the two channels of the image the popup has just received from `source`.
+    function received_sum(before, source::Symbol, what::AbstractString)
+        parts = image_parts[]
+        (parts === nothing || parts === before) && error("$what: no image (see the SPC window's alerts)")
+        image = RoiImage(roi_image_parts(parts, "Sum"), 0)
+        roi_image_source(image) == source || error("$what: not the expected image")
+        sum(image.intensity) > 0 ||
+            error("$what: no photon in the image" * (source == :galvos ? " — no line marker (M0) on the cards? (IMG-03)" : ""))
+        return image.intensity
+    end
+
+    function calibration_scanner_image()
+        popup_status[] = "Calibration: polygon image ($ROI_IMAGE_FRAMES frames)…"
+        before = image_parts[]
+        reason = spc_request_roi_image!(app_run.spc)
+        isempty(reason) || error("scanner image: " * reason)
+        image_requested[] = :scanner
+        im_import_button.label[] = "Acquiring…"
+        calibration_wait(() -> image_requested[] == :none, 120, "scanner image")
+        return received_sum(before, :scanner, "scanner image")
+    end
+
+    function calibration_galvo_image(k::Integer, range_mV)
+        before = image_parts[]
+        outcome = Ref{Union{Nothing, String}}(nothing)
+        scan_status = Observable("")
+        relay = on(text -> (popup_status[] = "Calibration $k/2 · " * text), scan_status)
+        try
+            reason = start_galvo_scan!(app, app_run, scan_status; range_mV,
+                                       on_end = o -> (galvo_scan_ended!(o); outcome[] = String(o)))
+            isempty(reason) || error("galvo scan: " * reason)
+            image_requested[] = :galvos
+            galvo_button.label[] = "Stop scan"
+            calibration_wait(() -> outcome[] !== nothing, GALVO_SCAN_S + 120, "galvo scan")
+        finally
+            off(relay)
+        end
+        outcome[] == "stopped" && throw(CalibrationStopped())
+        isempty(outcome[]) || error("galvo scan " * outcome[])
+        return received_sum(before, :galvos, "galvo scan")
+    end
+
+    # One round: the galvo scan over `range_mV`, its registration on the polygon image (on a worker thread: seconds), the new range.
+    function calibration_round(k::Integer, scanner, range_mV)
+        galvo = calibration_galvo_image(k, range_mV)
+        popup_status[] = "Calibration $k/2: registering the galvo scan on the scanner image…"
+        reg = fetch(Threads.@spawn k == 1 ? register_galvo_on_scanner(scanner, galvo; bin = 4) :
+                                            register_galvo_on_scanner(scanner, galvo; bin = 2, scales = (0.8, 1.25),
+                                                                      steps = 9, mirrors = false))
+        calibration_cancel[] && throw(CalibrationStopped())
+        new_range = calibrated_galvo_range(range_mV, reg, size(scanner); galvo_size = size(galvo))
+        @info "Galvo calibration round" round = k range_mV = range_mV galvo_per_scanner_px = reg.a offset_px = reg.b ncc = reg.ncc second = reg.second z = reg.z new_range_mV = new_range
+        refusal = calibration_refusal(reg, k)
+        isempty(refusal) || error("round $k: " * refusal)
+        maximum(abs, new_range) <= galvo_limit_mV ||
+            error("round $k: the scanner's field needs X $(new_range[1])…$(new_range[2]) mV, Y $(new_range[3])…$(new_range[4]) mV, " *
+                  "past the galvos' ±$galvo_limit_mV mV")
+        return galvo, reg, new_range
+    end
+
+    function set_galvo_range!(range_mV)
+        for (textbox, v) in zip((x_min_textbox, x_max_textbox, y_min_textbox, y_max_textbox), range_mV)
+            textbox.displayed_string[] = string(v)
+            textbox.stored_string[] = string(v)          # its handler sets app.roi and saves it
+        end
+        return nothing
+    end
+
+    function show_calibration_overlay!(scanner, galvo, reg)
+        n_cols, n_rows = size(scanner)
+        canvas_size = max(n_cols, n_rows)
+        x0, y0 = (canvas_size - n_cols) ÷ 2, (canvas_size - n_rows) ÷ 2
+        calibration_plot[] === nothing || delete!(image_axis, calibration_plot[])
+        calibration_plot[] = image!(image_axis, (x0 - 0.5, x0 + n_cols - 0.5), (y0 - 0.5, y0 + n_rows - 0.5),
+                                    calibration_overlay(scanner, galvo_on_scanner(galvo, reg, size(scanner))); interpolate = false)
+        image_axis.title[] = "Calibration — scanner (green), galvos (magenta)"
+        return nothing
+    end
+
+    on(calibrate_button.clicks) do _
+        if calibration_waiting[]
+            calibration_continue[] = true                  # the microscope is on the galvos: the scans go on
+            return
+        end
+        if calibrating()
+            calibration_cancel[] = true
+            stop_galvo_scan!(app_run, "stopped")
+            popup_status[] = "Calibration: stopping…"
+            return
+        end
+        refusal = image_requested[] != :none ? "an image is on its way" : galvo_scan_refusal(app, app_run; range_mV = calibration_start)
+        if !isempty(refusal)
+            popup_status[] = "Calibration: " * refusal
+            return
+        end
+        calibration_cancel[] = false
+        calibrate_button.label[] = "Stop calibration"
+        calibration_task[] = @async begin
+            applied = 0
+            try
+                scanner = calibration_scanner_image()
+                # The microscope changed by hand from the polygon to the galvos: the button again goes on.
+                calibration_continue[] = false
+                calibration_waiting[] = true
+                calibrate_button.label[] = CALIBRATION_CONTINUE_LABEL
+                popup_status[] = "Calibration: polygon image taken ($(round(Int, sum(scanner))) photons). Switch the microscope " *
+                                 "to the galvos, then click \"$CALIBRATION_CONTINUE_LABEL\" (closing the popup cancels)"
+                calibration_wait(() -> calibration_continue[], Inf, "")
+                calibration_waiting[] = false
+                calibrate_button.label[] = "Stop calibration"
+                range_mV = calibration_start
+                correction = ""
+                for k in 1:2
+                    galvo, reg, new_range = calibration_round(k, scanner, range_mV)
+                    set_galvo_range!(new_range)
+                    applied = k
+                    if k == 2
+                        correction = "round 2 moved X by $(round(reg.b[1]; digits = 1)) px and Y by $(round(reg.b[2]; digits = 1)) px, " *
+                                     "scales $(round(100 * (reg.a[1] - 1); digits = 2)) % and $(round(100 * (reg.a[2] - 1); digits = 2)) %, " *
+                                     "correlation $(round(reg.ncc; digits = 2)) (next offset $(round(reg.second; digits = 2)))"
+                        show_calibration_overlay!(scanner, galvo, reg)
+                    end
+                    range_mV = new_range
+                end
+                result = "X $(range_mV[1])…$(range_mV[2]) mV, Y $(range_mV[3])…$(range_mV[4]) mV; " * correction
+                journal_event!(app_run.exchange.journal, :info, "galvo calibration: " * result)
+                popup_status[] = "Calibration done — " * result
+            catch e
+                kept = applied == 0 ? "X/Y range unchanged" : "X/Y range of round $applied kept"
+                if e isa CalibrationStopped
+                    popup_status[] = "Calibration stopped: $kept"
+                else
+                    @error "Galvo calibration failed" exception = (e, catch_backtrace())
+                    popup_status[] = "Calibration failed ($kept): " * first(split(sprint(showerror, e), '\n'))
+                end
+            finally
+                calibration_waiting[] = false
+                calibrate_button.label[] = CALIBRATE_BUTTON_LABEL
+            end
+        end
     end
 
     # Show the menu's channel of the last acquisition: base image, lifetime
@@ -999,6 +1205,10 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         # layered on top of it.
         if image_plot[] !== nothing
             delete!(image_axis, image_plot[])
+        end
+        if calibration_plot[] !== nothing
+            delete!(image_axis, calibration_plot[])
+            calibration_plot[] = nothing
         end
         image_plot[] = heatmap!(image_axis, x_offset:(x_offset + n_cols - 1), y_offset:(y_offset + n_rows - 1), intensity, colormap = :grays)
         update_lifetime_overlay!()
@@ -1219,6 +1429,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     on(events(popup_figure).window_open) do is_open
         is_open && return
         off(image_listener)          # app_run.spc.roi_image outlives this popup
+        calibration_cancel[] = true                               # the calibration ends with it
         stop_galvo_scan!(app_run, "stopped: ROI popup closed")   # no one left to show its image
         if roi_popup_screen[] === popup_screen
             roi_popup_screen[] = nothing
