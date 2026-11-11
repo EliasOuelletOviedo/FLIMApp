@@ -369,11 +369,15 @@ end
 """
     read_sdt_irf_qc(filepath, spc) -> (irfs, channels)
 
-IRF of the SPC-QC-104 from SPCM Single(s) saved as .sdt: one block, one
-curve per input (IN1, IN2, IN3). Channel k takes the curve of its input
-([verification] series: "3T0089/IN2" → curve 2) from the picked file — or,
-when that curve is empty there, from the same name with its last number
-replaced by k (irf_ch1.sdt, irf_ch2.sdt: one detector per measurement).
+IRF of the SPC-QC-104 from SPCM Single(s) saved as .sdt: one block, the
+curves of each input (IN1, IN2, IN3) one input after another — `ncx × ncy`
+of them per input, SPCM's routing channels (Page control; 1 by default:
+IN2 is curve 2; with 2 routing channels in X, curves 3 and 4), summed.
+Channel k takes the curves of its input ([verification] series:
+"3T0089/IN2") from the picked file — or, when they are empty there, from
+the same name with its last number replaced by k (irf_ch1.sdt,
+irf_ch2.sdt: one detector per measurement); without counts in either, the
+error says which curves have some.
 Its TDC channels (`tac_range / adc_resolution`: 64 ps for 256 points) are
 spread by overlap onto [qc] fenetre_ns in `DEFAULT_HISTOGRAM_RESOLUTION`
 channels, the Realtime decays' axis (`rebin_counts`); then, as in
@@ -396,7 +400,9 @@ function read_sdt_irf_qc(filepath::AbstractString, spc::FLIMCore.Reglages)
         voie = FLIMCore.voie_qc(serial)
         voie === nothing && error("[verification] series: \"$serial\" isn't an input of the QC-104 (\"3T0089/IN1\")")
         found = nothing
-        for f in unique(filter(isfile, [String(filepath), sibling(k)]))
+        seen = String[]                                   # where the counts are, for the error
+        files = unique(filter(isfile, [String(filepath), sibling(k)]))
+        for f in files
             sdt = SdtFile.read_sdt(read(f), basename(f))
             isempty(sdt.data) && continue
             mi = sdt.measure_info[clamp(sdt.blocks[1].meas_desc_block_no + 1, 1, length(sdt.measure_info))]
@@ -405,15 +411,21 @@ function read_sdt_irf_qc(filepath::AbstractString, spc::FLIMCore.Reglages)
             block = sdt.data[1]
             n_adc = size(block, ndims(block))
             curves = reshape(Float64.(block), :, n_adc)
-            size(curves, 1) >= voie.entree || continue
-            curve = vec(curves[voie.entree, :])
+            # SPCM's routing channels (ncx × ncy) per input, input after input: the input's decay is their sum.
+            per_input = max(Int(mi.ncx), 1) * max(Int(mi.ncy), 1)
+            rows = (voie.entree - 1) * per_input + 1:voie.entree * per_input
+            full = [c for c in axes(curves, 1) if sum(@view curves[c, :]) > 0]
+            push!(seen, "$(basename(f)): " * (isempty(full) ? "none" : "curve(s) $(join(full, ", "))") *
+                        " of $(size(curves, 1)), $per_input per input")
+            last(rows) <= size(curves, 1) || continue
+            curve = vec(sum(curves[rows, :]; dims = 1))
             sum(curve) > 0 || continue
             found = (f, mi, sdt.setup, curve, Float64(mi.tac_r) / max(Int(mi.tac_g), 1) / n_adc * 1e9)
             break
         end
         found === nothing &&
-            error("no counts on IN$(voie.entree) (channel $k) in $(basename(filepath))" *
-                  (isempty(sibling(k)) ? "" : " nor in $(basename(sibling(k)))"))
+            error("no counts on IN$(voie.entree) (channel $k) in $(join(basename.(files), " nor in "))" *
+                  (isempty(seen) ? "" : " — counts in " * join(seen, "; ")))
         f, mi, setup, curve, bin_ns = found
         (isfinite(bin_ns) && bin_ns > 0) || error("$(basename(f)): TDC range $(mi.tac_r) s, $(length(curve)) points")
         counts = rebin_counts(curve, bin_ns, window / n, n)

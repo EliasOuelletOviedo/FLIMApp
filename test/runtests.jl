@@ -1677,6 +1677,15 @@ end
     @test all(irf -> size(irf) == (256, 2) && irf[2, 1] ≈ 12.5 / 256, irfs)
     @test [irf[argmax(irf[:, 2]), 1] for irf in irfs] ≈ [37, 43] .* (12.5 / 256)       # 1.81 and 2.10 ns
     @test channels[2]["settings"]["tdc_offset2"] == 1.536 && isapprox(channels[1]["settings"]["sync_holdoff"], 12.85; atol = 1e-3)
+    # SPCM with 2 routing channels in X (Page control, ncx = 2): 2 curves per input, input after input. Both
+    # detectors in one file (2026-11-10): IN2's photons in the 3rd curve of 6; each channel sums its input's.
+    both = joinpath(@__DIR__, "data", "qc104", "irf_850nm_16X.sdt")
+    irfs_ncx, channels_ncx = FLIMApp.read_sdt_irf_qc(both, bench)
+    @test [c["file"] for c in channels_ncx] == ["irf_850nm_16X.sdt", "irf_850nm_16X.sdt"]
+    @test all(irf -> sum(irf[:, 2]) > 1e4, irfs_ncx) && argmax(irfs_ncx[1][:, 2]) == argmax(irfs_ncx[2][:, 2])   # one IRF, 1.66 ns
+    in3 = deepcopy(bench); in3.series = ["3T0089/IN1", "3T0089/IN3"]
+    message = try FLIMApp.read_sdt_irf_qc(both, in3); "" catch e; sprint(showerror, e) end
+    @test occursin("no counts on IN3 (channel 2) in irf_850nm_16X.sdt — counts in irf_850nm_16X.sdt: curve(s) 1, 3 of 6, 2 per input", message)
     info = Dict{String, Any}("channels" => channels, "dcc" => Dict{String, Any}(bench.dcc))
     @test isempty(FLIMApp.irf_mismatches(info, bench))                         # config/spc.toml: the SPCM values
     offsets = deepcopy(bench); offsets.qc_decalage_ns = zeros(4)
