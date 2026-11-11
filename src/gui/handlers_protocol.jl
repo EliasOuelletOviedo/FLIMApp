@@ -2,10 +2,11 @@
 handlers_protocol.jl
 
 Protocol panel: the Protocol/ROI popup launch buttons and their active
-toggles, the opto laser's PWM (frequency, duty cycle and its toggle), plus
-the ROI galvo-scan timing spinners (START copies them into the DAQ loop's
-ScanRequest, runtime.jl). Split out of handlers.jl's former single
-make_handlers function.
+toggles, the opto laser's PWM (frequency, duty cycle and its toggle), the
+ROIs' source (Galvos / Image masks: the Realtime in images, `[clamp]
+images`), plus the ROI galvo-scan timing spinners (START copies them into
+the DAQ loop's ScanRequest, runtime.jl). Split out of handlers.jl's former
+single make_handlers function.
 """
 
 """
@@ -35,23 +36,29 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
         Label(panel_grid[6, 1:2]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Active"))...)
         roi_toggle = Toggle(panel_grid[6, 3]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.roi.active))...)
         roi_button = Button(panel_grid[6, 4:6]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Edit", :width => nothing))...)
+        # Where the ROIs' photons come from: the galvos scan each ROI (left), or the scanner's whole images, each
+        # ROI's pixels masked (right: the Realtime in images, [clamp] images — the SPC window's box as well).
+        Label(panel_grid[7, 1:2]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Galvos"))...)
+        images_toggle = Toggle(panel_grid[7, 3]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app_run.spc.settings.images))...)
+        Label(panel_grid[7, 4:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :left, :text => "Image masks"))...)
+        app_run.spc.panel_images_toggle = images_toggle          # the refresh tick keeps it on the setting
 
         Label(panel_grid[3, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "PWM frequency :"))...)
         # The opto laser's PWM: on, the first "Duty cycle" % of each period the 1064 nm, the rest the acquisition
         # (a short label: two 28 px columns).
         Label(panel_grid[4, 1:2]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Duty cycle :"))...)
         pwm_toggle = Toggle(panel_grid[4, 3]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.protocol.PWM_active))...)
-        Label(panel_grid[7, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Points per ROI :"))...)
-        Label(panel_grid[8, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Spiral turns :"))...)
-        Label(panel_grid[9, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Scan time [ms] :"))...)
-        Label(panel_grid[10, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Shift time [ms] :"))...)
+        Label(panel_grid[8, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Points per ROI :"))...)
+        Label(panel_grid[9, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Spiral turns :"))...)
+        Label(panel_grid[10, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Scan time [ms] :"))...)
+        Label(panel_grid[11, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Shift time [ms] :"))...)
 
         Box(panel_grid[3, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[4, 4:6]; SPINNER_BOX_ATTRS...)
-        Box(panel_grid[7, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[8, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[9, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[10, 4:6]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[11, 4:6]; SPINNER_BOX_ATTRS...)
 
         protocol_params = Dict{Symbol, Any}(
             :PWM_frequency  => (Textbox(panel_grid[3, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.PWM_frequency), :stored_string => string(app.protocol.PWM_frequency)))...),
@@ -62,21 +69,21 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
                                  Button(panel_grid[4, 4:6];  SPINNER_UP_ATTRS...),
                                  Button(panel_grid[4, 4:6];  SPINNER_DOWN_ATTRS...),
                                  (1, 99, Int)),
-            :points_per_roi  => (Textbox(panel_grid[7, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.points_per_roi), :stored_string => string(app.protocol.points_per_roi)))...),
-                                 Button(panel_grid[7, 4:6];  SPINNER_UP_ATTRS...),
-                                 Button(panel_grid[7, 4:6];  SPINNER_DOWN_ATTRS...),
-                                 (1, 100_000, Int)),
-            :spiral_turns    => (Textbox(panel_grid[8, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.spiral_turns), :stored_string => string(app.protocol.spiral_turns)))...),
+            :points_per_roi  => (Textbox(panel_grid[8, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.points_per_roi), :stored_string => string(app.protocol.points_per_roi)))...),
                                  Button(panel_grid[8, 4:6];  SPINNER_UP_ATTRS...),
                                  Button(panel_grid[8, 4:6];  SPINNER_DOWN_ATTRS...),
-                                 (0, 10, Int)),
-            :scan_time       => (Textbox(panel_grid[9, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.scan_time), :stored_string => string(app.protocol.scan_time)))...),
+                                 (1, 100_000, Int)),
+            :spiral_turns    => (Textbox(panel_grid[9, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.spiral_turns), :stored_string => string(app.protocol.spiral_turns)))...),
                                  Button(panel_grid[9, 4:6];  SPINNER_UP_ATTRS...),
                                  Button(panel_grid[9, 4:6];  SPINNER_DOWN_ATTRS...),
-                                 (1, 1_000_000, Int)),
-            :shift_time => (Textbox(panel_grid[10, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.shift_time), :stored_string => string(app.protocol.shift_time)))...),
+                                 (0, 10, Int)),
+            :scan_time       => (Textbox(panel_grid[10, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.scan_time), :stored_string => string(app.protocol.scan_time)))...),
                                  Button(panel_grid[10, 4:6];  SPINNER_UP_ATTRS...),
                                  Button(panel_grid[10, 4:6];  SPINNER_DOWN_ATTRS...),
+                                 (1, 1_000_000, Int)),
+            :shift_time => (Textbox(panel_grid[11, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.shift_time), :stored_string => string(app.protocol.shift_time)))...),
+                                 Button(panel_grid[11, 4:6];  SPINNER_UP_ATTRS...),
+                                 Button(panel_grid[11, 4:6];  SPINNER_DOWN_ATTRS...),
                                  (0, 1_000_000, Int)),
         )
 
@@ -147,6 +154,12 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
 
         on(roi_button.clicks) do _
             open_roi_popup!(app, app_run, roi_popup_screen)
+        end
+
+        # Galvos or image masks: the SPC setting (config/spc.toml), from the next START.
+        on(images_toggle.active) do active
+            active == app_run.spc.settings.images && return
+            spc_edit_setting!(app_run.spc, :images, active) || (images_toggle.active[] = app_run.spc.settings.images)
         end
 
         foreach(n -> colsize!(panel_grid, n, 28), 1:6)

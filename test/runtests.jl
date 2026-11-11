@@ -479,9 +479,21 @@ end
     @test FLIMApp.build_scan_pattern(
         FLIMApp.ScanRequest(many[1:15], collect(1:15), true, -1000, 1000, -1000, 1000, 20, 3, 95, 5, (1024, 1024)), cfg) isa FLIMApp.ScanPattern
 
-    # The pass counter needs at least two samples of scan and of pause.
+    # The pass counter needs at least two samples of scan and of pause (at 1 kHz, 1 ms is one sample)…
+    slow = test_bench_config(Dict{String, Any}("timing" => Dict{String, Any}("sample_rate_hz" => 1000.0)))
     @test_throws FLIMApp.SafetyError FLIMApp.build_scan_pattern(
-        FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 95, 0, (1024, 1024)), cfg)
+        FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 95, 1, (1024, 1024)), slow)
+    @test_throws FLIMApp.SafetyError FLIMApp.build_scan_pattern(
+        FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 1, 5, (1024, 1024)), slow)
+    # …a shift of 0 (no pause) leaves it its 2-sample gap: with ROIs, the galvos' jump to the next ROI, lasers off.
+    jump = FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 95, 0, (1024, 1024)), cfg)
+    @test (jump.scan_samples, jump.shift_samples) == (950, FLIMApp.PASS_GAP_SAMPLES) && FLIMApp.entry_samples(jump) == 2
+    jump_buffers = FLIMApp.SlotBuffers(jump.slot_samples)
+    FLIMApp.prepare_slot!(jump_buffers, jump, 1, 0.5, 5.0)
+    @test all(l -> l & 0x01 == 0x00, jump_buffers.lines[951:952]) && all(==(0.0), jump_buffers.commands[951:952])
+    @test jump_buffers.galvos[952] ≈ FLIMApp.roi_scan_segments(FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000,
+                                                              20, 3, 95, 0, (1024, 1024)))[3].center[1] / 1000
+    @test FLIMApp.pause_samples(0, 1e4) == 2 && FLIMApp.pause_samples(5, 1e4) == 50
 
     # Refused before anything reaches the card.
     @test_throws FLIMApp.SafetyError FLIMApp.build_scan_pattern(
@@ -568,6 +580,40 @@ end
     delete!(old, :PWM_duty); delete!(old, :PWM_active)
     restored = FLIMApp.dict_to_struct(ProtocolSettings, old)
     @test restored.PWM_duty == 50 && !restored.PWM_active && restored.scan_time == 400
+end
+
+@testset "Shift time 0: no pause — the pass signal's 2-sample gap, the light on without ROIs" begin
+    cfg = test_bench_config()
+    request(shift; pwm = 0.0) = FLIMApp.ScanRequest(FLIMApp.RoiCoordinates[], Int[], false, -1000, 1000, -1000, 1000, 20, 3,
+                                                    90, shift, (1024, 1024), true, false, pwm, 0.2)
+    p = FLIMApp.build_scan_pattern(request(0), cfg)
+    n = p.slot_samples
+    @test (p.scan_samples, p.shift_samples, n, FLIMApp.entry_samples(p)) == (900, 2, 902, 2)
+    # The gap: the gate P0.0 high (the 850 nm on) under the reserved code (its photons thrown away), the 1064 nm on.
+    reserved = ~UInt8(FLIMCore.CODE_HORS_ROI) & 0x0f
+    @test all(l -> l & 0x01 == 0x01 && l >> FLIMApp.DO_ROI_CODE_SHIFT == reserved, p.lines[901:902])
+    b = FLIMApp.SlotBuffers(n)
+    FLIMApp.prepare_slot!(b, p, 3, 0.4, 5.0)
+    @test all(==(0.4), b.commands[1:n]) && all(==(5.0), b.commands[n+1:2n])        # the light never stops
+    FLIMApp.check_slot(b, cfg)
+    # With the PWM (1000 Hz, 2 of 10 samples): one regular train across the slots.
+    pwm = FLIMApp.build_scan_pattern(request(0; pwm = 1000.0), cfg)
+    train = Float64[]
+    for s in 0:4
+        FLIMApp.prepare_slot!(b, pwm, s, 0.4, 5.0)
+        append!(train, b.commands[n+1:2n])
+    end
+    starts = findall(i -> train[i] > 0 && (i == 1 || train[i-1] == 0), eachindex(train))
+    @test length(starts) > 400 && all(==(10), diff(starts)) && count(>(0), train) == 2 * length(starts)
+    # A shift > 0: the pause as before, gate low, the 1064 nm off.
+    paused = FLIMApp.build_scan_pattern(request(30; pwm = 1000.0), cfg)
+    pb = FLIMApp.SlotBuffers(paused.slot_samples)
+    FLIMApp.prepare_slot!(pb, paused, 0, 0.4, 5.0)
+    @test all(l -> l & 0x01 == 0x00, pb.lines[901:end]) && all(==(0.0), pb.commands[901:paused.slot_samples])
+    # The Realtime in images: the slots only pace the commands; a shift of 0 leaves the same 2 samples.
+    images = FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(FLIMApp.RoiCoordinates[], Int[], false, -1000, 1000, -1000, 1000,
+                                                            20, 3, 90, 0, (1024, 1024), true, true), cfg)
+    @test images.shift_samples == 2 && all(l -> l & 0x01 == 0x01, images.lines)
 end
 
 @testset "Realtime in images: the engine's command, START's checks, no PI" begin
@@ -1517,6 +1563,12 @@ end
         @test [e["code_read"] for e in info["roi"]["list"]] == [1, 2, 3] && info["roi"]["image_size"] == [1024, 1024]
         @test info["layout"]["binning"] == app.layout.binning && info["controller"]["P1"] == app.controller.P1
         @test info["daq"]["scan_samples"] == 9500 && info["spc"]["spc_module"]["tac_gain"] == settings.spc["tac_gain"]
+        # A shift of 0 (no pause): the engine and run.toml with the pass signal's 2-sample gap.
+        shift = app.protocol.shift_time
+        app.protocol.shift_time = 0
+        @test FLIMApp.clamp_command(app, app_run, order, dir).pause_s == FLIMApp.PASS_GAP_SAMPLES / cfg.sample_rate_hz
+        @test FLIMApp.run_info(app, app_run, order)["daq"]["shift_samples"] == FLIMApp.PASS_GAP_SAMPLES
+        app.protocol.shift_time = shift
         @test all(e -> e["fit_channel"] == "", info["roi"]["list"])
         @test haskey(info["versions"], "git_commit") && info["versions"]["spclite"] == FLIMCore.SPCLite.VERSION_LITE
         @test FLIMApp.TOML.parse(sprint(io -> FLIMApp.TOML.print(io, info; sorted = true)))["roi"]["visit_order"] == order
@@ -1752,6 +1804,20 @@ end
     finally
         ctx.irf, ctx.irf_bin_size, ctx.tcspc_window_size = saved
     end
+end
+
+@testset "Lifetime preview: the lifetime's color, the photons' opacity (RGBA)" begin
+    τ = [1.0 3.0; NaN 2.0; 5.0 0.0]                   # 3 × 2 pixels, one without a lifetime (below Min photons)
+    photons = [400.0 100.0; 7.0 50.0; 200.0 10.0]
+    rgba = FLIMApp.lifetime_preview_rgba(τ, photons, (1.0, 3.0))
+    turbo = FLIMApp.cgrad(:turbo)
+    same(c, g) = all(isapprox(getfield(c, f), getfield(g, f); atol = 1e-6) for f in (:r, :g, :b))
+    @test size(rgba) == size(τ) && rgba[2, 1].alpha == 0                                    # no lifetime: transparent
+    @test same(rgba[1, 1], turbo[0.0]) && same(rgba[2, 2], turbo[0.5]) && same(rgba[1, 2], turbo[1.0])   # 1, 2, 3 ns
+    @test same(rgba[3, 1], turbo[1.0]) && same(rgba[3, 2], turbo[0.0])                     # off the scale: clamped
+    q = FLIMApp.quantile([400.0, 100.0, 50.0, 200.0, 10.0], 0.99)                           # over the pixels with a lifetime
+    @test rgba[1, 1].alpha == 1 && rgba[1, 2].alpha ≈ 100 / q && rgba[3, 2].alpha ≈ 10 / q  # the photons, normalized
+    @test_throws DimensionMismatch FLIMApp.lifetime_preview_rgba(τ, photons[1:2, :], (1.0, 3.0))
 end
 
 @testset "pixel_lifetime_map" begin
@@ -2007,6 +2073,28 @@ end
 end
 
 include("test_flimcore.jl")
+
+@testset "Galvos / Image masks: the Protocol panel's toggle and the SPC window's box on [clamp] images" begin
+    path = joinpath(mktempdir(), "spc.toml")
+    FLIMCore.ecrire_reglages(path, FLIMCore.Reglages(source = "simulation", dossier = mktempdir()))
+    view = FLIMApp.SpcView(path)
+    panel, box = (active = FLIMApp.Observable(false),), (active = FLIMApp.Observable(false),)
+    view.panel_images_toggle = panel
+    @test FLIMApp.spc_edit_setting!(view, :images, true) && FLIMCore.lire_reglages(path).images    # either toggle: written
+    FLIMApp.sync_images_toggles!(view, false)
+    @test !panel.active[]                                          # another panel shown: left alone
+    FLIMApp.sync_images_toggles!(view, true)
+    @test panel.active[]
+    view.widgets = FLIMApp.SpcWindowWidgets(nothing, nothing, nothing, nothing, nothing, nothing, box)
+    FLIMApp.sync_images_toggles!(view, true)
+    @test !box.active[]                                            # the SPC window closed
+    view.window_open = true
+    FLIMApp.sync_images_toggles!(view, true)
+    @test box.active[]
+    @test FLIMApp.spc_edit_setting!(view, :images, false)
+    FLIMApp.sync_images_toggles!(view, true)
+    @test !panel.active[] && !box.active[] && !FLIMCore.lire_reglages(path).images
+end
 
 @testset "SPC window state, without a window" begin
     # The GUI side of the engine (gui/spc_view.jl), on the simulated

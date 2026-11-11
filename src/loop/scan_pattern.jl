@@ -37,6 +37,16 @@ high for `scan_time`, low for the pause (`shift_time`); the routing lines
 carry `FLIMCore.CODE_SANS_ROI` during the scan, the reserved code during
 the pause.
 
+A `shift_time` of 0 (no pause) still leaves `PASS_GAP_SAMPLES` between two
+scans (`pause_samples`): the pass signal's shortest low, which delimits the
+passes. Without ROI scanning the lasers stay on through it — gate high,
+commands and PWM running — under the reserved code (its photons thrown
+away): the light never stops. With ROIs it is the galvos' jump to the next
+ROI, lasers off as in any shift.
+
+The 1064 nm commands (AO 0, and the gate on AO 1) follow the gate P0.0:
+at their value wherever it is high, 0 V elsewhere (`prepare_slot!`).
+
 The ROI popup's galvo scan (`RasterRequest`) is one frame, one slot per
 line: the line's ramp (gate and pass signal high, `CODE_SANS_ROI`), then
 the flyback to the next line's start (gate low, the reserved code) — after
@@ -128,6 +138,19 @@ function pwm_samples(hz::Real, duty::Real, rate::Real)
     return (period, clamp(round(Int, duty * period), 1, period - 1))
 end
 
+"""The pass signal's shortest low between two passes (an NI counter phase lasts 2 ticks at least): a shift of 0."""
+const PASS_GAP_SAMPLES = 2
+
+"""
+    pause_samples(shift_time_ms, rate)::Int
+
+Samples of the pause after each scan: `shift_time_ms` at `rate`; 0 ms (no
+pause) gives `PASS_GAP_SAMPLES`, the gap the pass signal needs to delimit
+two passes. The DAQ loop, the SPC engine (`pause_s`) and run.toml use it.
+"""
+pause_samples(shift_time_ms::Real, rate::Real)::Int =
+    shift_time_ms == 0 ? PASS_GAP_SAMPLES : round(Int, shift_time_ms * rate / 1000)
+
 """Half-cosine move from `a` to `b` filling `out`: zero speed at both ends (sequence.jl's `deplacement`)."""
 function half_cosine_move!(out::AbstractVector{Float64}, a::Real, b::Real)
     n = length(out)
@@ -151,13 +174,13 @@ nothing is written in that case.
 function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
     rate = cfg.sample_rate_hz
     n_scan = round(Int, request.scan_time_ms * rate / 1000)
-    n_shift = round(Int, request.shift_time_ms * rate / 1000)
+    n_shift = pause_samples(request.shift_time_ms, rate)
     n_scan >= 1 || error("scan time of $(request.scan_time_ms) ms is shorter than one sample at $(rate) Hz")
     n_pulse = clamp(round(Int, cfg.sync_pulse_s * rate), 1, n_scan)
     n = n_scan + n_shift
     scanning = request.roi_active && !isempty(request.rois)
     if !isempty(cfg.pass_counter) && min(n_scan, n_shift) < 2
-        throw(SafetyError("scan and shift times must last at least 2 samples ($(2000 / rate) ms) for the pass counter"))
+        throw(SafetyError("scan time, and a shift other than 0, must last at least 2 samples ($(2000 / rate) ms) for the pass counter"))
     end
     scan_bits = do_bit(DO_BIT_GATE) | do_bit(DO_BIT_ENABLE)
     off_roi = routing_byte(FLIMCore.CODE_HORS_ROI, request.invert_routing)
@@ -178,7 +201,8 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
         # scan, the reserved code during the pause.
         lines = zeros(UInt8, n, 1)
         lines[1:n_scan, 1] .= routing_byte(FLIMCore.CODE_SANS_ROI, request.invert_routing) | scan_bits
-        lines[n_scan+1:n, 1] .= off_roi | do_bit(DO_BIT_ENABLE)
+        # No pause (shift 0): the lasers stay on through the pass signal's gap, its photons thrown away.
+        lines[n_scan+1:n, 1] .= off_roi | (request.shift_time_ms == 0 ? scan_bits : do_bit(DO_BIT_ENABLE))
         lines[1:n_pulse, 1] .|= pulse_bits(true)
         return ScanPattern(rate, off_roi, false, [0], n_scan, n_shift, n, zeros(n_shift), zeros(n_shift),
                            zeros(n, 1), zeros(n, 1), lines, false, false, pwm_period, pwm_on)
@@ -299,8 +323,9 @@ buffer_samples(b::SlotBuffers) = length(b.lines)
     prepare_slot!(buffers, pattern, s, command1_v, command2_v)
 
 Fill `buffers` with slot `s`: its ROI's galvo path and lines, the two
-command voltages during the scan (the whole slot in images, where the gate
-stays high) and 0 V during the shift. With the opto laser's PWM
+command voltages wherever the gate P0.0 is high — during the scan, the
+whole slot in images, and the pass signal's gap of a 0 ms shift without
+ROIs — and 0 V elsewhere (the shift). With the opto laser's PWM
 (`pattern.pwm_period` > 0), the commands only during its opto phases, which
 carry the reserved routing code; 0 V during its acquisition phases. No
 allocation.
@@ -312,13 +337,12 @@ function prepare_slot!(buffers::SlotBuffers, pattern::ScanPattern, s::Integer, c
     copyto!(buffers.galvos, n + 1, pattern.y, offset + 1, n)
     copyto!(buffers.lines, 1, pattern.lines, offset + 1, n)
 
-    n_scan = pattern.scan_samples
     commands, lines = buffers.commands, buffers.lines
     period, opto = pattern.pwm_period, pattern.pwm_on
     slot_start = entry_samples(pattern) + s * n          # the run's sample count at the slot's start: the PWM runs on
     reserved = pattern.idle_lines & 0xf0                 # the reserved routing code (bits 4–7)
     @inbounds for j in 1:n
-        on = pattern.image_mode || j <= n_scan
+        on = (lines[j] & do_bit(DO_BIT_GATE)) != 0         # the 1064 nm where the gate P0.0 is high
         if on && period > 0
             if mod(slot_start + j - 1, period) < opto    # opto: the 1064 nm on, its photons thrown away
                 commands[j], commands[n + j] = command1_v, command2_v

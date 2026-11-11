@@ -130,7 +130,7 @@ function session_info(; mode::AbstractString, rois::Vector{RoiCoordinates}, orde
                       daq::Dict{String, Any} = Dict{String, Any}(), sample_rate_hz::Real = 10_000.0)::Dict{String, Any}
     daq = merge(daq, Dict{String, Any}("sample_rate_hz" => Float64(sample_rate_hz),
                                        "scan_samples" => samples_of(protocol.scan_time, sample_rate_hz),
-                                       "shift_samples" => samples_of(protocol.shift_time, sample_rate_hz)))
+                                       "shift_samples" => pause_samples(protocol.shift_time, sample_rate_hz)))
     return Dict{String, Any}(
         "format" => SESSION_FORMAT,
         "mode" => String(mode),

@@ -109,6 +109,8 @@ function refresh_tick!(app, app_run, blocks)
 
     # SPC engine results -> SPC window and top bar (images at most 10 Hz)
     spc_tick!(app_run.spc, started_ns)
+    # The Realtime in images, from the Protocol panel or the SPC window: both toggles on [clamp] images.
+    sync_images_toggles!(app_run.spc, app.current_panel == :protocol)
     playback_tick!(app_run)
     # The ROI popup's galvo scan: its two parts started, followed and stopped together.
     galvo_scan_tick!(app_run)

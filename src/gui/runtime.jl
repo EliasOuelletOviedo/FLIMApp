@@ -300,7 +300,7 @@ function clamp_command(app, app_run, order::Vector{Int}, dir::AbstractString)::F
     rate = app_run.config.sample_rate_hz
     return FLIMCore.Clamp(rois = copy(order), ordre = copy(order), dossier = joinpath(dir, "spc"),
                           scan_s = samples_of(app.protocol.scan_time, rate) / rate,
-                          pause_s = samples_of(app.protocol.shift_time, rate) / rate,
+                          pause_s = pause_samples(app.protocol.shift_time, rate) / rate,     # 0 ms: the pass signal's gap
                           echantillon_s = 1 / rate, opto = pwm_opto_fraction(app.protocol, rate))
 end
 
