@@ -92,9 +92,21 @@ function normalize_protocol_config(raw_protocol::ProtocolSettings)::ProtocolSett
         repeats = max(raw_protocol.repeats, 0),
         delay = max(raw_protocol.delay, 0),
         times = copy(raw_protocol.times),
-        setpoints = copy(raw_protocol.setpoints)
+        setpoints = copy(raw_protocol.setpoints),
+        setpoints_in_volts = raw_protocol.setpoints_in_volts
     )
 end
+
+"""
+    protocol_in_volts(protocol)::Bool
+
+Whether the protocol, active, gives the command voltage (the Protocol
+popup's checkbox, `setpoints_in_volts`): its value at each moment is
+written as is on the outputs whose controller is on, no PI — the DAQ loop
+reads it slot by slot (`slot_commands`). In the Realtime in images it
+always does (`image_mode_commands`).
+"""
+protocol_in_volts(protocol::ProtocolSettings)::Bool = protocol.active && protocol.setpoints_in_volts
 
 function sync_runtime_protocol!(app, app_run)
     app_run.protocol[] = normalize_protocol_config(app.protocol)

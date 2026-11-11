@@ -149,7 +149,10 @@ end
     ProtocolSettings
 
 Experimental protocol schedule: `times`/`setpoints` are parallel vectors of
-`PROTOCOL_STEP_COUNT` per-step durations and setpoints.
+`PROTOCOL_STEP_COUNT` per-step durations and setpoints. A setpoint is the
+lifetime (ns) the PI holds; with `setpoints_in_volts` (the Protocol popup's
+checkbox), the command voltage written itself, no PI (`protocol_in_volts`) —
+as in the Realtime in images, where it always is.
 
 `points_per_roi`/`spiral_turns`/`scan_time`/`shift_time` are the
 ROI galvo-scan parameters (roi_geometry.jl, loop/scan_pattern.jl), editable from the Protocol panel
@@ -167,6 +170,7 @@ Base.@kwdef mutable struct ProtocolSettings
     delay::Int = 0
     times::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
     setpoints::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
+    setpoints_in_volts::Bool = false
     PWM_frequency::Int = 1000
     PWM_duty::Int = 50
     PWM_active::Bool = false
