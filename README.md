@@ -390,7 +390,7 @@ reads when nothing drives the lines — is reserved: at most **15 ROIs**, and
 a loose cable doesn't send photons into a real ROI. Each pass's ROI is the
 code its photons carry.
 
-**ROI popup**: the **Image ×100** button acquires 100 frames with the
+**ROI popup**: the **Image ×1000** button acquires 1000 frames with the
 scanner's line and frame clocks (as imagerie_photons.jl did), at the fixed
 geometry of `[imagerie]`: 1024 pixels per line, and with `lignes_par_image
 = 0` (the default) the lines of the scanner setting recognized from the
@@ -446,11 +446,11 @@ the galvos' coordinates rather than the scanner's. Lines missing from the
 image are reported as IMG-03.
 
 The popup's **Calibrate galvos** button finds the X/Y min/max that make
-the galvos land on the scanner image's pixels. ROIs drawn on an Image ×100
+the galvos land on the scanner image's pixels. ROIs drawn on an Image ×1000
 then go where the galvos point. It goes in three steps:
 
-1. **Polygon image:** the first click takes an Image ×100 with the polygon
-   scanner (100 frames, line and frame clocks on M1/M2).
+1. **Polygon image:** the first click takes an Image ×1000 with the polygon
+   scanner (1000 frames, line and frame clocks on M1/M2).
 2. **Microscope change:** the button becomes **Start galvo scans**. Switch
    the microscope to the galvo-galvo path, then click it.
 3. **Two galvo rounds,** both registered on that one polygon image (no

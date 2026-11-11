@@ -38,8 +38,8 @@ const SPC_ENGINE_STATE_NAMES = Dict(
 
 const SPC_MEASUREMENT_NAMES = Dict(:imagerie => "imaging", :single => "Single", :clamp => "Realtime", :galvos => "galvo scan")
 
-"""Frames summed into the ROI popup's image ("Image" button, gui/roi_popup.jl)."""
-const ROI_IMAGE_FRAMES = 100
+"""Frames summed into the ROI popup's image ("Image" button, gui/roi_popup.jl), and the calibration's polygon image."""
+const ROI_IMAGE_FRAMES = 1000
 
 """
     SpcCard

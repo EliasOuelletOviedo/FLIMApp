@@ -1,8 +1,8 @@
 """
 roi_popup.jl
 
-ROI popup: acquire an image with the SPC card — the "Image" button: 100
-frames with the microscope scanner's clocks (FLIMCore's `Imagerie`, the
+ROI popup: acquire an image with the SPC card — the "Image" button:
+`ROI_IMAGE_FRAMES` (1000) frames with the microscope scanner's clocks (FLIMCore's `Imagerie`, the
 same rangement as imagerie_photons.jl); or the "Galvo scan" button: the NI
 galvos raster the ROI field for 60 s (gui/galvo_scan.jl), an image in the
 galvos' own coordinates, the ROIs' reference —, draw ROIs on it by hand,
@@ -997,8 +997,8 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         galvo_button.label[] = "Stop scan"
     end
 
-    # Calibrate galvos: the polygon scanner's image (the Image button's 100
-    # frames, line and frame clocks on M1/M2); then, the microscope switched
+    # Calibrate galvos: the polygon scanner's image (the Image button's
+    # ROI_IMAGE_FRAMES frames, line and frame clocks on M1/M2); then, the microscope switched
     # to the galvos by hand and the button clicked again, two rounds of a
     # galvo scan (GALVO_SCAN_S) registered on that image, on the sum of the
     # two channels (register_galvo_on_scanner, calibration.jl): the X/Y
@@ -1040,7 +1040,8 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         isempty(reason) || error("scanner image: " * reason)
         image_requested[] = :scanner
         im_import_button.label[] = "Acquiring…"
-        calibration_wait(() -> image_requested[] == :none, 120, "scanner image")
+        # 1.2 s per frame at most: room for a slow scanner (0.8 frame/s).
+        calibration_wait(() -> image_requested[] == :none, 1.2 * ROI_IMAGE_FRAMES, "scanner image")
         return received_sum(before, :scanner, "scanner image")
     end
 
