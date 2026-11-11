@@ -163,20 +163,70 @@ end
 """
     scan_request(app, app_run, order)::ScanRequest
 
-Snapshot of everything the DAQ loop needs for this run's slots.
+Snapshot of everything the DAQ loop needs for this run's slots, the opto
+laser's PWM included (the Protocol panel's, while its toggle is on).
 """
 function scan_request(app, app_run, order::Vector{Int}; image_mode::Bool = false)::ScanRequest
+    p = app.protocol
     return ScanRequest(
         copy(app_run.rois[]), copy(order), app.roi.active && !image_mode,
         app.roi.v_min_x, app.roi.v_max_x, app.roi.v_min_y, app.roi.v_max_y,
-        app.protocol.points_per_roi, app.protocol.spiral_turns,
-        app.protocol.scan_time, app.protocol.shift_time,
-        app_run.imported_image_size, app_run.spc.settings.inverser_routage, image_mode
+        p.points_per_roi, p.spiral_turns, p.scan_time, p.shift_time,
+        app_run.imported_image_size, app_run.spc.settings.inverser_routage, image_mode,
+        p.PWM_active ? Float64(p.PWM_frequency) : 0.0, p.PWM_duty / 100
     )
 end
 
 """
-    images_command(rois, order, image_size, settings, dir)::FLIMCore.ImagesROI
+    pwm_played(protocol, rate) -> (period, on)
+
+The opto laser's PWM as the DAQ loop plays it at `rate` (`pwm_samples`):
+the period and its opto phase, in whole samples; `(0, 0)` without PWM or at
+a frequency the NI can't switch (START refuses it, `pwm_refusal`).
+"""
+function pwm_played(protocol::ProtocolSettings, rate::Real)::Tuple{Int, Int}
+    protocol.PWM_active || return (0, 0)
+    try
+        return pwm_samples(protocol.PWM_frequency, protocol.PWM_duty / 100, rate)
+    catch
+        return (0, 0)
+    end
+end
+
+"""The share of each scan the opto laser's PWM gives its opto phase (`pwm_played`); 0 without PWM."""
+pwm_opto_fraction(protocol::ProtocolSettings, rate::Real)::Float64 =
+    ((period, on) = pwm_played(protocol, rate); period == 0 ? 0.0 : on / period)
+
+"""
+    pwm_text(protocol, rate)::String
+
+The opto laser's PWM as the DAQ loop plays it — its frequency and duty
+cycle in whole samples, which can differ from the panel's values — for the
+status line and the log; "" without PWM.
+"""
+function pwm_text(protocol::ProtocolSettings, rate::Real)::String
+    period, on = pwm_played(protocol, rate)
+    period == 0 && return ""
+    return "PWM $(round(rate / period; sigdigits = 4)) Hz, opto $(round(100 * on / period; digits = 1)) % ($on of $period samples)"
+end
+
+"""
+    pwm_refusal(protocol, rate)::String
+
+Why the opto laser's PWM can't run ("" if it can): the NI switches its
+outputs once per sample, so at most `rate / 2` Hz; at 0 Hz or less the
+toggle on would play no PWM, the opto during the whole scan.
+"""
+function pwm_refusal(protocol::ProtocolSettings, rate::Real)::String
+    protocol.PWM_active || return ""
+    f = protocol.PWM_frequency
+    0 < f <= rate / 2 && return ""
+    f <= 0 && return "PWM of $f Hz: at least 1 Hz"
+    return "PWM of $f Hz: at most $(round(Int, rate / 2)) Hz, the NI switching its outputs once per sample ($(round(Int, rate)) Hz)"
+end
+
+"""
+    images_command(rois, order, image_size, settings, dir; pwm=false)::FLIMCore.ImagesROI
 
 The Realtime in images ([clamp] images): the SPC engine images with the
 settings' geometry and bins, every `images_par_bloc` images, the photons of
@@ -185,10 +235,12 @@ each ROI of `order` (its pixels on the `image_size` image it was drawn on,
 recorded in `dir`/spc ("" : nothing).
 """
 function images_command(rois::Vector{RoiCoordinates}, order::Vector{Int}, image_size::Tuple{Int, Int},
-                        settings::FLIMCore.Reglages, dir::AbstractString)::FLIMCore.ImagesROI
+                        settings::FLIMCore.Reglages, dir::AbstractString; pwm::Bool = false)::FLIMCore.ImagesROI
     pixels = [roi_pixel_mask(rois[k].xs, rois[k].ys, image_size...) for k in order]
+    # With the opto laser's PWM, its opto phases carry the reserved code: their photons thrown away.
     return FLIMCore.ImagesROI(FLIMCore.geometrie(settings); rois = pixels, taille = image_size,
-                              trames = settings.images_par_bloc, dossier = isempty(dir) ? "" : joinpath(dir, "spc"))
+                              trames = settings.images_par_bloc, dossier = isempty(dir) ? "" : joinpath(dir, "spc"),
+                              jeter_hors_roi = pwm)
 end
 
 """
@@ -238,7 +290,7 @@ function clamp_command(app, app_run, order::Vector{Int}, dir::AbstractString)::F
     return FLIMCore.Clamp(rois = copy(order), ordre = copy(order), dossier = joinpath(dir, "spc"),
                           scan_s = samples_of(app.protocol.scan_time, rate) / rate,
                           pause_s = samples_of(app.protocol.shift_time, rate) / rate,
-                          echantillon_s = 1 / rate)
+                          echantillon_s = 1 / rate, opto = pwm_opto_fraction(app.protocol, rate))
 end
 
 """
@@ -274,7 +326,9 @@ function run_info(app, app_run, order::Vector{Int}; mode::AbstractString = "Real
             "backend" => String(app_run.config.backend),
             "state_at_start" => string(loop_status(app_run.exchange).state),
             "pass_counter" => app_run.config.pass_counter,
-            "pass_terminal" => isempty(app_run.config.pass_terminal) ? "default (PFI13 for ctr1)" : app_run.config.pass_terminal
+            "pass_terminal" => isempty(app_run.config.pass_terminal) ? "default (PFI13 for ctr1)" : app_run.config.pass_terminal,
+            # The opto laser's PWM as played (whole samples): [period, opto phase]; empty without PWM.
+            "pwm_samples" => playback ? Int[] : filter(>(0), collect(pwm_played(app.protocol, app_run.config.sample_rate_hz)))
         ))
     if playback
         info["playback"] = Dict{String, Any}("session" => session.dir, "session_mode" => get(session.info, "mode", ""),
@@ -327,6 +381,8 @@ function realtime_start_refusal(app, app_run)::String
                            "SPC engine busy ($(SPC_ENGINE_STATE_NAMES[spc]))"
     n_rois = length(app_run.rois[])
     app.roi.active && n_rois > ROI_MAX && return "$n_rois ROIs: the routing code tells only $ROI_MAX apart"
+    pwm = pwm_refusal(app.protocol, app_run.config.sample_rate_hz)
+    isempty(pwm) || return pwm
     return ""
 end
 
@@ -444,7 +500,7 @@ function start_pressed(app, app_run, blocks)
             return nothing
         end
         app_run.run_dir = dir
-        @info "Realtime run started" session=dir rois=length(rois) order=order roi_active=app.roi.active scan_ms=app.protocol.scan_time shift_ms=app.protocol.shift_time images=images images_per_block=app_run.spc.settings.images_par_bloc
+        @info "Realtime run started" session=dir rois=length(rois) order=order roi_active=app.roi.active scan_ms=app.protocol.scan_time shift_ms=app.protocol.shift_time images=images images_per_block=app_run.spc.settings.images_par_bloc pwm=pwm_text(app.protocol, app_run.config.sample_rate_hz)
         app_run.run_open = true
         app_run.run_started_ns = time_ns()
         send_journal!(ex.journal, JournalRunStart(t, dir, run_info(app, app_run, order), loaded_irfs(), loaded_irf_info()))
@@ -459,7 +515,8 @@ function start_pressed(app, app_run, blocks)
         app_run.spc.clamp_stop_sent = false
         if images
             # Whole images: the galvos still, the commands the protocol's voltages, no PI.
-            FLIMCore.commander!(engine, images_command(rois, order, app_run.imported_image_size, app_run.spc.settings, dir))
+            FLIMCore.commander!(engine, images_command(rois, order, app_run.imported_image_size, app_run.spc.settings, dir;
+                                                       pwm = app.protocol.PWM_active))
             send_command!(ex, StartCommand(scan_request(app, app_run, order; image_mode = true)))
             out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats, image_full_scale_v=app_run.config.command_full_scale_v)
         else
@@ -468,8 +525,9 @@ function start_pressed(app, app_run, blocks)
             out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats)
         end
         spawn_acquisition_worker!(app_run, out, engine.histogrammes, initial_guess)
+        pwm = pwm_text(app.protocol, app_run.config.sample_rate_hz)
         show_status!(blocks, (images ? "Realtime in images ($(app_run.spc.settings.images_par_bloc) per block)" : "Realtime") *
-                             ": session $(basename(dir))")
+                             ": session $(basename(dir))" * (isempty(pwm) ? "" : " · " * pwm))
         return nothing
     end
 
@@ -591,14 +649,19 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
     spc_info = get(session.info, "spc", Dict{String, Any}())
     fin_par_m3 = Bool(get(spc_info, "fin_par_m3", true))
     images = Bool(get(spc_info, "images", false))
+    # The opto laser's PWM as it was recorded: the photons of its opto phases thrown away again.
+    recorded = settings_from_dict(ProtocolSettings, get(session.info, "protocol", Dict{String, Any}()))
     if images
         # A Realtime in images: the same ROI binning over the recorded images, block by block.
         settings_images = deepcopy(app_run.spc.settings)
         settings_images.images_par_bloc = Int(get(spc_info, "images_par_bloc", settings_images.images_par_bloc))
-        FLIMCore.commander!(engine, images_command(session.rois, order, session.image_size, settings_images, ""))
+        FLIMCore.commander!(engine, images_command(session.rois, order, session.image_size, settings_images, "";
+                                                   pwm = recorded.PWM_active))
     else
+        sample_rate = isfinite(sample_s) && sample_s > 0 ? 1 / sample_s : app_run.config.sample_rate_hz
         FLIMCore.commander!(engine, FLIMCore.Clamp(rois = copy(order), ordre = copy(order), scan_s = scan_s, pause_s = pause_s,
-                                                   echantillon_s = sample_s, fin_par_m3 = fin_par_m3))
+                                                   echantillon_s = sample_s, fin_par_m3 = fin_par_m3,
+                                                   opto = pwm_opto_fraction(recorded, sample_rate)))
     end
 
     app_run.run_mode = "Playback"

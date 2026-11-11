@@ -310,6 +310,10 @@ l'image va aussi dans l'histogramme de chaque ROI qui contient son pixel,
 `histos_roi[canal, code + 1]` (`canaux` canaux de temps croissant, la
 colonne du code de la ROI, comme les passes `HistoClamp`), cumulé jusqu'à
 ce que l'appelant le remette à zéro.
+
+`code_jete` ≥ 0 : les photons de ce code de routage sont écartés dès la
+lecture (`jetes` les compte) — le code réservé pendant les phases opto du
+PWM du laser 1064 nm ; −1 (le défaut) : le routage est ignoré.
 """
 mutable struct Rangeur
     nx::Int
@@ -350,6 +354,9 @@ mutable struct Rangeur
     roi_bits::Matrix{UInt16}
     roi_groupe::Int
     histos_roi::Matrix{UInt32}
+    # Photons d'un code de routage écartés à la lecture (−1 : aucun)
+    code_jete::Int
+    jetes::Int
 end
 
 function Rangeur(geo, tic_s, dt_ns, g::Geometrie)
@@ -361,7 +368,7 @@ function Rangeur(geo, tic_s, dt_ns, g::Geometrie)
                    0, -1, -1, Int64(0), false, 0, Int64(0),
                    zeros(UInt32, ny, nx), zeros(Float64, ny, nx), zeros(Int, 4096), 0, 0, 0, 0,
                    zeros(UInt32, ny, nx), zeros(Float64, ny, nx), 0, 0,
-                   zeros(UInt16, 0, 0), 16, zeros(UInt32, 0, 0))
+                   zeros(UInt16, 0, 0), 16, zeros(UInt32, 0, 0), -1, 0)
 end
 
 """
@@ -393,7 +400,17 @@ function ranger!(f, r::Rangeur, mots::AbstractVector{UInt16}, n::Integer = lengt
     d = r.decodeur
     decoder!(d, mots, n)
     append!(r.lignes, d.marqueurs[2]); append!(r.trames, d.marqueurs[3])
-    append!(r.t_photons, d.t_photons); append!(r.adc_photons, d.adc_photons)
+    if r.code_jete < 0
+        append!(r.t_photons, d.t_photons); append!(r.adc_photons, d.adc_photons)
+    else
+        @inbounds for k in eachindex(d.t_photons)
+            if d.routage_photons[k] == r.code_jete
+                r.jetes += 1
+            else
+                push!(r.t_photons, d.t_photons[k]); push!(r.adc_photons, d.adc_photons[k])
+            end
+        end
+    end
     foreach(empty!, d.marqueurs)
     empty!(d.t_photons); empty!(d.adc_photons); empty!(d.routage_photons)
     limite = typemin(Int64)

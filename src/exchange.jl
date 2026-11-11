@@ -141,7 +141,10 @@ otherwise they stay at 0 V with the same scan/pause rhythm.
 NOT(code) on P0.4–P0.7 so the SPC card, whose routing inputs are active
 low, reads the code itself. `image_mode` (`[clamp] images`): the Realtime
 in images — the galvos don't move, the gate stays high, and the commands
-are the protocol's voltages (`image_mode_commands`), no PI.
+are the protocol's voltages (`image_mode_commands`), no PI. `pwm_hz` > 0:
+the opto laser's PWM (the Protocol panel's), the first `pwm_duty` (0–1) of
+each period the opto phase — the 1064 nm on, the reserved routing code —,
+the rest the acquisition with the 1064 nm off (`prepare_slot!`).
 """
 struct ScanRequest
     rois::Vector{RoiCoordinates}
@@ -158,12 +161,14 @@ struct ScanRequest
     image_size::Tuple{Int, Int}
     invert_routing::Bool
     image_mode::Bool
+    pwm_hz::Float64
+    pwm_duty::Float64
 end
 
 ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_per_roi, spiral_turns,
-            scan_time_ms, shift_time_ms, image_size, invert_routing = true) =
+            scan_time_ms, shift_time_ms, image_size, invert_routing = true, image_mode = false) =
     ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_per_roi, spiral_turns,
-                scan_time_ms, shift_time_ms, image_size, invert_routing, false)
+                scan_time_ms, shift_time_ms, image_size, invert_routing, image_mode, 0.0, 0.0)
 
 """
     RasterRequest

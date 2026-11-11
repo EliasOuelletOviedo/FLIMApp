@@ -508,8 +508,9 @@ the pause's length meaning swapped edges — (PASS-05), passes unpaired
 between cards (PASS-06), photons lost (SPC-07), many ROI-coded photons
 outside the passes (PASS-08), and, from the photons read during passes, a
 missing routing code (ROUTE-01), the inverted code (ROUTE-02), a stuck line
-(ROUTE-03) or other codes (ROUTE-04). Absences are only concluded after 3 s
-(or at the end).
+(ROUTE-03) or other codes (ROUTE-04) — the reserved code the opto laser's
+PWM writes on purpose (`state.opto`) aside. Absences are only concluded
+after 3 s (or at the end).
 
 `daq_slots`: the slots the DAQ loop played meanwhile (`nothing`: unknown,
 e.g. Playback). No marker on any card while it played none: the pass signal
@@ -561,18 +562,23 @@ function diagnose_passes(state::FLIMCore.EtatClamp; daq_slots::Union{Nothing, In
             add!("PASS-08", c, "$name: $(c.hors_passe) ROI-coded photons outside the passes, $in_pass inside")
         end
 
-        # Routing: needs enough photons read during passes.
+        # Routing: needs enough photons read during passes. The opto laser's
+        # PWM writes the reserved code on purpose during its opto phases
+        # (`state.opto` of each pass): only the coded photons expected
+        # outside them say something.
         in_pass >= 200 || continue
         reserved = c.photons_par_code[FLIMCore.CODE_HORS_ROI + 1]
-        if reserved > 0.9 * in_pass
-            add!("ROUTE-01", c, @sprintf("%s: %.0f %% of the %d photons read during passes carry code 0", name, 100 * reserved / in_pass, in_pass))
+        coded = in_pass - reserved
+        if coded < 0.1 * (1 - state.opto) * in_pass
+            add!("ROUTE-01", c, @sprintf("%s: %.0f %% of the %d photons read during passes carry code 0", name, 100 * reserved / in_pass, in_pass) *
+                                (state.opto > 0 ? @sprintf(" (%.0f %% expected: the PWM's opto phases)", 100 * state.opto) : ""))
             continue
         end
-        coded = in_pass - reserved
         seen = [code for code in 1:15 if c.photons_par_code[code + 1] > max(0.01 * coded, 5)]
-        # A share of code 0 during passes (normally a few photons at their
-        # edges): some written code reads as 0, e.g. a line stuck low.
-        reserved > 0.1 * in_pass && pushfirst!(seen, FLIMCore.CODE_HORS_ROI)
+        # A share of code 0 during passes beyond what's expected (a few
+        # photons at their edges; the PWM's opto phases, with their own
+        # light): some written code reads as 0, e.g. a line stuck low.
+        reserved - state.opto * in_pass > (0.1 + 0.5 * state.opto) * in_pass && pushfirst!(seen, FLIMCore.CODE_HORS_ROI)
         expected = filter(!=(FLIMCore.CODE_HORS_ROI), sort(unique(state.codes)))
         (isempty(expected) || issubset(seen, expected)) && continue
         inverted = [15 - x for x in expected]

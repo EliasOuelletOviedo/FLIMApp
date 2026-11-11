@@ -42,6 +42,15 @@ line: the line's ramp (gate and pass signal high, `CODE_SANS_ROI`), then
 the flyback to the next line's start (gate low, the reserved code) — after
 the last line, back to 0 V. It plays once (`total_slots`): the loop ends by
 itself after the last line.
+
+The opto laser's PWM (`ScanRequest.pwm_hz`, the Protocol panel's), for the
+whole run: within the scans (the whole slot in images), each period of
+`pwm_period` samples starts with `pwm_on` samples of opto — the 1064 nm
+power (AO 0) and gate (AO 1) at the slot's command, the reserved routing
+code so that their photons are thrown away — and the rest is the
+acquisition, the 1064 nm off. The 850 nm gate (P0.0) doesn't change. The
+periods run on from one slot to the next (counted from the run's first
+sample), so the PWM is regular whatever the slot length.
 """
 
 # Port-0 lines: bit b of each sample drives line P0.b. Bits 0, 2, 3 and 4–7
@@ -87,10 +96,12 @@ struct ScanPattern
     lines::Matrix{UInt8}
     image_mode::Bool
     raster::Bool
+    pwm_period::Int        # samples per period of the opto laser's PWM; 0: no PWM
+    pwm_on::Int            # its opto phase, at the start of each period
 end
 
-ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, image_mode = false) =
-    ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, image_mode, false)
+ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, image_mode = false, raster = false) =
+    ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, image_mode, raster, 0, 0)
 
 slots_per_cycle(p::ScanPattern) = size(p.x, 2)
 slot_position(p::ScanPattern, s::Integer) = mod(s, slots_per_cycle(p)) + 1
@@ -100,6 +111,22 @@ entry_samples(p::ScanPattern) = length(p.entry_x)
 slot_duration_s(p::ScanPattern) = p.slot_samples / p.sample_rate_hz
 """Slots the scan plays before ending by itself: one frame for the galvo scan, unlimited (`typemax`) otherwise."""
 total_slots(p::ScanPattern) = p.raster ? slots_per_cycle(p) : typemax(Int)
+
+"""
+    pwm_samples(hz, duty, rate) -> (period, on)
+
+The opto laser's PWM in samples of the DAQ loop at `rate`: a period of
+`round(rate / hz)` samples, its first `on` (`duty` of it, rounded, one
+sample of each phase at least) the opto phase; `(0, 0)` without PWM
+(`hz` ≤ 0). The NI switches once per sample: a SafetyError above `rate / 2`.
+"""
+function pwm_samples(hz::Real, duty::Real, rate::Real)
+    hz > 0 || return (0, 0)
+    hz <= rate / 2 ||
+        throw(SafetyError("PWM of $hz Hz: at most $(rate / 2) Hz at $(rate) Hz sampling (one sample of opto, one of acquisition)"))
+    period = round(Int, rate / hz)
+    return (period, clamp(round(Int, duty * period), 1, period - 1))
+end
 
 """Half-cosine move from `a` to `b` filling `out`: zero speed at both ends (sequence.jl's `deplacement`)."""
 function half_cosine_move!(out::AbstractVector{Float64}, a::Real, b::Real)
@@ -134,6 +161,7 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
     end
     scan_bits = do_bit(DO_BIT_GATE) | do_bit(DO_BIT_ENABLE)
     off_roi = routing_byte(FLIMCore.CODE_HORS_ROI, request.invert_routing)
+    pwm_period, pwm_on = pwm_samples(request.pwm_hz, request.pwm_duty, rate)
 
     if request.image_mode
         # The Realtime in images: the microscope's scanner images; the galvos
@@ -142,7 +170,7 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
         lines = fill(routing_byte(FLIMCore.CODE_SANS_ROI, request.invert_routing) | scan_bits, n, 1)
         lines[1:n_pulse, 1] .|= pulse_bits(true)
         return ScanPattern(rate, off_roi, false, [0], n_scan, n_shift, n, zeros(n_shift), zeros(n_shift),
-                           zeros(n, 1), zeros(n, 1), lines, true)
+                           zeros(n, 1), zeros(n, 1), lines, true, false, pwm_period, pwm_on)
     end
 
     if !scanning
@@ -153,7 +181,7 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
         lines[n_scan+1:n, 1] .= off_roi | do_bit(DO_BIT_ENABLE)
         lines[1:n_pulse, 1] .|= pulse_bits(true)
         return ScanPattern(rate, off_roi, false, [0], n_scan, n_shift, n, zeros(n_shift), zeros(n_shift),
-                           zeros(n, 1), zeros(n, 1), lines)
+                           zeros(n, 1), zeros(n, 1), lines, false, false, pwm_period, pwm_on)
     end
 
     length(request.rois) <= ROI_MAX ||
@@ -189,7 +217,7 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
     check_galvo_path(vcat(vec(x), entry_x), vcat(vec(y), entry_y), cfg)
 
     return ScanPattern(rate, off_roi, true, [s.roi_index for s in segments], n_scan, n_shift, n,
-                       entry_x, entry_y, x, y, lines)
+                       entry_x, entry_y, x, y, lines, false, false, pwm_period, pwm_on)
 end
 
 """Share of each galvo-scan line spent on the flyback to the next line's start (half-cosine move)."""
@@ -272,7 +300,10 @@ buffer_samples(b::SlotBuffers) = length(b.lines)
 
 Fill `buffers` with slot `s`: its ROI's galvo path and lines, the two
 command voltages during the scan (the whole slot in images, where the gate
-stays high) and 0 V during the shift. No allocation.
+stays high) and 0 V during the shift. With the opto laser's PWM
+(`pattern.pwm_period` > 0), the commands only during its opto phases, which
+carry the reserved routing code; 0 V during its acquisition phases. No
+allocation.
 """
 function prepare_slot!(buffers::SlotBuffers, pattern::ScanPattern, s::Integer, command1_v::Float64, command2_v::Float64)
     n = pattern.slot_samples
@@ -282,11 +313,23 @@ function prepare_slot!(buffers::SlotBuffers, pattern::ScanPattern, s::Integer, c
     copyto!(buffers.lines, 1, pattern.lines, offset + 1, n)
 
     n_scan = pattern.scan_samples
-    commands = buffers.commands
+    commands, lines = buffers.commands, buffers.lines
+    period, opto = pattern.pwm_period, pattern.pwm_on
+    slot_start = entry_samples(pattern) + s * n          # the run's sample count at the slot's start: the PWM runs on
+    reserved = pattern.idle_lines & 0xf0                 # the reserved routing code (bits 4–7)
     @inbounds for j in 1:n
         on = pattern.image_mode || j <= n_scan
-        commands[j] = on ? command1_v : 0.0
-        commands[n + j] = on ? command2_v : 0.0
+        if on && period > 0
+            if mod(slot_start + j - 1, period) < opto    # opto: the 1064 nm on, its photons thrown away
+                commands[j], commands[n + j] = command1_v, command2_v
+                lines[j] = (lines[j] & 0x0f) | reserved
+            else                                         # acquisition: the 1064 nm off
+                commands[j], commands[n + j] = 0.0, 0.0
+            end
+        else
+            commands[j] = on ? command1_v : 0.0
+            commands[n + j] = on ? command2_v : 0.0
+        end
     end
     return buffers
 end

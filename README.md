@@ -297,6 +297,26 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
   in images); 0 V otherwise, so closed whenever the command is 0 V
   (controller 1 off, protocol inactive or at 0 V, PI at 0 %). AO 0 stays
   PI command 1 (0–1 V). `gate_1064_v = 0` makes AO 1 PI command 2 again.
+- the **opto PWM** (Protocol panel: *PWM frequency*, then the *Duty cycle*
+  in % with its toggle) alternates opto and acquisition, for the whole run
+  (from the next START), in Realtime and in Realtime in images.
+  - **Opto phase:** the first *Duty cycle* % of each period. The 1064 nm
+    power (AO 0) and gate (AO 1) are at their command, and the photons are
+    thrown away: the NI writes the reserved routing code.
+  - **Acquisition phase:** the rest of the period. The 1064 nm is off
+    (both outputs at 0 V) and the photons count.
+  - **Unchanged:** the 850 nm gate P0.0 stays as without PWM (high during
+    each scan), so the 850 nm is on in both phases.
+  - **Timing:** the periods run on from one slot to the next. The NI
+    switches once per sample, so a period is a whole number of samples at
+    `[timing] sample_rate_hz`: at 10 kHz, at most 5000 Hz, and the duty
+    cycle in steps of one sample (10 % at 1000 Hz). START refuses a faster
+    PWM. The status line and `run.toml` (`daq.pwm_samples`) give the PWM as
+    played.
+  - **SPC side:** in Realtime, the passes throw away the reserved code
+    anyway. In images, the engine is told to (`ImagesROI(...;
+    jeter_hors_roi)`). The routing diagnosis expects that share of the
+    reserved code (`EtatClamp.opto`).
 - the **SPC engine** measures in FIFO mode (`[clamp]` in `config/spc.toml`,
   256 channels by default) and cuts each card's photon stream into passes
   at the markers the card itself time-stamped: a late read only fills the
