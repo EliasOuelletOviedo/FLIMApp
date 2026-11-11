@@ -51,6 +51,36 @@ pixel's mean arrival time minus the IRF's (`pixel_lifetime_map`), not a fit.
 """
 const LIFETIME_PREVIEW_LABEL = "preview: mean time − IRF center [ns]"
 
+"""
+    lifetime_preview_rgba(lifetime_map, photons, (lo, hi); colormap=:turbo, full_quantile=0.99)::Matrix{RGBAf}
+
+The ROI popup's lifetime preview as one RGBA image: each pixel's color is
+its lifetime on `colormap` over `lo`…`hi` (the colorbar's scale; clamped),
+its opacity its photons normalized — `photons / q`, `q` the
+`full_quantile` of the photons of the pixels with a lifetime, so that a
+few hot pixels don't fade the others (the brightest 1 % fully opaque),
+clamped to 0…1. A pixel without a lifetime (below Min photons: NaN) is
+transparent. Drawn on the dark background, the color is the lifetime, the
+brightness the photons.
+"""
+function lifetime_preview_rgba(lifetime_map::AbstractMatrix{<:Real}, photons::AbstractMatrix{<:Real},
+                               range::Tuple{Real, Real}; colormap = :turbo, full_quantile::Real = 0.99)::Matrix{RGBAf}
+    size(lifetime_map) == size(photons) ||
+        throw(DimensionMismatch("lifetime map $(size(lifetime_map)) and photons $(size(photons))"))
+    lo, hi = Float64.(range)
+    gradient = cgrad(colormap)
+    counted = [Float64(photons[i]) for i in eachindex(lifetime_map) if isfinite(lifetime_map[i])]
+    full = isempty(counted) ? 1.0 : max(quantile(counted, full_quantile), eps())
+    out = fill(RGBAf(0, 0, 0, 0), size(lifetime_map))
+    for i in eachindex(lifetime_map)
+        τ = lifetime_map[i]
+        isfinite(τ) || continue
+        c = gradient[hi > lo ? clamp((τ - lo) / (hi - lo), 0.0, 1.0) : 0.5]
+        out[i] = RGBAf(c.r, c.g, c.b, clamp(photons[i] / full, 0.0, 1.0))
+    end
+    return out
+end
+
 """Channel menu of the ROI popup: which card(s) the image shows (canal 1 is the FLIM channel)."""
 const ROI_IMAGE_CHANNELS = ["Channel 1", "Channel 2", "Sum"]
 
@@ -723,13 +753,18 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # alongside roi_image so update_lifetime_overlay! (below) can redraw
     # the overlay without recomputing it.
     intensity_image = Ref{Union{Nothing, Matrix{Float64}}}(nothing)
-    # The lifetime-map overlay heatmap, drawn on top of the always-visible
-    # grayscale image[] — nothing if none has been computed yet (or the
-    # computation failed/found no qualifying pixel). Unlike image_plot,
-    # toggling it on/off (see lifetime_map_toggle below) only flips its
-    # `.visible` attribute; it is not deleted/recreated, so a toggle click is
-    # a cheap redraw, not a recompute.
+    # The lifetime-map overlay, an RGBA image (`lifetime_preview_rgba`: the
+    # lifetime's color, the photons' opacity) drawn on top of the grayscale
+    # image[] — nothing if none has been computed yet (or the computation
+    # failed/found no qualifying pixel). While it shows, the grayscale image
+    # under it is hidden (`show_base_image!`): its transparency then reveals
+    # the dark background, so a pixel's brightness is its photons. Unlike
+    # image_plot, toggling it on/off (see lifetime_map_toggle below) only
+    # flips its `.visible` attribute; it is not deleted/recreated, so a
+    # toggle click is a cheap redraw, not a recompute.
     lifetime_map_plot = Ref{Any}(nothing)
+    # Its lifetime scale (lo, hi), the colorbar's: an RGBA image has no colorrange.
+    lifetime_range = Ref((0.0, 1.0))
     # Lifetime-map Colorbar: unlike a heatmap plot, a Colorbar block has no
     # settable `visible`, so it's created only while the overlay is actually
     # shown and deleted (not hidden) when the overlay is toggled off.
@@ -765,9 +800,31 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     would otherwise stretch the whole colormap and wash out the real
     contrast. Pixel values outside that range are clamped to it (not just
     the colormap, so `nan_color`-excluded pixels aside, what's displayed is
-    the actual capped data) before drawing.
+    the actual capped data) before drawing. Each pixel's opacity is its
+    photons, normalized (`lifetime_preview_rgba`).
     """
     lifetime_overlay_request = Ref(0)
+
+    # The grayscale image: hidden only while a lifetime preview shows over it.
+    function show_base_image!()
+        base = image_plot[]
+        base === nothing && return nothing
+        base.visible[] = !(lifetime_map_toggle.active[] && lifetime_map_plot[] !== nothing)
+        return nothing
+    end
+
+    function clear_lifetime_overlay!()
+        if lifetime_map_plot[] !== nothing
+            delete!(image_axis, lifetime_map_plot[])
+            lifetime_map_plot[] = nothing
+        end
+        if lifetime_colorbar[] !== nothing
+            delete!(lifetime_colorbar[])
+            lifetime_colorbar[] = nothing
+        end
+        show_base_image!()
+        return nothing
+    end
 
     function update_lifetime_overlay!()
         image = roi_image[]
@@ -784,24 +841,19 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
                 fetch(Threads.@spawn pixel_lifetime_map(image.intensity, image.sum_t; min_photons=threshold, ctx=ctx))
             catch e
                 @warn "Failed to compute pixel lifetime map" error=string(e)
+                # No preview of an image it isn't from: the previous one goes.
+                request == lifetime_overlay_request[] && clear_lifetime_overlay!()
                 return nothing
             end
             # A newer import or threshold edit has superseded this request.
             request == lifetime_overlay_request[] || return nothing
-            draw_lifetime_overlay!(lifetime_map, threshold)
+            draw_lifetime_overlay!(lifetime_map, image.intensity, threshold)
         end
         return nothing
     end
 
-    function draw_lifetime_overlay!(lifetime_map, threshold)
-        if lifetime_map_plot[] !== nothing
-            delete!(image_axis, lifetime_map_plot[])
-            lifetime_map_plot[] = nothing
-        end
-        if lifetime_colorbar[] !== nothing
-            delete!(lifetime_colorbar[])
-            lifetime_colorbar[] = nothing
-        end
+    function draw_lifetime_overlay!(lifetime_map, photons, threshold)
+        clear_lifetime_overlay!()
 
         finite_values = filter(isfinite, vec(lifetime_map))
         if isempty(finite_values)
@@ -820,17 +872,20 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             hi += 0.5
         end
 
-        clamped_map = clamp.(lifetime_map, lo, hi)   # NaN passes through unchanged
+        # Color: the lifetime on the colorbar's scale (clamped); opacity: the photons, normalized.
+        rgba = lifetime_preview_rgba(lifetime_map, photons, (lo, hi); colormap = :turbo)
+        lifetime_range[] = (lo, hi)
 
         x_offset, y_offset = image_offset[]
-        n_cols, n_rows = size(clamped_map)
+        n_cols, n_rows = size(rgba)
         xs = x_offset:(x_offset + n_cols - 1)
         ys = y_offset:(y_offset + n_rows - 1)
 
-        lifetime_map_plot[] = heatmap!(image_axis, xs, ys, clamped_map; colormap = :turbo, colorrange = (lo, hi), nan_color = :transparent, visible = lifetime_map_toggle.active[])
+        lifetime_map_plot[] = heatmap!(image_axis, xs, ys, rgba; visible = lifetime_map_toggle.active[])
         if lifetime_map_toggle.active[]
             lifetime_colorbar[] = Colorbar(axis_layout[1, 2]; colormap = :turbo, limits = (lo, hi), label = LIFETIME_PREVIEW_LABEL)
         end
+        show_base_image!()
 
         return nothing
     end
@@ -1201,9 +1256,10 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
         # The galvo scan's pixels are the galvos': the Realtime in images refuses ROIs drawn on it.
         app_run.roi_image_source = source
 
-        # Grayscale base image: always drawn, never hidden by the lifetime
-        # toggle below — the lifetime map (if any) is a separate heatmap
-        # layered on top of it.
+        # Grayscale base image: always drawn, hidden only while the lifetime
+        # preview (a separate RGBA heatmap layered on top of it) shows —
+        # `show_base_image!`. A new image's preview starts from scratch: the
+        # previous one goes at once, the grayscale image shows until it's ready.
         if image_plot[] !== nothing
             delete!(image_axis, image_plot[])
         end
@@ -1212,6 +1268,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             calibration_plot[] = nothing
         end
         image_plot[] = heatmap!(image_axis, x_offset:(x_offset + n_cols - 1), y_offset:(y_offset + n_rows - 1), intensity, colormap = :grays)
+        clear_lifetime_overlay!()
         update_lifetime_overlay!()
         # Set the limits attribute directly rather than calling limits!/ylims!:
         # those helpers reset ax.yreversed[] to false whenever the y-limits are
@@ -1257,13 +1314,14 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
 
         if is_active
             if plot !== nothing && lifetime_colorbar[] === nothing
-                lo, hi = plot.colorrange[]
+                lo, hi = lifetime_range[]
                 lifetime_colorbar[] = Colorbar(axis_layout[1, 2]; colormap = :turbo, limits = (lo, hi), label = LIFETIME_PREVIEW_LABEL)
             end
         elseif lifetime_colorbar[] !== nothing
             delete!(lifetime_colorbar[])
             lifetime_colorbar[] = nothing
         end
+        show_base_image!()
     end
 
     on(min_photons_textbox.stored_string) do new_str

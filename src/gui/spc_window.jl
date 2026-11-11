@@ -164,6 +164,7 @@ function build_spc_figure(view::SpcView)
     Label(settings[7, 1]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Realtime: whole images (galvos off)", :halign => :right, :fontsize => 11))...)
     images_toggle = Toggle(settings[7, 2]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => s.images))...)
     on(images_toggle.active) do active
+        active == view.settings.images && return             # already so (the refresh tick follows the Protocol panel's)
         spc_edit_setting!(view, :images, active) || (images_toggle.active[] = view.settings.images)
     end
     Label(settings[7, 3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Images / block", :halign => :right, :fontsize => 11))...)
@@ -212,7 +213,8 @@ function build_spc_figure(view::SpcView)
     end
 
     widgets = SpcWindowWidgets(connect_button, image_button, single_button, irf_button, unlock_button,
-                               SpcWindowAxes(image_axes, decay_axis, rates_axis, Dict{Int, Tuple{Int, Int}}(), 0.0))
+                               SpcWindowAxes(image_axes, decay_axis, rates_axis, Dict{Int, Tuple{Int, Int}}(), 0.0),
+                               images_toggle)
     return fig, widgets, (width, height)
 end
 
