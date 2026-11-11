@@ -101,6 +101,7 @@ mutable struct SpcWindowWidgets
     irf_button::Any
     unlock_button::Any
     axes::Any                  # SpcWindowAxes, gui/spc_window.jl
+    images_toggle::Any         # "Realtime: whole images", kept on [clamp] images (`sync_images_toggles!`)
 end
 
 """
@@ -144,6 +145,7 @@ mutable struct SpcView
     irf_acquisition::Bool                  # the running Single is the IRF button's (`spc_toggle_irf!`)
     irf_fin::Union{Nothing, FLIMCore.Fin}  # its end, for the refresh tick to import (`finish_irf_acquisition!`)
     irf_sums::Dict{Int, Vector{Int}}       # per card, the sum of its Singles so far (shown dashed)
+    panel_images_toggle::Any               # the Protocol panel's Galvos / Image masks toggle (`sync_images_toggles!`)
 end
 
 """
@@ -179,7 +181,7 @@ function SpcView(settings_path::AbstractString, journal::Union{Nothing, JournalQ
                    nothing, FLIMCore.Alerte[], nothing, "", 0.0, time(), UInt64(0), false, nothing, 0.0,
                    :none, true, false, false, Dict{Int, FLIMCore.ImageSomme}(), Observable{Any}(nothing), "", "", nothing,
                    Observable("SPC: not connected"), Observable(""), Observable(""), Observable(""),
-                   false, nothing, Dict{Int, Vector{Int}}())
+                   false, nothing, Dict{Int, Vector{Int}}(), nothing)
     for card in spc_displayed_cards(view)
         view.cards[card] = SpcCard(card)
     end
@@ -872,6 +874,22 @@ function spc_update_texts!(view::SpcView)
     engine = view.engine
     view.info_text[] = engine === nothing ? "Settings: $(view.settings_path)" :
         "Settings: $(view.settings_path)\nResults dropped: $(engine.perdus[]), frames not shown: $(engine.trames_sautees[])"
+    return nothing
+end
+
+"""
+    sync_images_toggles!(view, protocol_panel_shown)
+
+Keep the two toggles of the Realtime in images on `[clamp] images`: the
+Protocol panel's Galvos / Image masks (while that panel is shown) and the
+SPC window's "Realtime: whole images" (while it is open) — either edits the
+setting (`spc_edit_setting!`), the refresh tick brings the other along.
+"""
+function sync_images_toggles!(view::SpcView, protocol_panel_shown::Bool)
+    images = view.settings.images
+    follow!(toggle) = (toggle === nothing || toggle.active[] == images || (toggle.active[] = images); nothing)
+    protocol_panel_shown && follow!(view.panel_images_toggle)
+    view.widgets !== nothing && view.window_open && follow!(view.widgets.images_toggle)
     return nothing
 end
 

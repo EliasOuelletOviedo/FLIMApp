@@ -289,7 +289,12 @@ nothing depends on a software deadline. START requires the DAQ loop READY
 parts together until STOP or until one of them stops (DAQ fault, SPC error):
 
 - the **DAQ loop** plays slots of `Scan time` then `Shift time` (Protocol
-  panel), all on the AO sample clock:
+  panel), all on the AO sample clock. A `Shift time` of 0 means no pause:
+  2 samples (0.2 ms) still separate the scans, the pass signal's shortest
+  low, which delimits the passes. Without ROIs, the lasers stay on through
+  them, under the reserved code (their photons are thrown away), so the
+  light and the opto PWM never stop. With ROIs, they are the galvos' jump
+  to the next ROI, lasers off.
   - the **routing code** on P0.4–P0.7: during each scan, the ROI's code;
     while the galvos move, during the pause and the entry, the reserved
     code ("hors ROI"), whose photons are thrown away when the stream is
@@ -364,8 +369,9 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
   - **Images:** in the Realtime in images, the protocol always gives the
     command voltage.
 
-**Realtime in images** (the SPC window's "Realtime: whole images" box,
-`[clamp] images`): START acquires whole images instead of scanning the
+**Realtime in images** (the Protocol panel's ROI toggle, *Galvos* /
+*Image masks*, or the SPC window's "Realtime: whole images" box: both set
+`[clamp] images`, from the next START): START acquires whole images instead of scanning the
 ROIs with the galvos — the microscope's scanner images (line and frame
 clocks on M1/M2), the galvos stay at 0 V, the gate P0.0 (and P0.1) stays
 high. Every "Images / block" images (`images_par_bloc`, consecutive
