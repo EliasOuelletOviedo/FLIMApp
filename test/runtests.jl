@@ -2072,7 +2072,7 @@ include("test_flimcore.jl")
     @test await(() -> FLIMApp.spc_state(view) == :pret && view.last_fin !== nothing)
     @test !view.last_fin.erreur && any(f -> endswith(f, "module0.spc"), view.last_fin.fichiers)
 
-    # The ROI popup's Image button: 100 frames per card, with the raw stream.
+    # The ROI popup's Image button: ROI_IMAGE_FRAMES (1000) frames per card, with the raw stream.
     @test FLIMApp.spc_request_roi_image!(view) == ""
     @test await(() -> view.roi_image[] !== nothing)
     parts = view.roi_image[]
