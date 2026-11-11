@@ -827,6 +827,45 @@ end
 
 reglages_qc(; kw...) = qc_banc(; dossier = mktempdir(), seuil_cfd = 10.0, kw...)
 
+@testset "Realtime en images avec le PWM de l'opto : les photons du code réservé écartés" begin
+    # Un photon sur deux au code 1 (la NI pendant l'acquisition), les autres au code réservé (les phases
+    # opto du PWM ; c'est aussi ce que lit la carte quand rien ne pilote les lignes).
+    mots = copy(flux_test())
+    k = 0
+    for i in 1:2:length(mots) - 1
+        (mots[i + 1] & 0x9000) == 0 || continue                  # INVALID ou MARK : pas un photon
+        k += 1
+        isodd(k) && (mots[i] |= 0x1000)                          # routage (bits 12–15) : 1
+    end
+    g = geometrie_auto()
+    etalonnage = FLIMCore.Etalonnage()
+    FLIMCore.ajouter_etalonnage!(etalonnage, mots, length(mots))
+    geo = FLIMCore.geometrie_etalonnee(etalonnage, TIC_TEST, g)
+    function rangeur(code)
+        r = FLIMCore.Rangeur(geo, TIC_TEST, DT_TEST, g)
+        r.code_jete = code
+        FLIMCore.ranger!((rg, complete) -> nothing, r, mots, length(mots))
+        FLIMCore.terminer!((rg, complete) -> nothing, r)
+        return r
+    end
+    tous, sans_reserve, sans_1 = rangeur(-1), rangeur(FLIMCore.CODE_HORS_ROI), rangeur(1)
+    @test sans_reserve.dans_image > 0 && sans_1.dans_image > 0 && sans_reserve.dans_image + sans_1.dans_image == tous.dans_image
+    @test sans_reserve.intensite_tot .+ sans_1.intensite_tot == tous.intensite_tot && sans_reserve.jetes > 0 && tous.jetes == 0
+
+    # Par le moteur, ImagesROI(...; jeter_hors_roi) : le flux d'origine n'a que le code réservé, plus rien n'y reste.
+    m = FLIMCore.demarrer_moteur(reglages_test(); source = source_test(flux_test(); vitesse = 0, boucle = false))
+    @test attendre_etat(m, :pret)
+    FLIMCore.commander!(m, FLIMCore.ImagesROI(g; taille = (100, 48), trames = 3, jeter_hors_roi = true))
+    @test !jusqu_a_fin(m, :clamp).erreur
+    histos = FLIMCore.HistoClamp[]
+    while isready(m.histogrammes)
+        push!(histos, take!(m.histogrammes))
+    end
+    @test !isempty(histos) && all(h -> sum(h.histogrammes[1]) == 0, histos)
+    @test FLIMCore.arreter_moteur(m)
+    @test FLIMCore.Clamp(opto = 0.3).opto == 0.3 && FLIMCore.Clamp().opto == 0.0
+end
+
 @testset "SPC-QC-104 : format FIFO, d'après la DLL" begin
     # Chaque enregistrement de qc4 décodé comme la DLL (l'arbitre) : temps, microtemps, routage, entrée, marqueurs.
     for nom in ("controle", "marqueurs")

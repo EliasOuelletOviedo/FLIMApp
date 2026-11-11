@@ -2,8 +2,9 @@
 handlers_protocol.jl
 
 Protocol panel: the Protocol/ROI popup launch buttons and their active
-toggles, plus the ROI galvo-scan timing spinners (START copies them into
-the DAQ loop's ScanRequest, runtime.jl). Split out of handlers.jl's former single
+toggles, the opto laser's PWM (frequency, duty cycle and its toggle), plus
+the ROI galvo-scan timing spinners (START copies them into the DAQ loop's
+ScanRequest, runtime.jl). Split out of handlers.jl's former single
 make_handlers function.
 """
 
@@ -30,43 +31,52 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
         protocol_toggle = Toggle(panel_grid[2, 3]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.protocol.active))...)
         protocol_button = Button(panel_grid[2, 4:6]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Edit", :width => nothing))...)
 
-        Label(panel_grid[4, 1:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "ROI", :fontsize => 16))...)
-        Label(panel_grid[5, 1:2]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Active"))...)
-        roi_toggle = Toggle(panel_grid[5, 3]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.roi.active))...)
-        roi_button = Button(panel_grid[5, 4:6]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Edit", :width => nothing))...)
+        Label(panel_grid[5, 1:6]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "ROI", :fontsize => 16))...)
+        Label(panel_grid[6, 1:2]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Active"))...)
+        roi_toggle = Toggle(panel_grid[6, 3]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.roi.active))...)
+        roi_button = Button(panel_grid[6, 4:6]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Edit", :width => nothing))...)
 
         Label(panel_grid[3, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "PWM frequency :"))...)
-        Label(panel_grid[6, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Points per ROI :"))...)
-        Label(panel_grid[7, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Spiral turns :"))...)
-        Label(panel_grid[8, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Scan time [ms] :"))...)
-        Label(panel_grid[9, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Shift time [ms] :"))...)
+        # The opto laser's PWM: on, the first "Duty cycle" % of each period the 1064 nm, the rest the acquisition
+        # (a short label: two 28 px columns).
+        Label(panel_grid[4, 1:2]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Duty cycle :"))...)
+        pwm_toggle = Toggle(panel_grid[4, 3]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => app.protocol.PWM_active))...)
+        Label(panel_grid[7, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Points per ROI :"))...)
+        Label(panel_grid[8, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Spiral turns :"))...)
+        Label(panel_grid[9, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Scan time [ms] :"))...)
+        Label(panel_grid[10, 1:3]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:halign => :right, :text => "Shift time [ms] :"))...)
 
         Box(panel_grid[3, 4:6]; SPINNER_BOX_ATTRS...)
-        Box(panel_grid[6, 4:6]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[4, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[7, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[8, 4:6]; SPINNER_BOX_ATTRS...)
         Box(panel_grid[9, 4:6]; SPINNER_BOX_ATTRS...)
+        Box(panel_grid[10, 4:6]; SPINNER_BOX_ATTRS...)
 
         protocol_params = Dict{Symbol, Any}(
             :PWM_frequency  => (Textbox(panel_grid[3, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.PWM_frequency), :stored_string => string(app.protocol.PWM_frequency)))...),
                                  Button(panel_grid[3, 4:6];  SPINNER_UP_ATTRS...),
                                  Button(panel_grid[3, 4:6];  SPINNER_DOWN_ATTRS...),
-                                 (1, 100_000, Int)),
-            :points_per_roi  => (Textbox(panel_grid[6, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.points_per_roi), :stored_string => string(app.protocol.points_per_roi)))...),
-                                 Button(panel_grid[6, 4:6];  SPINNER_UP_ATTRS...),
-                                 Button(panel_grid[6, 4:6];  SPINNER_DOWN_ATTRS...),
-                                 (1, 100_000, Int)),
-            :spiral_turns    => (Textbox(panel_grid[7, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.spiral_turns), :stored_string => string(app.protocol.spiral_turns)))...),
+                                 (1, floor(Int, app_run.config.sample_rate_hz / 2), Int)),
+            :PWM_duty       => (Textbox(panel_grid[4, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.PWM_duty), :stored_string => string(app.protocol.PWM_duty)))...),
+                                 Button(panel_grid[4, 4:6];  SPINNER_UP_ATTRS...),
+                                 Button(panel_grid[4, 4:6];  SPINNER_DOWN_ATTRS...),
+                                 (1, 99, Int)),
+            :points_per_roi  => (Textbox(panel_grid[7, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.points_per_roi), :stored_string => string(app.protocol.points_per_roi)))...),
                                  Button(panel_grid[7, 4:6];  SPINNER_UP_ATTRS...),
                                  Button(panel_grid[7, 4:6];  SPINNER_DOWN_ATTRS...),
-                                 (0, 10, Int)),
-            :scan_time       => (Textbox(panel_grid[8, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.scan_time), :stored_string => string(app.protocol.scan_time)))...),
+                                 (1, 100_000, Int)),
+            :spiral_turns    => (Textbox(panel_grid[8, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.spiral_turns), :stored_string => string(app.protocol.spiral_turns)))...),
                                  Button(panel_grid[8, 4:6];  SPINNER_UP_ATTRS...),
                                  Button(panel_grid[8, 4:6];  SPINNER_DOWN_ATTRS...),
-                                 (1, 1_000_000, Int)),
-            :shift_time => (Textbox(panel_grid[9, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.shift_time), :stored_string => string(app.protocol.shift_time)))...),
+                                 (0, 10, Int)),
+            :scan_time       => (Textbox(panel_grid[9, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.scan_time), :stored_string => string(app.protocol.scan_time)))...),
                                  Button(panel_grid[9, 4:6];  SPINNER_UP_ATTRS...),
                                  Button(panel_grid[9, 4:6];  SPINNER_DOWN_ATTRS...),
+                                 (1, 1_000_000, Int)),
+            :shift_time => (Textbox(panel_grid[10, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(app.protocol.shift_time), :stored_string => string(app.protocol.shift_time)))...),
+                                 Button(panel_grid[10, 4:6];  SPINNER_UP_ATTRS...),
+                                 Button(panel_grid[10, 4:6];  SPINNER_DOWN_ATTRS...),
                                  (0, 1_000_000, Int)),
         )
 
@@ -119,6 +129,12 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
             save_state(app)
         end
 
+        # The PWM applies from the next START (the DAQ loop's slots are built then).
+        on(pwm_toggle.active) do is_active
+            app.protocol.PWM_active = is_active
+            save_state(app)
+        end
+
         on(protocol_button.clicks) do _
             open_protocol_popup!(app, app_run, protocol_popup_screen)
         end
@@ -137,8 +153,8 @@ function protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid,
         colgap!(panel_grid, 8)
         # [rowsize!(panel_grid, n, 32) for n in 1:4]
         rowgap!(panel_grid, 1, 8)
-        rowgap!(panel_grid, 3, 32)
-        rowgap!(panel_grid, 4, 8)
+        rowgap!(panel_grid, 4, 32)
+        rowgap!(panel_grid, 5, 8)
     end
 
     return nothing
