@@ -83,6 +83,12 @@ irf_info_for(settings) = Dict{String, Any}(
     @test normalized.repeats == 0
     @test normalized.delay == 0
     @test normalized.times !== raw.times
+    @test !normalized.setpoints_in_volts && !FLIMApp.protocol_in_volts(raw)
+    # The protocol in volts (the popup's checkbox) reaches the worker and the DAQ loop; only while active.
+    raw.setpoints_in_volts = true
+    @test FLIMApp.normalize_protocol_config(raw).setpoints_in_volts && FLIMApp.protocol_in_volts(raw)
+    raw.active = false
+    @test !FLIMApp.protocol_in_volts(raw)
 end
 
 @testset "protocol CSV round-trip" begin
@@ -99,6 +105,14 @@ end
     @test imported.times[1:3] == times[1:3]
     @test imported.setpoints[1:3] == setpoints[1:3]
     @test all(isnan, imported.times[4:end])
+    @test imported.setpoints_in_volts === false
+
+    # The setpoints in volts travel with the file; a file written before the checkbox says nothing.
+    FLIMApp.write_protocol_csv(csv_path; repeats=3, delay=7, times=times, setpoints=setpoints, setpoints_in_volts=true)
+    @test FLIMApp.read_protocol_csv(csv_path; step_count=FLIMApp.PROTOCOL_STEP_COUNT).setpoints_in_volts === true
+    write(csv_path, "repeats,delay\n3,7\ntime,setpoint\n10,3.5\n")
+    old = FLIMApp.read_protocol_csv(csv_path; step_count=FLIMApp.PROTOCOL_STEP_COUNT)
+    @test old.setpoints_in_volts === nothing && old.repeats == 3 && old.times[1] == 10.0 && old.setpoints[1] == 3.5
 end
 
 @testset "state persistence round-trip" begin
@@ -566,6 +580,53 @@ end
     out = FLIMApp.AnalysisOutput(FLIMApp.Exchange(); roi_order = [1, 2], image_full_scale_v = 5.0)
     @test FLIMApp.image_mode(out) && !out.drive_outputs                       # the DAQ loop writes the protocol, not the worker
     @test !FLIMApp.image_mode(FLIMApp.AnalysisOutput(FLIMApp.Exchange())) && FLIMApp.AnalysisOutput(FLIMApp.Exchange()).drive_outputs
+end
+
+@testset "Protocol in volts: the setpoints as the command voltage, no PI" begin
+    cfg = test_bench_config()
+    protocol = ProtocolSettings(active = true, delay = 10, times = [30.0, 30.0], setpoints = [0.75, 0.25], repeats = 1,
+                                setpoints_in_volts = true)
+    lifetimes = deepcopy(protocol); lifetimes.setpoints_in_volts = false
+    off = deepcopy(protocol); off.active = false
+
+    # The worker: no PI and no lifetime setpoint plotted; the commands it records are the protocol's voltages.
+    @test isequal(FLIMApp.pass_targets(protocol, 20.0, false), (NaN, NaN, true))
+    @test FLIMApp.pass_targets(lifetimes, 20.0, false) == (0.75, 0.75, false)            # unchecked: the lifetime the PI holds
+    @test isequal(FLIMApp.pass_targets(off, 20.0, false), (4.0, NaN, false))             # inactive: the PI's fallback, as before
+    @test isequal(FLIMApp.pass_targets(protocol, 20.0, true), (NaN, NaN, false))         # images: volts anyway (image_mode)
+    out = FLIMApp.AnalysisOutput(FLIMApp.Exchange(); command_full_scale_v = cfg.command_full_scale_v)
+    @test out.drive_outputs && !FLIMApp.image_mode(out) && out.command_full_scale_v == cfg.command_full_scale_v
+
+    # The DAQ loop: each slot, the protocol's voltage at its start (1 s slots after a 50 ms entry), whatever the PI
+    # wrote; 0 V before its delay and after its repeats. Unchecked or inactive: the PI's commands again.
+    ex = FLIMApp.Exchange(cfg)
+    rois = [square_roi(100.0, 100.0), square_roi(600.0, 300.0)]
+    pattern = FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(rois, FLIMApp.roi_visit_order(rois), true, -1000, 1000, -1000, 1000,
+                                                             20, 3, 950, 50, (1024, 1024)), cfg)
+    FLIMApp.set_command_values!(ex, 40.0, NaN)
+    publish(p) = FLIMApp.publish_settings!(ex, FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = true), p))
+    volts(s) = FLIMApp.command_volts(FLIMApp.slot_commands(pattern, s, ex, cfg)[1], cfg)
+    publish(protocol)
+    @test volts(15) ≈ 0.75 && volts(45) ≈ 0.25 && volts(5) == 0.0 && volts(75) == 0.0
+    FLIMApp.publish_settings!(ex, FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = false), protocol))
+    @test volts(15) == 0.0                                                              # controller 1 off: Out 1 at 0 V
+    publish(lifetimes)
+    @test volts(15) == FLIMApp.command_volts(40.0, cfg)
+    publish(off)
+    @test volts(15) == FLIMApp.command_volts(40.0, cfg)
+    publish(protocol)
+    raster = FLIMApp.build_scan_pattern(FLIMApp.RasterRequest(-1000, 1000, -500, 700, 64, 48, 2.4, true), cfg)
+    @test all(isnan, FLIMApp.slot_commands(raster, 3, ex, cfg))                         # the galvo scan: never
+
+    # START: values the 1064 nm command can take.
+    @test FLIMApp.protocol_volts_problem(protocol, cfg.command_max_v) == ""
+    protocol.setpoints = [0.75, 1.5]
+    @test FLIMApp.protocol_volts_problem(protocol, cfg.command_max_v) == "1.5 V is outside 0–$(cfg.command_max_v) V"
+    # A state saved before the checkbox: lifetimes, the rest kept.
+    saved = FLIMApp.struct_to_dict(ProtocolSettings(delay = 12))
+    delete!(saved, :setpoints_in_volts)
+    restored = FLIMApp.dict_to_struct(ProtocolSettings, saved)
+    @test !restored.setpoints_in_volts && restored.delay == 12
 end
 
 @testset "DAQ loop on the simulated cards" begin

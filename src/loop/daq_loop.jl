@@ -202,19 +202,33 @@ function read_span!(hw::Hardware, readback::Matrix{Float64}, n::Integer, cfg::Be
 end
 
 """
+    slot_commands(pattern, s, ex, cfg) -> (command1, command2)
+
+The commands slot `s` carries, in % of `command_full_scale_v` (the PI's
+unit): none in the galvo scan, whose commands and 1064 nm gate stay at 0 V;
+the protocol's voltages at the slot's start in images, or with the
+protocol in volts (the Protocol popup's checkbox, `protocol_in_volts`,
+read slot by slot) — no PI —; otherwise the latest PI commands of the ROI
+it scans (each ROI has its own controllers; ROI 1 without ROI scanning).
+"""
+function slot_commands(pattern::ScanPattern, s::Integer, ex::Exchange, cfg::BenchConfig)::NTuple{2, Float64}
+    pattern.raster && return (NaN, NaN)
+    settings = current_settings(ex)
+    (pattern.image_mode || protocol_in_volts(settings.protocol)) &&
+        return image_mode_commands(settings, slot_start_s(pattern, s), cfg)
+    return command_values(ex, max(1, slot_roi(pattern, s)))
+end
+
+"""
     write_slot!(hw, buffers, pattern, s, cfg, ex, written_commands)
 
-Prepare slot `s` with the latest PI commands of the ROI it scans (each ROI
-has its own controllers; ROI 1 without ROI scanning; none in the galvo
-scan, whose commands and 1064 nm gate stay at 0 V), check it, write it,
+Prepare slot `s` with its commands (`slot_commands`), check it, write it,
 and remember the command voltages it carries (for its summary, published
 once it has played).
 """
 function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s::Integer,
                      cfg::BenchConfig, ex::Exchange, written_commands::Matrix{Float64})
-    command1, command2 = pattern.raster ? (NaN, NaN) :
-        pattern.image_mode ? image_mode_commands(current_settings(ex), slot_start_s(pattern, s), cfg) :
-        command_values(ex, max(1, slot_roi(pattern, s)))
+    command1, command2 = slot_commands(pattern, s, ex, cfg)
     command1_v = command_volts(command1, cfg)
     # AO 1: the 1064 nm laser gate (`[limits] gate_1064_v`), open only while the laser is to emit — or PI command 2.
     command2_v = cfg.gate_1064_v > 0 ? gate_1064_volts(command1_v, cfg) : command_volts(command2, cfg)
@@ -244,7 +258,8 @@ slot_start_s(p::ScanPattern, s::Integer) = (entry_samples(p) + s * p.slot_sample
 """
     image_mode_commands(settings, t, cfg) -> (command1, command2)
 
-The Realtime in images (`[clamp] images`) has no PI: while the protocol is
+The Realtime in images (`[clamp] images`) has no PI, nor the Realtime with
+the protocol in volts (`protocol_in_volts`): while the protocol is
 active, its value at `t` (s since the run started) is a voltage, written
 on the outputs whose controller is on (Out 1: `ch1_on`, Out 2: `ch2_on`);
 otherwise, and off the protocol (before its delay, after its repeats),
