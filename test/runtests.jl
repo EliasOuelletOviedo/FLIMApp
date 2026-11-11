@@ -1807,7 +1807,7 @@ end
 end
 
 @testset "Lifetime preview: the lifetime's color, the photons' opacity (RGBA)" begin
-    τ = [1.0 3.0; NaN 2.0; 5.0 0.0]                   # 3 × 2 pixels, one without a lifetime (below Min photons)
+    τ = [1.0 3.0; NaN 2.0; 5.0 0.0]                   # 3 × 2 pixels, one without a lifetime (no photon)
     photons = [400.0 100.0; 7.0 50.0; 200.0 10.0]
     rgba = FLIMApp.lifetime_preview_rgba(τ, photons, (1.0, 3.0))
     turbo = FLIMApp.cgrad(:turbo)
@@ -1818,6 +1818,16 @@ end
     q = FLIMApp.quantile([400.0, 100.0, 50.0, 200.0, 10.0], 0.99)                           # over the pixels with a lifetime
     @test rgba[1, 1].alpha == 1 && rgba[1, 2].alpha ≈ 100 / q && rgba[3, 2].alpha ≈ 10 / q  # the photons, normalized
     @test_throws DimensionMismatch FLIMApp.lifetime_preview_rgba(τ, photons[1:2, :], (1.0, 3.0))
+
+    # The color scale: the image's mean ± 3σ, weighted by the photons — a 1-photon pixel far off barely moves it.
+    bright = [2.0 2.2; 1.8 9.0]
+    counts = [1000.0 1000.0; 1000.0 1.0]
+    lo, hi = FLIMApp.lifetime_preview_range(bright, counts)
+    w = vec(counts); x = vec(bright)
+    μ = sum(w .* x) / sum(w); σ = sqrt(sum(w .* (x .- μ) .^ 2) / sum(w))
+    @test lo ≈ μ - 3σ && hi ≈ μ + 3σ && 1.3 < lo < 1.5 && 2.5 < hi < 2.7          # 2.00 ± 0.62; unweighted: 3.75 ± 9.1 ns
+    @test FLIMApp.lifetime_preview_range([2.5 NaN; 2.5 2.5], [10.0 0.0; 3.0 7.0]) == (2.0, 3.0)   # no spread: ± 0.5 ns
+    @test FLIMApp.lifetime_preview_range(fill(NaN, 2, 2), zeros(2, 2)) == (0.0, 1.0)
 end
 
 @testset "pixel_lifetime_map" begin

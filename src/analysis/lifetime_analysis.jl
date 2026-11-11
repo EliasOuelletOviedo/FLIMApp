@@ -1138,9 +1138,10 @@ as the SPC image gives them, see FLIMCore's `ImageSomme`) minus the IRF's
 own mean arrival time. No MLE fit — the cheap, no-optimizer estimate, for a
 quick per-pixel preview where fitting every pixel would be far too slow.
 
-A pixel with fewer than `min_photons` photons gets `NaN` — first-moment
-analysis is biased and noisy at low counts, so the caller (roi_popup.jl)
-renders `NaN` as transparent rather than a misleading color.
+A pixel with fewer than `min_photons` photons gets `NaN`, and so does one
+without any. First-moment analysis is noisy at low counts: the ROI popup
+computes every pixel (`min_photons = 0`) and lets its photons set its
+opacity (`lifetime_preview_rgba`), `NaN` transparent.
 
 Errors if the IRF hasn't been loaded (`ctx.irf`/`irf_bin_size`) —
 there is no "reliable" lifetime without it. `ctx`: the IRF of the image's

@@ -59,8 +59,8 @@ its lifetime on `colormap` over `lo`…`hi` (the colorbar's scale; clamped),
 its opacity its photons normalized — `photons / q`, `q` the
 `full_quantile` of the photons of the pixels with a lifetime, so that a
 few hot pixels don't fade the others (the brightest 1 % fully opaque),
-clamped to 0…1. A pixel without a lifetime (below Min photons: NaN) is
-transparent. Drawn on the dark background, the color is the lifetime, the
+clamped to 0…1. A pixel without a lifetime (no photon: NaN) is
+transparent. Drawn on a black background, the color is the lifetime, the
 brightness the photons.
 """
 function lifetime_preview_rgba(lifetime_map::AbstractMatrix{<:Real}, photons::AbstractMatrix{<:Real},
@@ -79,6 +79,27 @@ function lifetime_preview_rgba(lifetime_map::AbstractMatrix{<:Real}, photons::Ab
         out[i] = RGBAf(c.r, c.g, c.b, clamp(photons[i] / full, 0.0, 1.0))
     end
     return out
+end
+
+"""
+    lifetime_preview_range(lifetime_map, photons)::Tuple{Float64, Float64}
+
+The lifetime preview's color scale: the image's mean lifetime ± 3σ, both
+weighted by each pixel's photons — every pixel is computed, and those of 1
+or 2 photons, their first moment spread over the whole TDC window, would
+otherwise stretch the scale and wash out the contrast; weighted, the scale
+is that of what the preview shows (its opacity is the photons). A spread of
+0 (one pixel, or all alike) gives ±0.5 ns; no pixel with a lifetime, (0, 1).
+"""
+function lifetime_preview_range(lifetime_map::AbstractMatrix{<:Real}, photons::AbstractMatrix{<:Real})::Tuple{Float64, Float64}
+    size(lifetime_map) == size(photons) ||
+        throw(DimensionMismatch("lifetime map $(size(lifetime_map)) and photons $(size(photons))"))
+    counted(i) = isfinite(lifetime_map[i]) && photons[i] > 0
+    total = sum((Float64(photons[i]) for i in eachindex(lifetime_map) if counted(i)); init = 0.0)
+    total > 0 || return (0.0, 1.0)
+    μ = sum((photons[i] * lifetime_map[i] for i in eachindex(lifetime_map) if counted(i)); init = 0.0) / total
+    σ = sqrt(sum((photons[i] * (lifetime_map[i] - μ)^2 for i in eachindex(lifetime_map) if counted(i)); init = 0.0) / total)
+    return σ > 0 ? (μ - 3σ, μ + 3σ) : (μ - 0.5, μ + 0.5)
 end
 
 """Channel menu of the ROI popup: which card(s) the image shows (canal 1 is the FLIM channel)."""
@@ -687,13 +708,11 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # click) below.
     image_axis = Axis(axis_layout[1, 1]; merge(AXIS_IMAGE_ATTRS, Dict{Symbol, Any}(:title => "ROI Image", :yreversed => true, :aspect => DataAspect(), :xrectzoom => false, :yrectzoom => false))...)
 
-    # First-moment (mean-arrival-time) per-pixel lifetime preview — see
-    # pixel_lifetime_map (lifetime_analysis.jl) and refresh_image_display!
-    # below. min_photons_textbox's default matches pixel_lifetime_map's own.
-    lifetime_map_label  = Label(buttons_layout[1, 1][1, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Lifetime preview"))...)
-    min_photons_label   = Label(buttons_layout[2, 1][1, 1];   merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Min photons"))...)
-    lifetime_map_toggle = Toggle(buttons_layout[1, 1][1, 2];  merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => false))...)
-    min_photons_textbox = Textbox(buttons_layout[2, 1][1, 2]; merge(TEXT_ATTRS,   Dict{Symbol, Any}(:displayed_string => "50", :stored_string => "50"))...)
+    # First-moment (mean-arrival-time) per-pixel lifetime preview, every
+    # pixel computed — see pixel_lifetime_map (lifetime_analysis.jl) and
+    # lifetime_preview_rgba: the photons set each pixel's opacity.
+    lifetime_map_label  = Label(buttons_layout[1, 1];  merge(LABEL_ATTRS,  Dict{Symbol, Any}(:text => "Lifetime preview"))...)
+    lifetime_map_toggle = Toggle(buttons_layout[2, 1]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => false))...)
 
     im_import_button    = Button(buttons_layout[1, 2];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => IMAGE_BUTTON_LABEL))...)
     cellpose_button     = Button(buttons_layout[2, 2];  merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Cellpose"))...)
@@ -769,47 +788,38 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     # settable `visible`, so it's created only while the overlay is actually
     # shown and deleted (not hidden) when the overlay is toggled off.
     lifetime_colorbar = Ref{Any}(nothing)
-    # Last valid min-photons threshold, restored into the textbox on an
-    # unparseable edit — same reset-to-last-valid idiom as the Controller
-    # panel's P/I textboxes (handlers_controller.jl).
-    min_photons = Ref(50.0)
 
     """
         update_lifetime_overlay!()
 
     Recompute the lifetime-map overlay (`pixel_lifetime_map`,
-    lifetime_analysis.jl) from the cached `roi_image`/`min_photons` and
-    redraw it — called once right after an image import and again whenever
-    `min_photons_textbox` commits a new threshold, so the overlay is always
-    ready the moment `lifetime_map_toggle` is switched on (no compute lag on
-    the toggle click itself). No-op if no image is loaded.
+    lifetime_analysis.jl) from the cached `roi_image`, every pixel with a
+    photon, and redraw it — called right after an image import or a channel
+    change, so the overlay is always ready the moment `lifetime_map_toggle`
+    is switched on (no compute lag on the toggle click itself). No-op if no
+    image is loaded.
 
-    Always replaces the previous overlay heatmap/colorbar outright (cheap:
-    this only runs on import or an explicit threshold edit, not per toggle
-    click) rather than updating them in place. The overlay heatmap's
-    `visible` is set to match `lifetime_map_toggle`'s current state, so
-    changing the threshold while the overlay is showing updates it live,
-    and while hidden leaves it hidden. Falls back to no overlay (grayscale
-    image only, via the always-present `image_plot`) if the map computation
-    fails (e.g. IRF not loaded) or no pixel meets the photon threshold —
+    Always replaces the previous overlay heatmap/colorbar outright rather
+    than updating them in place. The overlay heatmap's `visible` is set to
+    match `lifetime_map_toggle`'s current state. Falls back to no overlay
+    (grayscale image only, via the always-present `image_plot`) if the map
+    computation fails (e.g. IRF not loaded) or the image has no photon —
     logging why either way.
 
-    Color range is `mean ± 3σ` over the qualifying (non-NaN) pixels, not
-    `extrema` — low-photon pixels that clear `min_photons` but still carry
-    high first-moment variance produce occasional far-outlier estimates that
-    would otherwise stretch the whole colormap and wash out the real
-    contrast. Pixel values outside that range are clamped to it (not just
-    the colormap, so `nan_color`-excluded pixels aside, what's displayed is
-    the actual capped data) before drawing. Each pixel's opacity is its
-    photons, normalized (`lifetime_preview_rgba`).
+    The color scale is the image's mean lifetime ± 3σ, weighted by the
+    photons (`lifetime_preview_range`); pixel values outside it are clamped
+    to it. Each pixel's opacity is its photons, normalized
+    (`lifetime_preview_rgba`), on a black background.
     """
     lifetime_overlay_request = Ref(0)
 
-    # The grayscale image: hidden only while a lifetime preview shows over it.
+    # While a lifetime preview shows: the grayscale image under it hidden, the
+    # axis black — its transparency (the photons) then darkens each pixel's color.
     function show_base_image!()
+        previewing = lifetime_map_toggle.active[] && lifetime_map_plot[] !== nothing
         base = image_plot[]
-        base === nothing && return nothing
-        base.visible[] = !(lifetime_map_toggle.active[] && lifetime_map_plot[] !== nothing)
+        base === nothing || (base.visible[] = !previewing)
+        image_axis.backgroundcolor[] = previewing ? RGBf(0, 0, 0) : AXIS_IMAGE_ATTRS[:backgroundcolor]
         return nothing
     end
 
@@ -829,48 +839,39 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     function update_lifetime_overlay!()
         image = roi_image[]
         image === nothing && return nothing
-        threshold = min_photons[]
         lifetime_overlay_request[] += 1
         request = lifetime_overlay_request[]
 
-        # The per-pixel fit is heavy: computed on a worker thread, drawn
-        # back here on the GUI thread (this @async task stays on it).
+        # The per-pixel map is heavy on a large image: computed on a worker
+        # thread, drawn back here on the GUI thread (this @async task stays on
+        # it). Every pixel with a photon: its opacity tells how much to trust it.
         @async begin
             lifetime_map = try
                 ctx = roi_image_fit_context(image)
-                fetch(Threads.@spawn pixel_lifetime_map(image.intensity, image.sum_t; min_photons=threshold, ctx=ctx))
+                fetch(Threads.@spawn pixel_lifetime_map(image.intensity, image.sum_t; min_photons=0, ctx=ctx))
             catch e
                 @warn "Failed to compute pixel lifetime map" error=string(e)
                 # No preview of an image it isn't from: the previous one goes.
                 request == lifetime_overlay_request[] && clear_lifetime_overlay!()
                 return nothing
             end
-            # A newer import or threshold edit has superseded this request.
+            # A newer import has superseded this request.
             request == lifetime_overlay_request[] || return nothing
-            draw_lifetime_overlay!(lifetime_map, image.intensity, threshold)
+            draw_lifetime_overlay!(lifetime_map, image.intensity)
         end
         return nothing
     end
 
-    function draw_lifetime_overlay!(lifetime_map, photons, threshold)
+    function draw_lifetime_overlay!(lifetime_map, photons)
         clear_lifetime_overlay!()
 
-        finite_values = filter(isfinite, vec(lifetime_map))
-        if isempty(finite_values)
-            @warn "No pixel has enough photons for a lifetime map" min_photons=threshold
+        if !any(isfinite, lifetime_map)
+            @warn "No photon in the image: no lifetime preview"
             return nothing
         end
 
-        # mean ± 3σ, degrading gracefully to a small pad around the mean
-        # when there's no meaningful spread to measure (a single qualifying
-        # pixel, or all of them identical).
-        mu = mean(finite_values)
-        sigma = length(finite_values) >= 2 ? std(finite_values) : 0.0
-        lo, hi = mu - 3*sigma, mu + 3*sigma
-        if !(hi > lo)
-            lo -= 0.5
-            hi += 0.5
-        end
+        # The image's mean ± 3σ, weighted by the photons (a small pad when they don't spread).
+        lo, hi = lifetime_preview_range(lifetime_map, photons)
 
         # Color: the lifetime on the colorbar's scale (clamped); opacity: the photons, normalized.
         rgba = lifetime_preview_rgba(lifetime_map, photons, (lo, hi); colormap = :turbo)
@@ -1305,7 +1306,7 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
     end
 
     # Cheap show/hide: no recompute, since update_lifetime_overlay! already
-    # kept lifetime_map_plot current (import time, and any threshold edit).
+    # kept lifetime_map_plot current (each image import or channel change).
     on(lifetime_map_toggle.active) do is_active
         plot = lifetime_map_plot[]
         if plot !== nothing
@@ -1322,19 +1323,6 @@ function open_roi_popup!(app, app_run, roi_popup_screen::Base.RefValue{Union{Not
             lifetime_colorbar[] = nothing
         end
         show_base_image!()
-    end
-
-    on(min_photons_textbox.stored_string) do new_str
-        val = tryparse(Float64, new_str)
-        if val !== nothing && val >= 0
-            min_photons[] = val
-            min_photons_textbox.displayed_string[] = string(val)
-        else
-            min_photons_textbox.displayed_string[] = string(min_photons[])
-            min_photons_textbox.stored_string[]    = string(min_photons[])
-        end
-
-        update_lifetime_overlay!()
     end
 
     # Galvo voltage range textboxes: commit straight to app.roi (RoiSettings,
