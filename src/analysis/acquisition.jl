@@ -45,7 +45,9 @@ diagnostics.jl). `image_full_scale_v` (finite: the Realtime in images, `[clamp] 
 no PI — each pass (a block of images, one ROI) is fit and shown, and the
 commands it records are the protocol's voltages the DAQ loop writes
 (`image_mode_commands`, in percent of this full scale), never sent from
-here.
+here. `command_full_scale_v`: the same, for the passes where the protocol
+is in volts (`protocol_in_volts`, the Protocol popup's checkbox) — no PI
+either then; NaN: their commands recorded as NaN.
 """
 mutable struct AnalysisOutput
     exchange::Exchange
@@ -55,14 +57,35 @@ mutable struct AnalysisOutput
     unmatched_passes::Int
     stats::WorkerStats
     image_full_scale_v::Float64
+    command_full_scale_v::Float64
 end
 
 AnalysisOutput(exchange::Exchange; roi_order::Vector{Int} = Int[], drive_outputs::Bool = true,
-               stats::WorkerStats = WorkerStats(), image_full_scale_v::Real = NaN) =
-    AnalysisOutput(exchange, copy(roi_order), drive_outputs && !isfinite(image_full_scale_v), 0, 0, stats, Float64(image_full_scale_v))
+               stats::WorkerStats = WorkerStats(), image_full_scale_v::Real = NaN, command_full_scale_v::Real = NaN) =
+    AnalysisOutput(exchange, copy(roi_order), drive_outputs && !isfinite(image_full_scale_v), 0, 0, stats,
+                   Float64(image_full_scale_v), Float64(command_full_scale_v))
 
 """Is this the Realtime in images (`[clamp] images`): no PI, the protocol's voltages as commands?"""
 image_mode(out::AnalysisOutput) = isfinite(out.image_full_scale_v)
+
+"""
+    pass_targets(protocol, timestamp, images; fallback_ns=4.0) -> (setpoint_ns, plot_setpoint_ns, in_volts)
+
+What the protocol asks of a pass ending at `timestamp` (s since the first
+pass): the lifetime the PI holds — the active protocol's setpoint, or
+`fallback_ns` without an active protocol; NaN, no PI, in images and with
+the protocol in volts (`protocol_in_volts`), whose commands are its
+voltages —; the one the plots show, only a genuine protocol schedule of
+lifetimes (NaN otherwise); and whether the protocol is in volts.
+"""
+function pass_targets(protocol::ProtocolSettings, timestamp::Real, images::Bool;
+                      fallback_ns::Real = 4.0)::Tuple{Float64, Float64, Bool}
+    active = protocol.active && !images          # in images, the protocol gives volts, not a lifetime
+    in_volts = active && protocol.setpoints_in_volts
+    lifetimes = active && !in_volts
+    setpoint_ns = lifetimes ? protocol_setpoint_at(protocol, timestamp) : active || images ? NaN : Float64(fallback_ns)
+    return (setpoint_ns, lifetimes ? setpoint_ns : NaN, in_volts)
+end
 
 """
     pass_roi(h, roi_order) -> (roi_index, code)
@@ -429,15 +452,11 @@ function start_realtime(
             settings = current_settings(out.exchange)
             layout = settings.layout
             controller = settings.controller
-            current_protocol = settings.protocol
-            protocol_active = current_protocol.active && !image_mode(out)    # in images, the protocol gives volts, not a lifetime
-            setpoint_ns = protocol_active ? protocol_setpoint_at(current_protocol, timestamp) :
-                          image_mode(out) ? NaN : fallback_setpoint_ns
-
             # Distinct from setpoint_ns: PID control keeps regulating toward the
             # fallback setpoint even without an active protocol, but the plotted
             # series/highlight should only reflect a genuine protocol schedule.
-            plot_setpoint_ns = protocol_active ? setpoint_ns : NaN
+            setpoint_ns, plot_setpoint_ns, in_volts = pass_targets(settings.protocol, timestamp, image_mode(out);
+                                                                   fallback_ns = fallback_setpoint_ns)
 
             frames = (ChannelFrame(), ChannelFrame())
             commands = (NaN, NaN)
@@ -466,8 +485,9 @@ function start_realtime(
                                                                 controller.I2, controller.ch2_inv, controller.ch2_on))
             end
 
-            # In images: no PI; the commands recorded are the protocol's voltages the DAQ loop writes.
+            # In images, or with the protocol in volts: no PI; the commands recorded are the protocol's voltages the DAQ loop writes.
             image_mode(out) && (commands = image_mode_commands(settings, timestamp, out.image_full_scale_v))
+            in_volts && (commands = image_mode_commands(settings, timestamp, out.command_full_scale_v))
             for c in 1:channels
                 isnan(frames[c].lifetime) && Threads.atomic_add!(stats.fits_failed[c], 1)
             end

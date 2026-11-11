@@ -350,6 +350,19 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
   window and Kalman observer per ROI and channel), and runs **one PI per
   ROI**: the DAQ loop writes each ROI's own commands during that ROI's
   scans.
+- the **protocol in volts** (the Protocol popup's *Setpoint in volts*
+  checkbox): the active protocol's setpoints are no longer the lifetime
+  the PI holds (ns) but the command voltage written as is (V), no PI.
+  - **Outputs:** the DAQ loop reads the protocol at each slot's start and
+    writes its value on Out 1 if controller 1 is on, Out 2 if controller 2
+    is (every ROI the same); off the protocol (before its delay, after its
+    repeats), 0 V.
+  - **Live:** the checkbox applies from the next slot, as the protocol's
+    edits do. The PI restarts from zero when the box is unchecked.
+  - **START** refuses a value outside 0 V–`command_max_v`. The frames
+    record the voltages as commands, with no lifetime setpoint.
+  - **Images:** in the Realtime in images, the protocol always gives the
+    command voltage.
 
 **Realtime in images** (the SPC window's "Realtime: whole images" box,
 `[clamp] images`): START acquires whole images instead of scanning the

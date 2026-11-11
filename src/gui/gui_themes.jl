@@ -688,6 +688,19 @@ TOGGLE_ATTRS = Dict{Symbol, Any}(
     :width              => 20
 )
 
+# A checkbox the size of the toggles, in their colors (the text boxes' border).
+CHECKBOX_ATTRS = Dict{Symbol, Any}(
+    :alignmode                     => Inside(),
+    :checkboxcolor_checked         => COLOR_5,
+    :checkboxcolor_unchecked       => COLOR_2,
+    :checkboxstrokecolor_checked   => COLOR_5,
+    :checkboxstrokecolor_unchecked => COLOR_5,
+    :checkmarkcolor_checked        => TEXT,
+    :halign                        => :center,
+    :size                          => 20,
+    :valign                        => :center
+)
+
 PATH_TEXT_ATTRS = Dict{Symbol, Any}(
     :borderwidth                 => 0,
     :boxcolor                    => COLOR_2,

@@ -253,10 +253,9 @@ image of the microscope's scanner (the ROI popup's Image button), whose
 pixels they bin — not on the galvo scan's, whose pixels are the galvos'.
 """
 function images_start_refusal(app, app_run)::String
-    limit = app_run.config.command_max_v
     if app.protocol.active
-        bad = [v for v in app.protocol.setpoints if isfinite(v) && !(0 <= v <= limit)]
-        isempty(bad) || return "Realtime in images: the protocol gives the command voltage, $(first(bad)) V is outside 0–$(limit) V"
+        problem = protocol_volts_problem(app.protocol, app_run.config.command_max_v)
+        isempty(problem) || return "Realtime in images: the protocol gives the command voltage, " * problem
     end
     split_rois = app.roi.active && !isempty(app_run.rois[])
     split_rois && minimum(app_run.imported_image_size) <= 0 &&
@@ -267,6 +266,18 @@ function images_start_refusal(app, app_run)::String
     return ""
 end
 
+
+"""
+    protocol_volts_problem(protocol, limit)::String
+
+The first of the protocol's values outside 0 V–`limit` (`[limits]
+command_max_v`) when it gives the command voltage — "1.5 V is outside
+0–1.0 V" —, "" if none: in images, and with the protocol in volts.
+"""
+function protocol_volts_problem(protocol::ProtocolSettings, limit::Real)::String
+    bad = [v for v in protocol.setpoints if isfinite(v) && !(0 <= v <= limit)]
+    return isempty(bad) ? "" : "$(first(bad)) V is outside 0–$(limit) V"
+end
 
 """What made the ROIs' image, for run.toml: "scanner" (Image button), "galvo scan" (Galvo scan button), "" (none)."""
 roi_image_source_name(source::Symbol)::String = source == :galvos ? "galvo scan" : source == :scanner ? "scanner" : ""
@@ -364,7 +375,8 @@ detector settings, `irf_mismatches`), the free space in the recording
 folder (`RECORDING_MIN_S` of recording at least), the DAQ loop (it plays
 the scans, the routing code and the pass signal), the SPC engine (it
 counts), and at most `ROI_MAX` ROIs (the routing code has 4 bits, code 0
-reserved).
+reserved), the opto PWM (`pwm_refusal`) and, with the protocol in volts,
+its values within 0 V and `command_max_v` (`protocol_volts_problem`).
 """
 function realtime_start_refusal(app, app_run)::String
     isempty(app_run.offline) || return app_run.offline
@@ -383,6 +395,10 @@ function realtime_start_refusal(app, app_run)::String
     app.roi.active && n_rois > ROI_MAX && return "$n_rois ROIs: the routing code tells only $ROI_MAX apart"
     pwm = pwm_refusal(app.protocol, app_run.config.sample_rate_hz)
     isempty(pwm) || return pwm
+    if protocol_in_volts(app.protocol)
+        problem = protocol_volts_problem(app.protocol, app_run.config.command_max_v)
+        isempty(problem) || return "Protocol in volts: " * problem
+    end
     return ""
 end
 
@@ -500,7 +516,7 @@ function start_pressed(app, app_run, blocks)
             return nothing
         end
         app_run.run_dir = dir
-        @info "Realtime run started" session=dir rois=length(rois) order=order roi_active=app.roi.active scan_ms=app.protocol.scan_time shift_ms=app.protocol.shift_time images=images images_per_block=app_run.spc.settings.images_par_bloc pwm=pwm_text(app.protocol, app_run.config.sample_rate_hz)
+        @info "Realtime run started" session=dir rois=length(rois) order=order roi_active=app.roi.active scan_ms=app.protocol.scan_time shift_ms=app.protocol.shift_time images=images images_per_block=app_run.spc.settings.images_par_bloc pwm=pwm_text(app.protocol, app_run.config.sample_rate_hz) protocol_in_volts=protocol_in_volts(app.protocol)
         app_run.run_open = true
         app_run.run_started_ns = time_ns()
         send_journal!(ex.journal, JournalRunStart(t, dir, run_info(app, app_run, order), loaded_irfs(), loaded_irf_info()))
@@ -518,16 +534,19 @@ function start_pressed(app, app_run, blocks)
             FLIMCore.commander!(engine, images_command(rois, order, app_run.imported_image_size, app_run.spc.settings, dir;
                                                        pwm = app.protocol.PWM_active))
             send_command!(ex, StartCommand(scan_request(app, app_run, order; image_mode = true)))
-            out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats, image_full_scale_v=app_run.config.command_full_scale_v)
+            out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats, image_full_scale_v=app_run.config.command_full_scale_v,
+                                 command_full_scale_v=app_run.config.command_full_scale_v)
         else
             FLIMCore.commander!(engine, clamp_command(app, app_run, order, dir))
             send_command!(ex, StartCommand(scan_request(app, app_run, order)))
-            out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats)
+            out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats, command_full_scale_v=app_run.config.command_full_scale_v)
         end
         spawn_acquisition_worker!(app_run, out, engine.histogrammes, initial_guess)
         pwm = pwm_text(app.protocol, app_run.config.sample_rate_hz)
+        # The protocol in volts (in images it always is): no PI while it gives the commands.
+        volts = !images && protocol_in_volts(app.protocol) ? " · protocol in volts, no PI" : ""
         show_status!(blocks, (images ? "Realtime in images ($(app_run.spc.settings.images_par_bloc) per block)" : "Realtime") *
-                             ": session $(basename(dir))" * (isempty(pwm) ? "" : " · " * pwm))
+                             ": session $(basename(dir))" * volts * (isempty(pwm) ? "" : " · " * pwm))
         return nothing
     end
 
@@ -687,7 +706,8 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
                                                              loaded_irfs(), loaded_irf_info()))
 
     out = AnalysisOutput(ex; roi_order = order, drive_outputs = false, stats = app_run.worker_stats,
-                         image_full_scale_v = images ? app_run.config.command_full_scale_v : NaN)
+                         image_full_scale_v = images ? app_run.config.command_full_scale_v : NaN,
+                         command_full_scale_v = app_run.config.command_full_scale_v)
     spawn_acquisition_worker!(app_run, out, engine.histogrammes, selected_initial_guess(blocks);
                               source_done = playback.source_done)
     what = playback.session_settings ? "session settings" : "current settings"
