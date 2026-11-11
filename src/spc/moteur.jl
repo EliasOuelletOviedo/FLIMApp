@@ -201,7 +201,9 @@ le routage sans rien deviner (le GUI en tire des problèmes identifiés,
 diagnostics.jl). `codes` : les codes de routage que la NI écrit pendant
 les scans ; `scan_s`, `pause_s`, `tolerance_s` : les passes programmées
 (NaN : inconnues) ; `fin_par_m3` : la fin des passes vient de M3 (sinon :
-M0 seul, la durée du scan) ; `publiees` : passes publiées pour l'analyse.
+M0 seul, la durée du scan) ; `publiees` : passes publiées pour l'analyse ;
+`opto` : la part de chaque passe où la NI écrit exprès le code réservé (les
+phases opto du PWM du laser 1064 nm, `Clamp(...; opto)`), 0 sans PWM.
 """
 struct EtatClamp <: Resultat
     t::Float64
@@ -214,7 +216,10 @@ struct EtatClamp <: Resultat
     tolerance_s::Float64
     cartes::Vector{CompteursCarte}
     publiees::Int
+    opto::Float64
 end
+EtatClamp(t, duree_s, fin, fin_par_m3, codes, scan_s, pause_s, tolerance_s, cartes, publiees) =
+    EtatClamp(t, duree_s, fin, fin_par_m3, codes, scan_s, pause_s, tolerance_s, cartes, publiees, 0.0)
 
 """Période de publication d'`EtatClamp` pendant un Realtime."""
 const PERIODE_ETAT_CLAMP = 1.0
@@ -318,6 +323,10 @@ fin_par_m3` des réglages. Avec M0 seul et `echantillon_s` connu, chaque M0
 doit tomber un nombre entier de créneaux (`scan_s + pause_s`) après le
 dernier M0 valide : hors cadence, c'est un parasite, ignoré (la passe en
 cours continue) ; plusieurs créneaux, des M0 manquants (`Passes`).
+`opto` : la part de chaque scan où la NI écrit exprès le code réservé — les
+phases opto du PWM du laser 1064 nm, dont les photons sont jetés comme ceux
+des déplacements —, pour que le diagnostic du routage (`EtatClamp`) ne la
+prenne pas pour un défaut ; 0 sans PWM.
 """
 struct Clamp <: Commande
     rois::Vector{Int}
@@ -328,12 +337,13 @@ struct Clamp <: Commande
     echantillon_s::Float64
     tous_marqueurs::Bool
     fin_par_m3::Union{Nothing,Bool}
+    opto::Float64
 end
 Clamp(; rois::AbstractVector{<:Integer} = Int[], ordre::AbstractVector{<:Integer} = rois,
       dossier::AbstractString = "", scan_s::Real = 0.95, pause_s::Real = 0.05, echantillon_s::Real = NaN,
-      tous_marqueurs::Bool = false, fin_par_m3::Union{Nothing,Bool} = nothing) =
+      tous_marqueurs::Bool = false, fin_par_m3::Union{Nothing,Bool} = nothing, opto::Real = 0.0) =
     Clamp(Int.(rois), Int.(ordre), String(dossier), Float64(scan_s), Float64(pause_s), Float64(echantillon_s), tous_marqueurs,
-          fin_par_m3)
+          fin_par_m3, Float64(opto))
 
 """Écart toléré sur l'intervalle M0 → M0 : un échantillon de l'AO et 100 ppm du créneau."""
 tolerance_periode(c::Clamp) = c.echantillon_s + 100e-6 * (c.scan_s + c.pause_s)
@@ -359,7 +369,9 @@ FIFO débordé pendant le bloc.
 entière, un seul histogramme au code `CODE_SANS_ROI`. `dossier` : où
 enregistrer le flux de chaque carte (`<série>.spc` et `_acquisition.ini`,
 comme le Realtime) ; "" : rien. État du moteur et `Fin` : ceux du Realtime
-(`:clamp`).
+(`:clamp`). `jeter_hors_roi` : les photons du code réservé (`CODE_HORS_ROI`)
+ne vont ni dans les images ni dans les histogrammes — les phases opto du
+PWM du laser 1064 nm, où la NI l'écrit exprès ; sans, le routage est ignoré.
 """
 struct ImagesROI <: Commande
     geometrie::Geometrie
@@ -367,11 +379,12 @@ struct ImagesROI <: Commande
     taille::Tuple{Int,Int}
     trames::Int
     dossier::String
+    jeter_hors_roi::Bool
 end
 ImagesROI(g::Geometrie = Geometrie(); rois::AbstractVector = Vector{Tuple{Int,Int}}[], taille::Tuple{Integer,Integer} = (0, 0),
-          trames::Integer = 17, dossier::AbstractString = "") =
+          trames::Integer = 17, dossier::AbstractString = "", jeter_hors_roi::Bool = false) =
     ImagesROI(g, [Tuple{Int,Int}[(Int(p[1]), Int(p[2])) for p in roi] for roi in rois], (Int(taille[1]), Int(taille[2])),
-              Int(trames), String(dossier))
+              Int(trames), String(dossier), jeter_hors_roi)
 
 """
     ImageGalvos(balayage; dossier="", delai_s=NaN)
@@ -915,9 +928,11 @@ mutable struct BlocsROI
     pertes::Int
     deborde_vu::Bool
     file::Vector{Tuple{Matrix{UInt32},Float64,Float64,Int,Bool}}
+    jeter_hors_roi::Bool
 end
 BlocsROI(c::ImagesROI, canaux::Integer) =
-    BlocsROI(c.rois, c.taille, c.trames, Int(canaux), 0, 0.0, 0, false, Tuple{Matrix{UInt32},Float64,Float64,Int,Bool}[])
+    BlocsROI(c.rois, c.taille, c.trames, Int(canaux), 0, 0.0, 0, false, Tuple{Matrix{UInt32},Float64,Float64,Int,Bool}[],
+             c.jeter_hors_roi)
 
 """Codes de routage des histogrammes d'un bloc : un par ROI, ou `CODE_SANS_ROI` pour l'image entière."""
 codes_blocs(b::BlocsROI) = isempty(b.rois) ? [CODE_SANS_ROI] : [code_routage(k) for k in eachindex(b.rois)]
@@ -1113,7 +1128,10 @@ function _traiter_mots!(m::Moteur, a::AcqModule, tampon::Vector{UInt16}, n::Inte
                    "par trame, $(geo.reglage[3]) ignorées en haut)"))
     end
     a.rangeur = Rangeur(geo, a.tic_s, a.dt_ns, g)
-    a.blocs === nothing || rois_rangeur!(a.rangeur, _bits_rois(a.blocs, geo.ny, geo.nx); canaux = a.blocs.canaux)
+    if a.blocs !== nothing
+        rois_rangeur!(a.rangeur, _bits_rois(a.blocs, geo.ny, geo.nx); canaux = a.blocs.canaux)
+        a.blocs.jeter_hors_roi && (a.rangeur.code_jete = CODE_HORS_ROI)       # les phases opto du PWM
+    end
     a.pool = _nouveau_pool!(m, a.carte, geo.ny, geo.nx, a.dt_ns)
     mots = a.etalonnage.mots
     a.etalonnage = Etalonnage()
@@ -1618,7 +1636,7 @@ end
 _etat_clamp(cartes::Vector{ClampCarte}, codes, c::Clamp, debut, publiees, fin::Bool, fin_par_m3::Bool) =
     EtatClamp(time(), time() - debut, fin, fin_par_m3, collect(codes), c.scan_s, c.pause_s,
               fin_par_m3 ? tolerance_passe(c) : tolerance_periode(c),
-              [_compteurs(a, k) for (k, a) in enumerate(cartes)], publiees)
+              [_compteurs(a, k) for (k, a) in enumerate(cartes)], publiees, c.opto)
 
 function _clamp!(m::Moteur, src::Source, ctx::Contexte, c::Clamp)
     r = _reglages_courants!(m, ctx)

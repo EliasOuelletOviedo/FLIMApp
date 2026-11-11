@@ -486,6 +486,69 @@ end
     @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, no_gate)     # PI command 2 again: 1 V at most
 end
 
+@testset "Opto PWM: the 1064 nm during the duty cycle, the acquisition outside it" begin
+    cfg = test_bench_config()
+    # In samples of the DAQ loop (10 kHz): whole periods, one sample of each phase at least.
+    @test FLIMApp.pwm_samples(1000, 0.3, 1e4) == (10, 3) && FLIMApp.pwm_samples(5000, 0.5, 1e4) == (2, 1)
+    @test FLIMApp.pwm_samples(1000, 0.001, 1e4) == (10, 1) && FLIMApp.pwm_samples(1000, 0.999, 1e4) == (10, 9)
+    @test FLIMApp.pwm_samples(0, 0.5, 1e4) == (0, 0)
+    @test_throws FLIMApp.SafetyError FLIMApp.pwm_samples(6000, 0.5, 1e4)
+
+    rois = [square_roi(100.0, 100.0), square_roi(600.0, 300.0)]
+    order = FLIMApp.roi_visit_order(rois)
+    reserved = ~UInt8(FLIMCore.CODE_HORS_ROI) & 0x0f                 # what the NI writes for the reserved code (inverted)
+    for image_mode in (false, true)
+        request = FLIMApp.ScanRequest(rois, order, !image_mode, -1000, 1000, -1000, 1000, 20, 3, 95, 5, (1024, 1024),
+                                      true, image_mode, 1000.0, 0.3)
+        pattern = FLIMApp.build_scan_pattern(request, cfg)
+        @test (pattern.pwm_period, pattern.pwm_on) == (10, 3)
+        n = pattern.slot_samples
+        n_on = image_mode ? n : pattern.scan_samples                 # the PWM: during the scan, the whole slot in images
+        on = 1:n_on
+        buffers = FLIMApp.SlotBuffers(n)
+        for s in (0, 1, 5)                                            # the periods run on from slot to slot
+            FLIMApp.prepare_slot!(buffers, pattern, s, 0.8, 5.0)
+            plain = pattern.lines[:, FLIMApp.slot_position(pattern, s)]
+            opto = [mod(FLIMApp.entry_samples(pattern) + s * n + j - 1, 10) < 3 for j in on]
+            @test count(opto) / length(opto) ≈ 0.3
+            # Opto: the 1064 nm power (AO 0) and gate (AO 1), the photons thrown away (the reserved code).
+            # Acquisition: the 1064 nm off, the ROI's code. The 850 nm gate and the pulses never change.
+            @test buffers.commands[on] == ifelse.(opto, 0.8, 0.0) && buffers.commands[n .+ on] == ifelse.(opto, 5.0, 0.0)
+            @test (buffers.lines[on] .>> FLIMApp.DO_ROI_CODE_SHIFT) == ifelse.(opto, reserved, plain[on] .>> FLIMApp.DO_ROI_CODE_SHIFT)
+            @test (buffers.lines .& 0x0f) == (plain .& 0x0f)
+            image_mode || @test all(==(0.0), buffers.commands[n_on+1:n]) && buffers.lines[n_on+1:n] == plain[n_on+1:n]
+            FLIMApp.check_slot(buffers, cfg)
+        end
+    end
+    # Without PWM, the slots as before: the commands during the whole scan.
+    pattern = FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 95, 5, (1024, 1024)), cfg)
+    buffers = FLIMApp.SlotBuffers(pattern.slot_samples)
+    FLIMApp.prepare_slot!(buffers, pattern, 0, 0.8, 5.0)
+    @test pattern.pwm_period == 0 && all(==(0.8), buffers.commands[1:pattern.scan_samples])
+
+    # The Protocol panel's PWM, taken at START: the request, the engine's commands, the checks, the texts.
+    app, app_run = AppState(true), AppRun(cfg)
+    @test !app.protocol.PWM_active && app.protocol.PWM_duty == 50 && FLIMApp.scan_request(app, app_run, Int[]).pwm_hz == 0.0
+    app.protocol.PWM_active, app.protocol.PWM_frequency, app.protocol.PWM_duty = true, 1000, 30
+    r = FLIMApp.scan_request(app, app_run, Int[])
+    @test (r.pwm_hz, r.pwm_duty) == (1000.0, 0.3)
+    @test FLIMApp.pwm_opto_fraction(app.protocol, cfg.sample_rate_hz) ≈ 0.3 && FLIMApp.clamp_command(app, app_run, Int[], mktempdir()).opto ≈ 0.3
+    @test FLIMApp.pwm_text(app.protocol, cfg.sample_rate_hz) == "PWM 1000.0 Hz, opto 30.0 % (3 of 10 samples)"
+    @test FLIMApp.images_command(FLIMApp.RoiCoordinates[], Int[], (100, 48), FLIMCore.Reglages(), ""; pwm = true).jeter_hors_roi
+    @test !FLIMApp.images_command(FLIMApp.RoiCoordinates[], Int[], (100, 48), FLIMCore.Reglages(), "").jeter_hors_roi
+    app.protocol.PWM_frequency = 6000
+    @test occursin("at most 5000 Hz", FLIMApp.pwm_refusal(app.protocol, cfg.sample_rate_hz))
+    app.protocol.PWM_frequency = 0                                   # the toggle on, no PWM played: the opto the whole scan
+    @test occursin("at least 1 Hz", FLIMApp.pwm_refusal(app.protocol, cfg.sample_rate_hz))
+    app.protocol.PWM_active = false
+    @test FLIMApp.pwm_refusal(app.protocol, cfg.sample_rate_hz) == "" && FLIMApp.pwm_text(app.protocol, cfg.sample_rate_hz) == ""
+    # A state saved before the duty cycle existed: its defaults, the rest kept.
+    old = FLIMApp.struct_to_dict(ProtocolSettings(scan_time = 400))
+    delete!(old, :PWM_duty); delete!(old, :PWM_active)
+    restored = FLIMApp.dict_to_struct(ProtocolSettings, old)
+    @test restored.PWM_duty == 50 && !restored.PWM_active && restored.scan_time == 400
+end
+
 @testset "Realtime in images: the engine's command, START's checks, no PI" begin
     roi = FLIMApp.RoiCoordinates("square", [10.0, 20.0, 20.0, 10.0], [5.0, 5.0, 15.0, 15.0])
     settings = FLIMCore.Reglages(images = true, images_par_bloc = 5)
@@ -984,6 +1047,13 @@ end
     @test ids(state([counters(codes = Dict(1 => 2000, 4 => 2000))]; written = [1, 2])) == ["ROUTE-04"]
     @test isempty(ids(state([counters(codes = Dict(1 => 2000))]; written = [1, 2])))          # ROI 2 dark: not wiring
     @test length(FLIMApp.pass_status_lines(state([counters(), counters(carte = 1)]))) == 5
+    # The opto laser's PWM writes the reserved code on purpose during its opto phases (EtatClamp.opto):
+    # half of each pass there is no routing fault; only the coded photons expected outside it count.
+    pwm_state(cards; opto) = FLIMCore.EtatClamp(time(), 10.0, false, true, [1], 0.95, 0.05, 1e-4 + 95e-6, cards, 10, opto)
+    half = counters(codes = Dict(0 => 2500, 1 => 2500))
+    @test !isempty(ids(state([half]))) && isempty(ids(pwm_state([half]; opto = 0.5)))
+    @test ids(pwm_state([counters(codes = Dict(0 => 4950, 1 => 50))]; opto = 0.5)) == ["ROUTE-01"]
+    @test occursin("50 % expected", detail(pwm_state([counters(codes = Dict(0 => 4950, 1 => 50))]; opto = 0.5), "ROUTE-01"))
 
     # From the engine itself: a replay where the cards read the NOT of the
     # codes the NI writes (inverser_routage the wrong way).

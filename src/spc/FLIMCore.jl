@@ -45,7 +45,7 @@ using .SPCLite: Decodeur, decoder!, ecrire_ini, lire_ini, comparer_parametres, e
                 SPC_TIME_OVER, SPC_COLTIM_OVER, SPC_CMD_STOP
 
 """Version de FLIMCore : à augmenter à chaque changement, pour `garde_version`."""
-const VERSION_CORE = 12
+const VERSION_CORE = 13
 
 include("reglages.jl")
 include("flux.jl")

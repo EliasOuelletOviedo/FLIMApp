@@ -155,6 +155,11 @@ Experimental protocol schedule: `times`/`setpoints` are parallel vectors of
 ROI galvo-scan parameters (roi_geometry.jl, loop/scan_pattern.jl), editable from the Protocol panel
 (handlers_protocol.jl) — see `roi_scan_segments`/`roi_scan_waveform` in
 roi.jl for how they're used.
+
+`PWM_active`: the opto laser's PWM — every period of `PWM_frequency` (Hz),
+its first `PWM_duty` % the 1064 nm laser (power and gate) at its command and
+no acquisition (its photons thrown away), the rest the acquisition with the
+1064 nm off, for the whole run (`prepare_slot!`, loop/scan_pattern.jl).
 """
 Base.@kwdef mutable struct ProtocolSettings
     active::Bool = false
@@ -163,6 +168,8 @@ Base.@kwdef mutable struct ProtocolSettings
     times::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
     setpoints::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
     PWM_frequency::Int = 1000
+    PWM_duty::Int = 50
+    PWM_active::Bool = false
     points_per_roi::Int = 100
     spiral_turns::Int = 10
     scan_time::Int = 950
