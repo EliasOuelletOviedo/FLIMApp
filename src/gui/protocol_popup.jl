@@ -2,9 +2,10 @@
 protocol_popup.jl
 
 Protocol popup construction and behavior: the steps (durations and
-setpoints), repeats and delay, CSV import/export, and the "Setpoint in
-volts" checkbox — unchecked, a setpoint is the lifetime the PI holds (ns);
-checked, the command voltage written as is (V), no PI (`protocol_in_volts`).
+setpoints), repeats and delay, CSV import/export, and the setpoint menu
+(`SETPOINT_KINDS`) — what a setpoint is: the command voltage written as is
+("Voltage", no PI, `protocol_in_volts`), or the quantity the PI holds (a
+channel's lifetime in ns, the photon ratio, the ion concentration).
 """
 
 @inline function protocol_csv_float_or_blank(value::Float64)::String
@@ -22,14 +23,14 @@ function write_protocol_csv(
             delay::Int,
             times::Vector{Float64},
             setpoints::Vector{Float64},
-            setpoints_in_volts::Bool = false
+            setpoint_kind::AbstractString = "Lifetime Ch1"
         )
     row_count = min(length(times), length(setpoints))
     mkpath(dirname(String(csv_path)))
 
     open(csv_path, "w") do io
-        write(io, "repeats,delay,setpoints_in_volts\n")
-        write(io, string(repeats), ",", string(delay), ",", string(setpoints_in_volts), "\n")
+        write(io, "repeats,delay,setpoint\n")
+        write(io, string(repeats), ",", string(delay), ",", String(setpoint_kind), "\n")
         write(io, "time,setpoint\n")
 
         for idx in 1:row_count
@@ -49,8 +50,13 @@ function read_protocol_csv(csv_path::AbstractString; step_count::Int)
     state_parts = split(lines[2], ","; keepempty=true)
     repeats = something(tryparse(Int, strip(get(state_parts, 1, ""))), 1)
     delay = something(tryparse(Int, strip(get(state_parts, 2, ""))), 0)
-    # The setpoints in volts (the popup's checkbox); `nothing` in a file written before it.
-    setpoints_in_volts = tryparse(Bool, strip(get(state_parts, 3, "")))
+    # What the setpoints are (the popup's menu); in a file of the "Setpoint in volts" checkbox, its kind;
+    # `nothing` in a file from before either (or an unknown kind).
+    column = strip(get(split(lines[1], ","; keepempty=true), 3, ""))
+    value = strip(get(state_parts, 3, ""))
+    in_volts = column == "setpoints_in_volts" ? tryparse(Bool, value) : nothing
+    setpoint_kind = in_volts !== nothing ? (in_volts ? "Voltage" : "Lifetime Ch1") :
+                    column == "setpoint" && value in SETPOINT_KINDS ? String(value) : nothing
 
     times = fill(NaN, step_count)
     setpoints = fill(NaN, step_count)
@@ -63,7 +69,7 @@ function read_protocol_csv(csv_path::AbstractString; step_count::Int)
         setpoints[row_idx] = protocol_parse_csv_float_or_nan(get(parts, 2, ""))
     end
 
-    return (repeats=repeats, delay=delay, times=times, setpoints=setpoints, setpoints_in_volts=setpoints_in_volts)
+    return (repeats=repeats, delay=delay, times=times, setpoints=setpoints, setpoint_kind=setpoint_kind)
 end
 
 @inline function protocol_parse_int_or(raw_text::AbstractString, default::Int)
@@ -113,8 +119,13 @@ end
     return string(value)
 end
 
-"""The Protocol popup's y label: a setpoint is a lifetime the PI holds, or the command voltage (`setpoints_in_volts`)."""
-protocol_setpoint_label(in_volts::Bool)::String = in_volts ? "Setpoint [V]" : "Setpoint [ns]"
+"""The Protocol popup's y label: the unit of the setpoint kind (`SETPOINT_KINDS`)."""
+function protocol_setpoint_label(kind::AbstractString)::String
+    kind == "Voltage" && return "Setpoint [V]"
+    startswith(kind, "Lifetime") && return "Setpoint [ns]"
+    startswith(kind, "Ratio") && return "Setpoint [$(kind[7:end]) photons]"
+    return "Setpoint [ion concentration]"
+end
 
 function protocol_bring_popup_to_front!(screen::GLMakie.Screen)
     try
@@ -177,7 +188,7 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
     controls_layout = GridLayout(popup_layout[2, 1]; tellwidth=false)
     table_layout = GridLayout(popup_layout[3, 1]; tellwidth=false)
 
-    protocol_axis = Axis(plot_layout[1, 1:4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:height => nothing, :title => "Protocol",:xlabel => "Time [s]",:ylabel => protocol_setpoint_label(app.protocol.setpoints_in_volts), :width => nothing))...)
+    protocol_axis = Axis(plot_layout[1, 1:4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:height => nothing, :title => "Protocol",:xlabel => "Time [s]",:ylabel => protocol_setpoint_label(app.protocol.setpoint_kind), :width => nothing))...)
 
     Label(controls_layout[1, 1], "Repeats")
     Label(controls_layout[2, 1], "Delay")
@@ -206,9 +217,12 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
     export_button = Button(controls_layout[2, 3]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Export", :width => 96))...)
     clear_button = Button(controls_layout[1, 4]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Clear", :width => 96))...)
     close_button = Button(controls_layout[2, 4]; merge(BUTTON_ATTRS, Dict{Symbol, Any}(:label => "Close", :width => 96))...)
-    # Unchecked, a setpoint is the lifetime the PI holds; checked, the command voltage written as is, no PI.
-    volts_checkbox = Checkbox(controls_layout[1, 5]; merge(CHECKBOX_ATTRS, Dict{Symbol, Any}(:checked => app.protocol.setpoints_in_volts))...)
-    Label(controls_layout[1, 6], "Setpoint in volts"; halign = :left)
+    # What a setpoint is: the command voltage written as is (no PI), or the quantity the PI holds.
+    Label(controls_layout[1, 5], "Setpoint")
+    kind_menu = Menu(controls_layout[2, 5]; merge(MENU_ATTRS, Dict{Symbol, Any}(:options => SETPOINT_KINDS,
+                                                                                :default => app.protocol.setpoint_kind,
+                                                                                :width => 132, :tellwidth => true))...)
+    selected_kind() = (kind = kind_menu.selection[]; kind isa AbstractString ? String(kind) : app.protocol.setpoint_kind)
 
     step_count = default_step_count
     step_duration_values = copy(saved_times)
@@ -238,7 +252,7 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
                 :width => 48,
                 :displayed_string => protocol_format_cell(step_setpoint_values[step_idx]),
                 :stored_string => protocol_format_cell(step_setpoint_values[step_idx]),
-                :validator => make_float_range_validator(0.0, 10.0)
+                :validator => make_float_range_validator(0.0, 1000.0)      # volts and ns, ratios, ion concentrations
             ))...
         )
 
@@ -303,14 +317,14 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
         app.protocol.delay = protocol_parse_int_or(delay_input.stored_string[], 0)
         app.protocol.times = copy(step_duration_values)
         app.protocol.setpoints = copy(step_setpoint_values)
-        app.protocol.setpoints_in_volts = volts_checkbox.checked[]
+        app.protocol.setpoint_kind = selected_kind()
         sync_runtime_protocol!(app, app_run)
         save_state(app)
         return nothing
     end
 
-    on(volts_checkbox.checked) do in_volts
-        protocol_axis.ylabel[] = protocol_setpoint_label(in_volts)
+    on(kind_menu.selection) do _
+        protocol_axis.ylabel[] = protocol_setpoint_label(selected_kind())
         persist_protocol_state!()
     end
 
@@ -351,7 +365,7 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
             repeats_input.stored_string[] = string(imported.repeats)
             delay_input.displayed_string[] = string(imported.delay)
             delay_input.stored_string[] = string(imported.delay)
-            imported.setpoints_in_volts === nothing || (volts_checkbox.checked[] = imported.setpoints_in_volts)
+            imported.setpoint_kind === nothing || (kind_menu.i_selected[] = findfirst(==(imported.setpoint_kind), SETPOINT_KINDS))
 
             for step_idx in 1:step_count
                 step_duration_values[step_idx] = imported.times[step_idx]
@@ -390,7 +404,7 @@ function open_protocol_popup!(app, app_run, protocol_popup_screen::Base.RefValue
                 delay=delay,
                 times=step_duration_values,
                 setpoints=step_setpoint_values,
-                setpoints_in_volts=volts_checkbox.checked[]
+                setpoint_kind=selected_kind()
             )
 
             @info "Protocol exported" path=csv_path values_count=length(generated_protocol[])

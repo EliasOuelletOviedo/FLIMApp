@@ -161,19 +161,44 @@ function spawn_acquisition_worker!(app_run, out::AnalysisOutput, histograms::Cha
 end
 
 """
-    scan_request(app, app_run, order)::ScanRequest
+    run_modes(app, app_run) -> (excitation_galvos, detection_galvos)
 
-Snapshot of everything the DAQ loop needs for this run's slots, the opto
-laser's PWM included (the Protocol panel's, while its toggle is on).
+How a START excites and detects: with ROIs to scan (ROI on, at least one
+drawn), the Protocol panel's two toggles — Excitation (`excitation_galvos`)
+and Detection (`[clamp] images` off); without (ROI off, or none drawn),
+both by image: the galvos unused, the whole image in one histogram.
 """
-function scan_request(app, app_run, order::Vector{Int}; image_mode::Bool = false)::ScanRequest
+function run_modes(app, app_run)::Tuple{Bool, Bool}
+    app.roi.active && !isempty(app_run.rois[]) || return (false, false)
+    return (app.protocol.excitation_galvos, !app_run.spc.settings.images)
+end
+
+"""What a START's modes read as on the status line ("" for both by the galvos, the usual Realtime)."""
+function run_modes_text(excitation_galvos::Bool, detection_galvos::Bool, images_per_block::Integer, whole_image::Bool)::String
+    excitation_galvos && detection_galvos && return ""
+    blocks = "$(images_per_block) images per block"
+    whole_image && return " (whole image, $blocks)"
+    return " (excitation $(excitation_galvos ? "galvos" : "image"), detection " *
+           (detection_galvos ? "galvos" : "images, $blocks") * ")"
+end
+
+"""
+    scan_request(app, app_run, order; modes=run_modes(app, app_run))::ScanRequest
+
+Snapshot of everything the DAQ loop needs for this run's slots: how it
+excites and detects (`modes`), each ROI's spiral of `POINTS_PER_ROI`
+points, the opto laser's PWM included (at `PWM_FREQUENCY_HZ`, the Protocol
+panel's duty cycle, while its toggle is on).
+"""
+function scan_request(app, app_run, order::Vector{Int}; modes::Tuple{Bool, Bool} = run_modes(app, app_run))::ScanRequest
     p = app.protocol
+    excitation_galvos, detection_galvos = modes
     return ScanRequest(
-        copy(app_run.rois[]), copy(order), app.roi.active && !image_mode,
+        copy(app_run.rois[]), copy(order), app.roi.active,
         app.roi.v_min_x, app.roi.v_max_x, app.roi.v_min_y, app.roi.v_max_y,
-        p.points_per_roi, p.spiral_turns, p.scan_time, p.shift_time,
-        app_run.imported_image_size, app_run.spc.settings.inverser_routage, image_mode,
-        p.PWM_active ? Float64(p.PWM_frequency) : 0.0, p.PWM_duty / 100
+        POINTS_PER_ROI, p.spiral_full_turns, p.scan_time, p.shift_time,
+        app_run.imported_image_size, app_run.spc.settings.inverser_routage, excitation_galvos, detection_galvos,
+        p.PWM_active ? Float64(PWM_FREQUENCY_HZ) : 0.0, p.PWM_duty / 100
     )
 end
 
@@ -182,12 +207,12 @@ end
 
 The opto laser's PWM as the DAQ loop plays it at `rate` (`pwm_samples`):
 the period and its opto phase, in whole samples; `(0, 0)` without PWM or at
-a frequency the NI can't switch (START refuses it, `pwm_refusal`).
+a rate too low for `PWM_FREQUENCY_HZ` (START refuses it, `pwm_refusal`).
 """
 function pwm_played(protocol::ProtocolSettings, rate::Real)::Tuple{Int, Int}
     protocol.PWM_active || return (0, 0)
     try
-        return pwm_samples(protocol.PWM_frequency, protocol.PWM_duty / 100, rate)
+        return pwm_samples(PWM_FREQUENCY_HZ, protocol.PWM_duty / 100, rate)
     catch
         return (0, 0)
     end
@@ -201,8 +226,8 @@ pwm_opto_fraction(protocol::ProtocolSettings, rate::Real)::Float64 =
     pwm_text(protocol, rate)::String
 
 The opto laser's PWM as the DAQ loop plays it — its frequency and duty
-cycle in whole samples, which can differ from the panel's values — for the
-status line and the log; "" without PWM.
+cycle in whole samples, which can differ from `PWM_FREQUENCY_HZ` and the
+panel's duty cycle — for the status line and the log; "" without PWM.
 """
 function pwm_text(protocol::ProtocolSettings, rate::Real)::String
     period, on = pwm_played(protocol, rate)
@@ -214,25 +239,24 @@ end
     pwm_refusal(protocol, rate)::String
 
 Why the opto laser's PWM can't run ("" if it can): the NI switches its
-outputs once per sample, so at most `rate / 2` Hz; at 0 Hz or less the
-toggle on would play no PWM, the opto during the whole scan.
+outputs once per sample, so `PWM_FREQUENCY_HZ` needs a `rate` of twice that
+at least (`[timing] sample_rate_hz`, config/bench.toml).
 """
 function pwm_refusal(protocol::ProtocolSettings, rate::Real)::String
     protocol.PWM_active || return ""
-    f = protocol.PWM_frequency
-    0 < f <= rate / 2 && return ""
-    f <= 0 && return "PWM of $f Hz: at least 1 Hz"
-    return "PWM of $f Hz: at most $(round(Int, rate / 2)) Hz, the NI switching its outputs once per sample ($(round(Int, rate)) Hz)"
+    PWM_FREQUENCY_HZ <= rate / 2 && return ""
+    return "PWM of $PWM_FREQUENCY_HZ Hz: a sample rate of $(2 * PWM_FREQUENCY_HZ) Hz at least ([timing] sample_rate_hz: $(round(Int, rate)) Hz), the NI switching its outputs once per sample"
 end
 
 """
     images_command(rois, order, image_size, settings, dir; pwm=false)::FLIMCore.ImagesROI
 
-The Realtime in images ([clamp] images): the SPC engine images with the
+The detection by image ([clamp] images): the SPC engine images with the
 settings' geometry and bins, every `images_par_bloc` images, the photons of
 each ROI of `order` (its pixels on the `image_size` image it was drawn on,
 `roi_pixel_mask`) — the whole image without ROIs —, each card's stream
-recorded in `dir`/spc ("" : nothing).
+recorded in `dir`/spc ("" : nothing). The k-th ROI of `order` gets code k:
+`order` in drawn order (sorted), so that a ROI's code is its drawn index.
 """
 function images_command(rois::Vector{RoiCoordinates}, order::Vector{Int}, image_size::Tuple{Int, Int},
                         settings::FLIMCore.Reglages, dir::AbstractString; pwm::Bool = false)::FLIMCore.ImagesROI
@@ -246,22 +270,18 @@ end
 """
     images_start_refusal(app, app_run)::String
 
-What keeps the Realtime in images from starting ("" if nothing): the
-protocol, active, gives the command voltage — each of its values must lie
-within 0 V and `command_max_v`; and the ROIs must have been drawn on an
-image of the microscope's scanner (the ROI popup's Image button), whose
-pixels they bin — not on the galvo scan's, whose pixels are the galvos'.
+What keeps the detection by image from starting ("" if nothing): the ROIs
+must have been drawn on an image of the microscope's scanner (the ROI
+popup's Image button), whose pixels they bin — not on the galvo scan's,
+whose pixels are the galvos'. (The protocol in volts is checked for every
+mode, `realtime_start_refusal`.)
 """
 function images_start_refusal(app, app_run)::String
-    if app.protocol.active
-        problem = protocol_volts_problem(app.protocol, app_run.config.command_max_v)
-        isempty(problem) || return "Realtime in images: the protocol gives the command voltage, " * problem
-    end
     split_rois = app.roi.active && !isempty(app_run.rois[])
     split_rois && minimum(app_run.imported_image_size) <= 0 &&
-        return "Realtime in images: no image for the ROIs — take one with the ROI popup's Image button"
+        return "Detection in images: no image for the ROIs — take one with the ROI popup's Image button"
     split_rois && app_run.roi_image_source == :galvos &&
-        return "Realtime in images: the ROIs were drawn on the galvo scan, in the galvos' coordinates — " *
+        return "Detection in images: the ROIs were drawn on the galvo scan, in the galvos' coordinates — " *
                "draw them on an image of the scanner (ROI popup's Image button)"
     return ""
 end
@@ -272,7 +292,7 @@ end
 
 The first of the protocol's values outside 0 V–`limit` (`[limits]
 command_max_v`) when it gives the command voltage — "1.5 V is outside
-0–1.0 V" —, "" if none: in images, and with the protocol in volts.
+0–1.0 V" —, "" if none: with the protocol in volts.
 """
 function protocol_volts_problem(protocol::ProtocolSettings, limit::Real)::String
     bad = [v for v in protocol.setpoints if isfinite(v) && !(0 <= v <= limit)]
@@ -305,24 +325,27 @@ function clamp_command(app, app_run, order::Vector{Int}, dir::AbstractString)::F
 end
 
 """
-    run_info(app, app_run, order; mode="Realtime", session=nothing)::Dict{String, Any}
+    run_info(app, app_run, order; mode="Realtime", session=nothing, settings=nothing, modes=nothing)::Dict{String, Any}
 
 What the journal writes to the run's run.toml (`session_info`,
-analysis/session.jl). For Playback: the session's ROIs and calibration,
-the settings the replay used (the session's or the current ones), and the
-session replayed.
+analysis/session.jl), with how the run excites and detects (`modes`, as
+START took them; `run_modes` by default). For Playback: the session's
+ROIs, modes and calibration, the settings the replay used (the session's
+or the current ones), and the session replayed.
 """
 function run_info(app, app_run, order::Vector{Int}; mode::AbstractString = "Realtime",
-                  session::Union{Nothing, Session} = nothing, settings::Union{Nothing, AnalysisSettings} = nothing)::Dict{String, Any}
+                  session::Union{Nothing, Session} = nothing, settings::Union{Nothing, AnalysisSettings} = nothing,
+                  modes::Union{Nothing, Tuple{Bool, Bool}} = nothing)::Dict{String, Any}
     playback = session !== nothing
     roi_settings = playback ? settings_from_dict(RoiSettings, Dict{String, Any}()) : app.roi
     if playback
         range = get(get(session.info, "roi", Dict{String, Any}()), "galvo_range_mV", nothing)
         range === nothing || ((roi_settings.v_min_x, roi_settings.v_max_x, roi_settings.v_min_y, roi_settings.v_max_y) = Int.(range))
     end
+    excitation_galvos, detection_galvos = playback ? session_modes(session) : something(modes, run_modes(app, app_run))
     info = session_info(;
         mode = playback ? "Playback" : mode, rois = app_run.run_rois, order, roi_active = !isempty(order),
-        roi_settings,
+        roi_settings, excitation_galvos, detection_galvos,
         image_size = playback ? session.image_size : app_run.imported_image_size,
         image_source = playback ? String(get(get(session.info, "roi", Dict{String, Any}()), "image_source", "")) :
                        roi_image_source_name(app_run.roi_image_source),
@@ -375,8 +398,10 @@ detector settings, `irf_mismatches`), the free space in the recording
 folder (`RECORDING_MIN_S` of recording at least), the DAQ loop (it plays
 the scans, the routing code and the pass signal), the SPC engine (it
 counts), and at most `ROI_MAX` ROIs (the routing code has 4 bits, code 0
-reserved), the opto PWM (`pwm_refusal`) and, with the protocol in volts,
-its values within 0 V and `command_max_v` (`protocol_volts_problem`).
+reserved), the opto PWM (`pwm_refusal`), with the protocol in volts its
+values within 0 V and `command_max_v` (`protocol_volts_problem`), and a
+setpoint on channel 2 or the photon ratio (`needs_two_channels`) with a
+single card.
 """
 function realtime_start_refusal(app, app_run)::String
     isempty(app_run.offline) || return app_run.offline
@@ -399,6 +424,9 @@ function realtime_start_refusal(app, app_run)::String
         problem = protocol_volts_problem(app.protocol, app_run.config.command_max_v)
         isempty(problem) || return "Protocol in volts: " * problem
     end
+    kind = app.protocol.setpoint_kind
+    app.protocol.active && needs_two_channels(kind) && length(app_run.spc.settings.series) < 2 &&
+        return "Setpoint $kind: needs channel 2, and [verification] series lists one card"
     return ""
 end
 
@@ -463,7 +491,8 @@ function start_pressed(app, app_run, blocks)
     mode isa AbstractString || (mode = "Realtime")
     mode in (PLAYBACK_SESSION_MODE, PLAYBACK_CURRENT_MODE) && return start_playback!(app, app_run, blocks, mode)
 
-    images = app_run.spc.settings.images
+    excitation_galvos, detection_galvos = run_modes(app, app_run)
+    images = !detection_galvos
     refusal = realtime_start_refusal(app, app_run)
     isempty(refusal) && images && (refusal = images_start_refusal(app, app_run))
     if !isempty(refusal)
@@ -492,8 +521,9 @@ function start_pressed(app, app_run, blocks)
 
         rois = app_run.rois[]
         split_rois = app.roi.active && !isempty(rois)
-        # In images, every ROI at once: no visiting order, ROI k is code k.
-        order = !split_rois ? Int[] : images ? collect(1:length(rois)) : fetch(Threads.@spawn roi_visit_order(rois))
+        # The galvos visit the ROIs in the shortest tour; without them, every ROI at once (ROI k is code k).
+        galvos = excitation_galvos || detection_galvos
+        order = !split_rois ? Int[] : galvos ? fetch(Threads.@spawn roi_visit_order(rois)) : collect(1:length(rois))
 
         if !app_run.running[]
             @info "Acquisition stopped before it finished starting"
@@ -502,7 +532,6 @@ function start_pressed(app, app_run, blocks)
 
         app_run.run_mode = "Realtime"
         app_run.run_rois = copy(rois)
-        app_run.image_mode = images
         prepare_run_display!(app, app_run, blocks; n_rois = split_rois ? length(rois) : 1)
         app_run.roi_order = order
 
@@ -516,10 +545,11 @@ function start_pressed(app, app_run, blocks)
             return nothing
         end
         app_run.run_dir = dir
-        @info "Realtime run started" session=dir rois=length(rois) order=order roi_active=app.roi.active scan_ms=app.protocol.scan_time shift_ms=app.protocol.shift_time images=images images_per_block=app_run.spc.settings.images_par_bloc pwm=pwm_text(app.protocol, app_run.config.sample_rate_hz) protocol_in_volts=protocol_in_volts(app.protocol)
+        @info "Realtime run started" session=dir rois=length(rois) order=order roi_active=app.roi.active scan_ms=app.protocol.scan_time shift_ms=app.protocol.shift_time excitation=(excitation_galvos ? "galvos" : "image") detection=(images ? "images" : "galvos") images_per_block=app_run.spc.settings.images_par_bloc pwm=pwm_text(app.protocol, app_run.config.sample_rate_hz) protocol_in_volts=protocol_in_volts(app.protocol)
         app_run.run_open = true
         app_run.run_started_ns = time_ns()
-        send_journal!(ex.journal, JournalRunStart(t, dir, run_info(app, app_run, order), loaded_irfs(), loaded_irf_info()))
+        send_journal!(ex.journal, JournalRunStart(t, dir, run_info(app, app_run, order; modes = (excitation_galvos, detection_galvos)),
+                                                  loaded_irfs(), loaded_irf_info()))
 
         # The SPC engine first: its FIFO counts from the start; the passes are
         # delimited by the cards' own markers, and the photons of the moves
@@ -530,23 +560,24 @@ function start_pressed(app, app_run, blocks)
         ex.stop[] = false
         app_run.spc.clamp_stop_sent = false
         if images
-            # Whole images: the galvos still, the commands the protocol's voltages, no PI.
-            FLIMCore.commander!(engine, images_command(rois, order, app_run.imported_image_size, app_run.spc.settings, dir;
+            # Detection by image: the scanner's whole images, each ROI's pixels (codes in drawn order).
+            FLIMCore.commander!(engine, images_command(rois, sort(order), app_run.imported_image_size, app_run.spc.settings, dir;
                                                        pwm = app.protocol.PWM_active))
-            send_command!(ex, StartCommand(scan_request(app, app_run, order; image_mode = true)))
-            out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats, image_full_scale_v=app_run.config.command_full_scale_v,
-                                 command_full_scale_v=app_run.config.command_full_scale_v)
         else
             FLIMCore.commander!(engine, clamp_command(app, app_run, order, dir))
-            send_command!(ex, StartCommand(scan_request(app, app_run, order)))
-            out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats, command_full_scale_v=app_run.config.command_full_scale_v)
         end
+        send_command!(ex, StartCommand(scan_request(app, app_run, order; modes = (excitation_galvos, detection_galvos))))
+        # The excitation by image lights every ROI at once: one PI for all of them.
+        out = AnalysisOutput(ex; roi_order=order, stats=app_run.worker_stats, global_pi=!excitation_galvos,
+                             command_full_scale_v=app_run.config.command_full_scale_v)
         spawn_acquisition_worker!(app_run, out, engine.histogrammes, initial_guess)
         pwm = pwm_text(app.protocol, app_run.config.sample_rate_hz)
-        # The protocol in volts (in images it always is): no PI while it gives the commands.
-        volts = !images && protocol_in_volts(app.protocol) ? " · protocol in volts, no PI" : ""
-        show_status!(blocks, (images ? "Realtime in images ($(app_run.spc.settings.images_par_bloc) per block)" : "Realtime") *
-                             ": session $(basename(dir))" * volts * (isempty(pwm) ? "" : " · " * pwm))
+        modes = run_modes_text(excitation_galvos, detection_galvos, app_run.spc.settings.images_par_bloc, !split_rois)
+        # What the 1064 nm follows: the protocol's voltages, or a PI on the setpoint's quantity; nothing without a protocol.
+        control = !app.protocol.active ? " · no active protocol: 1064 nm off" :
+                  protocol_in_volts(app.protocol) ? " · protocol in volts, no PI" :
+                  " · PI on $(app.protocol.setpoint_kind)" * (excitation_galvos ? "" : ", one for all ROIs")
+        show_status!(blocks, "Realtime" * modes * ": session $(basename(dir))" * control * (isempty(pwm) ? "" : " · " * pwm))
         return nothing
     end
 
@@ -668,13 +699,14 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
     spc_info = get(session.info, "spc", Dict{String, Any}())
     fin_par_m3 = Bool(get(spc_info, "fin_par_m3", true))
     images = Bool(get(spc_info, "images", false))
+    excitation_galvos, _ = session_modes(session)
     # The opto laser's PWM as it was recorded: the photons of its opto phases thrown away again.
     recorded = settings_from_dict(ProtocolSettings, get(session.info, "protocol", Dict{String, Any}()))
     if images
-        # A Realtime in images: the same ROI binning over the recorded images, block by block.
+        # A detection by image: the same ROI binning over the recorded images, block by block.
         settings_images = deepcopy(app_run.spc.settings)
         settings_images.images_par_bloc = Int(get(spc_info, "images_par_bloc", settings_images.images_par_bloc))
-        FLIMCore.commander!(engine, images_command(session.rois, order, session.image_size, settings_images, "";
+        FLIMCore.commander!(engine, images_command(session.rois, sort(order), session.image_size, settings_images, "";
                                                    pwm = recorded.PWM_active))
     else
         sample_rate = isfinite(sample_s) && sample_s > 0 ? 1 / sample_s : app_run.config.sample_rate_hz
@@ -684,11 +716,14 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
     end
 
     app_run.run_mode = "Playback"
-    app_run.image_mode = images
     app_run.run_rois = copy(session.rois)
     app_run.roi_order = order
     prepare_run_display!(app, app_run, blocks; n_rois = isempty(order) ? 1 : max(1, maximum(order)))
     settings = playback.session_settings ? session_analysis_settings(session) : nothing
+    # A Realtime in images from before the Excitation toggle: its protocol always gave volts.
+    if settings !== nothing && images && !haskey(get(session.info, "roi", Dict{String, Any}()), "excitation")
+        settings.protocol.setpoint_kind = "Voltage"
+    end
     settings === nothing || publish_settings!(ex, settings)
 
     t = time()
@@ -706,8 +741,7 @@ function start_playback!(app, app_run, blocks, mode::AbstractString)
                                                              loaded_irfs(), loaded_irf_info()))
 
     out = AnalysisOutput(ex; roi_order = order, drive_outputs = false, stats = app_run.worker_stats,
-                         image_full_scale_v = images ? app_run.config.command_full_scale_v : NaN,
-                         command_full_scale_v = app_run.config.command_full_scale_v)
+                         global_pi = !excitation_galvos, command_full_scale_v = app_run.config.command_full_scale_v)
     spawn_acquisition_worker!(app_run, out, engine.histogrammes, selected_initial_guess(blocks);
                               source_done = playback.source_done)
     what = playback.session_settings ? "session settings" : "current settings"

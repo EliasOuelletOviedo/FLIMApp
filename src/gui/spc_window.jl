@@ -159,9 +159,9 @@ function build_spc_figure(view::SpcView)
             end
         end
     end
-    # The Realtime in images: START acquires whole images (galvos off) and bins each ROI's pixels
-    # over `images_par_bloc` images ([clamp] images, images_par_bloc).
-    Label(settings[7, 1]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Realtime: whole images (galvos off)", :halign => :right, :fontsize => 11))...)
+    # The detection by image (the Protocol panel's Detection toggle off): START acquires whole images and
+    # bins each ROI's pixels over `images_par_bloc` images ([clamp] images, images_par_bloc).
+    Label(settings[7, 1]; merge(LABEL_ATTRS, Dict{Symbol, Any}(:text => "Detection: whole images", :halign => :right, :fontsize => 11))...)
     images_toggle = Toggle(settings[7, 2]; merge(TOGGLE_ATTRS, Dict{Symbol, Any}(:active => s.images))...)
     on(images_toggle.active) do active
         active == view.settings.images && return             # already so (the refresh tick follows the Protocol panel's)
@@ -174,6 +174,7 @@ function build_spc_figure(view::SpcView)
         :validator => make_int_range_validator(1, 100_000)))...)
     on(block_box.stored_string) do text
         value = tryparse(Int, strip(text))
+        value == view.settings.images_par_bloc && return     # already so (the refresh tick follows the Protocol panel's)
         accepted = value !== nothing && spc_edit_setting!(view, :images_par_bloc, value)
         accepted || (block_box.displayed_string[] = string(view.settings.images_par_bloc))
     end
@@ -214,7 +215,7 @@ function build_spc_figure(view::SpcView)
 
     widgets = SpcWindowWidgets(connect_button, image_button, single_button, irf_button, unlock_button,
                                SpcWindowAxes(image_axes, decay_axis, rates_axis, Dict{Int, Tuple{Int, Int}}(), 0.0),
-                               images_toggle)
+                               images_toggle, block_box)
     return fig, widgets, (width, height)
 end
 

@@ -101,7 +101,8 @@ mutable struct SpcWindowWidgets
     irf_button::Any
     unlock_button::Any
     axes::Any                  # SpcWindowAxes, gui/spc_window.jl
-    images_toggle::Any         # "Realtime: whole images", kept on [clamp] images (`sync_images_toggles!`)
+    images_toggle::Any         # "Detection: whole images", kept on [clamp] images (`sync_images_toggles!`)
+    block_box::Any             # "Images / block", kept on [clamp] images_par_bloc
 end
 
 """
@@ -145,7 +146,8 @@ mutable struct SpcView
     irf_acquisition::Bool                  # the running Single is the IRF button's (`spc_toggle_irf!`)
     irf_fin::Union{Nothing, FLIMCore.Fin}  # its end, for the refresh tick to import (`finish_irf_acquisition!`)
     irf_sums::Dict{Int, Vector{Int}}       # per card, the sum of its Singles so far (shown dashed)
-    panel_images_toggle::Any               # the Protocol panel's Galvos / Image masks toggle (`sync_images_toggles!`)
+    panel_detection_toggle::Any            # the Protocol panel's Detection toggle: on = galvos (`sync_images_toggles!`)
+    panel_block_box::Any                   # its Image averaging box ([clamp] images_par_bloc)
 end
 
 """
@@ -181,7 +183,7 @@ function SpcView(settings_path::AbstractString, journal::Union{Nothing, JournalQ
                    nothing, FLIMCore.Alerte[], nothing, "", 0.0, time(), UInt64(0), false, nothing, 0.0,
                    :none, true, false, false, Dict{Int, FLIMCore.ImageSomme}(), Observable{Any}(nothing), "", "", nothing,
                    Observable("SPC: not connected"), Observable(""), Observable(""), Observable(""),
-                   false, nothing, Dict{Int, Vector{Int}}(), nothing)
+                   false, nothing, Dict{Int, Vector{Int}}(), nothing, nothing)
     for card in spc_displayed_cards(view)
         view.cards[card] = SpcCard(card)
     end
@@ -544,18 +546,18 @@ end
 The latest count rate (CFD, /s) of each channel's card — the card the last
 check put on that channel ([verification] series), card k on channel k + 1
 before any check — for the counts bar. The engine sends them every 0.5 s,
-measuring or not. 1.0 (the bar's bottom) for a channel without a rate
+measuring or not. 10.0 (the bar's bottom) for a channel without a rate
 younger than `max_age_s` (engine stopped, card absent).
 """
 function spc_channel_rates(view::SpcView; max_age_s::Real = 2.0)
-    out = [1.0, 1.0]
+    out = [10.0, 10.0]
     channel_of = Dict{Int, Int}()
     view.check === nothing || foreach(c -> c.canal > 0 && (channel_of[c.carte] = c.canal), view.check.cartes)
     for (k, card) in view.cards
         r = card.last_rates
         (r === nothing || !r.valide || !isfinite(r.cfd) || time() - r.t > max_age_s) && continue
         channel = get(channel_of, k, k + 1)
-        1 <= channel <= 2 && (out[channel] = max(r.cfd, 1.0))
+        1 <= channel <= 2 && (out[channel] = max(r.cfd, 10.0))
     end
     return out[1], out[2]
 end
@@ -880,16 +882,30 @@ end
 """
     sync_images_toggles!(view, protocol_panel_shown)
 
-Keep the two toggles of the Realtime in images on `[clamp] images`: the
-Protocol panel's Galvos / Image masks (while that panel is shown) and the
-SPC window's "Realtime: whole images" (while it is open) — either edits the
-setting (`spc_edit_setting!`), the refresh tick brings the other along.
+Keep the detection's widgets on the settings: on `[clamp] images`, the
+Protocol panel's Detection toggle (on = the galvos, so `!images`; while
+that panel is shown) and the SPC window's "Detection: whole images" (while
+it is open); on `images_par_bloc`, the panel's Image averaging and the
+window's "Images / block" boxes (unless being edited). Either side edits
+the setting (`spc_edit_setting!`), the refresh tick brings the other along.
 """
 function sync_images_toggles!(view::SpcView, protocol_panel_shown::Bool)
-    images = view.settings.images
-    follow!(toggle) = (toggle === nothing || toggle.active[] == images || (toggle.active[] = images); nothing)
-    protocol_panel_shown && follow!(view.panel_images_toggle)
-    view.widgets !== nothing && view.window_open && follow!(view.widgets.images_toggle)
+    images, block = view.settings.images, string(view.settings.images_par_bloc)
+    follow!(toggle, value) = (toggle === nothing || toggle.active[] == value || (toggle.active[] = value); nothing)
+    function follow_box!(box)
+        (box === nothing || box.focused[] || box.stored_string[] == block) && return nothing
+        box.displayed_string[] = block
+        box.stored_string[] = block
+        return nothing
+    end
+    if protocol_panel_shown
+        follow!(view.panel_detection_toggle, !images)
+        follow_box!(view.panel_block_box)
+    end
+    if view.widgets !== nothing && view.window_open
+        follow!(view.widgets.images_toggle, images)
+        follow_box!(view.widgets.block_box)
+    end
     return nothing
 end
 

@@ -102,21 +102,24 @@ function settings_from_dict(::Type{T}, d::AbstractDict) where {T}
         catch
         end
     end
-    return x
+    return migrate_saved!(x, d)          # a session from before a schema change (FLIMApp.jl)
 end
 
 """Samples of `ms` milliseconds at the DAQ loop's rate, as `build_scan_pattern` rounds them."""
 samples_of(ms::Real, rate_hz::Real) = round(Int, ms * rate_hz / 1000)
 
 """
-    session_info(; mode, rois, order, roi_active, roi_settings, image_size, image_source, spc, spc_settings_path,
-                 layout, protocol, controller, irf_source, daq, sample_rate_hz)::Dict{String, Any}
+    session_info(; mode, rois, order, roi_active, roi_settings, image_size, image_source, spc, excitation_galvos,
+                 detection_galvos, spc_settings_path, layout, protocol, controller, irf_source, daq,
+                 sample_rate_hz)::Dict{String, Any}
 
 A session's run.toml: mode, code versions, the ROIs with their routing codes
 and fitted channel, the pixel -> galvo calibration (voltage range, image
 size, calibration reference, `roi_scan_segments`) and what made the ROIs'
 image (`image_source`: "scanner", "galvo scan" — the galvos' own
-coordinates —, "" unknown), the SPC settings
+coordinates —, "" unknown), how the run excited and detected
+(`roi.excitation`, `roi.detection`: "galvos" or by image; `spc.images`,
+which Playback reads, the detection actually used), the SPC settings
 ([spc_module], declared [dcc], routing), the DAQ (`daq`, plus the sample
 rate and the scan and pause in samples — the programmed pass length), the
 layout, protocol and controller settings at START (`settings_dict`: what
@@ -124,7 +127,7 @@ Playback reapplies by default), and the IRF's source.
 """
 function session_info(; mode::AbstractString, rois::Vector{RoiCoordinates}, order::Vector{Int}, roi_active::Bool,
                       roi_settings::RoiSettings, image_size::Tuple{Int, Int}, image_source::AbstractString = "",
-                      spc::FLIMCore.Reglages,
+                      spc::FLIMCore.Reglages, excitation_galvos::Bool = true, detection_galvos::Bool = !spc.images,
                       spc_settings_path::AbstractString = "", layout::LayoutSettings = LayoutSettings(),
                       protocol::ProtocolSettings, controller::ControllerSettings, irf_source::AbstractString = "",
                       daq::Dict{String, Any} = Dict{String, Any}(), sample_rate_hz::Real = 10_000.0)::Dict{String, Any}
@@ -136,7 +139,8 @@ function session_info(; mode::AbstractString, rois::Vector{RoiCoordinates}, orde
         "mode" => String(mode),
         "started" => timestamp_string(time()),
         "versions" => code_versions(),
-        "pi_outputs" => mode == "Playback" ? "simulated: the recorded stimulation doesn't change" : "applied, one PI per ROI",
+        "pi_outputs" => mode == "Playback" ? "simulated: the recorded stimulation doesn't change" :
+                        excitation_galvos ? "applied, one PI per ROI" : "applied, one PI for all ROIs (their photon-weighted lifetime)",
         "roi" => Dict{String, Any}(
             "active" => roi_active,
             "visit_order" => order,
@@ -146,8 +150,10 @@ function session_info(; mode::AbstractString, rois::Vector{RoiCoordinates}, orde
             "image_size" => collect(image_size),
             "image_source" => String(image_source),
             "calibration_size" => roi_voltage_calibration_size,
-            "points_per_roi" => protocol.points_per_roi,
-            "spiral_turns" => protocol.spiral_turns
+            "points_per_roi" => POINTS_PER_ROI,
+            "spiral_full_turns" => protocol.spiral_full_turns,
+            "excitation" => excitation_galvos ? "galvos" : "image",
+            "detection" => detection_galvos ? "galvos" : "images"
         ),
         "spc" => Dict{String, Any}(
             "settings" => String(spc_settings_path),
@@ -156,7 +162,7 @@ function session_info(; mode::AbstractString, rois::Vector{RoiCoordinates}, orde
             "canaux" => spc.canaux_clamp,
             "inverser_routage" => spc.inverser_routage,
             "fin_par_m3" => spc.fin_par_m3,
-            "images" => spc.images,                              # the Realtime in images: whole images, ROI binning
+            "images" => !detection_galvos,                       # the detection by image: whole images, ROI binning
             "images_par_bloc" => spc.images_par_bloc,
             "code_hors_roi" => FLIMCore.CODE_HORS_ROI,
             "code_sans_roi" => FLIMCore.CODE_SANS_ROI,
@@ -217,6 +223,19 @@ function read_session(dir::AbstractString)::Session
     irf_path = joinpath(dir, "irf.csv")
     irfs = isfile(irf_path) ? read_irf_csv(irf_path) : Matrix{Float64}[]
     return Session(String(dir), info, rois, order, (dims[1], dims[2]), irfs, read_irf_info(irf_info_path(irf_path)))
+end
+
+"""
+    session_modes(session) -> (excitation_galvos, detection_galvos)
+
+How a session excited and detected (run.toml's `roi.excitation` and
+`spc.images`). From before the Excitation toggle: by image both, exactly in
+the Realtime in images; by the galvos both otherwise.
+"""
+function session_modes(s::Session)::Tuple{Bool, Bool}
+    images = Bool(get(get(s.info, "spc", Dict{String, Any}()), "images", false))
+    excitation = get(get(s.info, "roi", Dict{String, Any}()), "excitation", images ? "image" : "galvos")
+    return (excitation == "galvos", !images)
 end
 
 """
