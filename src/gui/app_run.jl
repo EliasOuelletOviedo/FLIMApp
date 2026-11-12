@@ -294,11 +294,9 @@ Runtime state of the GUI thread. NOT serialized.
   its debug report goes at the end
 - `worker_stats::WorkerStats`: the analysis worker's counters of the current
   run, diagnosed once a second (diagnostics.jl)
-- `image_mode::Bool`: the current (or last) run is a Realtime in images
-  (`[clamp] images`), its commands the protocol's voltages
 - `stimulation::Vector{Float64}`: per frame, 1 while a command is above 0
-  (the stimulation is on), NaN otherwise — what the plots highlight in
-  images, where there is no lifetime setpoint
+  (the stimulation is on), NaN otherwise — what the plots highlight when
+  there is no lifetime setpoint (the protocol in volts)
 - `diagnosed_t::Float64`: the time of the last `EtatClamp` diagnosed
 - `galvo_scan::Union{Nothing, GalvoScan}`: the ROI popup's galvo scan while
   it runs (gui/galvo_scan.jl); START waits for it
@@ -343,7 +341,6 @@ mutable struct AppRun
     run_dir::String
     worker_stats::WorkerStats
     diagnosed_t::Float64
-    image_mode::Bool
     stimulation::Vector{Float64}
     galvo_scan::Union{Nothing, GalvoScan}     # the ROI popup's galvo scan while it runs (gui/galvo_scan.jl)
     roi_image_source::Symbol                  # what made the ROIs' image: :scanner (Image button), :galvos (Galvo scan), :none
@@ -374,7 +371,6 @@ function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); s
         "",
         WorkerStats(),
         0.0,
-        false,
         Float64[],
         nothing,
         :none

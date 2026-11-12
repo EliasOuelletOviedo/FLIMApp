@@ -291,10 +291,10 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
 - the **DAQ loop** plays slots of `Scan time` then `Shift time` (Protocol
   panel), all on the AO sample clock. A `Shift time` of 0 means no pause:
   2 samples (0.2 ms) still separate the scans, the pass signal's shortest
-  low, which delimits the passes. Without ROIs, the lasers stay on through
-  them, under the reserved code (their photons are thrown away), so the
-  light and the opto PWM never stop. With ROIs, they are the galvos' jump
-  to the next ROI, lasers off.
+  low, which delimits the passes: the galvos' jump to the next ROI, the
+  lasers that follow the spirals off. Without ROIs (excitation and
+  detection by image, below), the lasers stay on the whole slot, so the
+  light and the opto PWM never stop.
   - the **routing code** on P0.4–P0.7: during each scan, the ROI's code;
     while the galvos move, during the pause and the entry, the reserved
     code ("hors ROI"), whose photons are thrown away when the stream is
@@ -312,13 +312,16 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
 - the **1064 nm laser gate**: AO 1 of the 6110 (`channels.commands`,
   `[limits] gate_1064_v` = 5 V in config/bench.toml), on the same sample
   clock, at 5 V while the laser is to emit — its power command on AO 0
-  above 0 V — and the gate P0.0 is high (during each scan, the whole slot
-  in images); 0 V otherwise, so closed whenever the command is 0 V
-  (controller 1 off, protocol inactive or at 0 V, PI at 0 %). AO 0 stays
-  PI command 1 (0–1 V). `gate_1064_v = 0` makes AO 1 PI command 2 again.
-- the **opto PWM** (Protocol panel: *PWM frequency*, then the *Duty cycle*
-  in % with its toggle) alternates opto and acquisition, for the whole run
-  (from the next START), in Realtime and in Realtime in images.
+  above 0 V — where the slot lights the 1064 nm (each scan with the
+  excitation by the galvos, the whole slot by image, see *Excitation /
+  Detection* below); 0 V otherwise, so closed whenever the command is 0 V
+  (controller 1 off, no active protocol, a protocol at 0 V, PI at 0 %).
+  AO 0 stays PI command 1 (0–1 V). `gate_1064_v = 0` makes AO 1 PI
+  command 2 again.
+- the **opto PWM** at 1000 Hz, fixed (`PWM_FREQUENCY_HZ`; Protocol panel:
+  the *Duty cycle* in % with its toggle) alternates opto and acquisition,
+  for the whole run (from the next START), in Realtime and in Realtime in
+  images.
   - **Opto phase:** the first *Duty cycle* % of each period. The 1064 nm
     power (AO 0) and gate (AO 1) are at their command, and the photons are
     thrown away: the NI writes the reserved routing code.
@@ -328,14 +331,14 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
     each scan), so the 850 nm is on in both phases.
   - **Timing:** the periods run on from one slot to the next. The NI
     switches once per sample, so a period is a whole number of samples at
-    `[timing] sample_rate_hz`: at 10 kHz, at most 5000 Hz, and the duty
-    cycle in steps of one sample (10 % at 1000 Hz). START refuses a faster
-    PWM. The status line and `run.toml` (`daq.pwm_samples`) give the PWM as
-    played.
-  - **SPC side:** in Realtime, the passes throw away the reserved code
-    anyway. In images, the engine is told to (`ImagesROI(...;
-    jeter_hors_roi)`). The routing diagnosis expects that share of the
-    reserved code (`EtatClamp.opto`).
+    `[timing] sample_rate_hz`: at 10 kHz, 10 samples, so the duty cycle in
+    steps of one sample, 10 % (10 to 90 %). START refuses the PWM below
+    2000 Hz of sampling. The status line and `run.toml` (`daq.pwm_samples`)
+    give the PWM as played.
+  - **SPC side:** with the detection by the galvos, the passes throw away
+    the reserved code anyway. By image, the engine is told to
+    (`ImagesROI(...; jeter_hors_roi)`). The routing diagnosis expects that
+    share of the reserved code (`EtatClamp.opto`).
 - the **SPC engine** measures in FIFO mode (`[clamp]` in `config/spc.toml`,
   256 channels by default) and cuts each card's photon stream into passes
   at the markers the card itself time-stamped: a late read only fills the
@@ -353,43 +356,70 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
   1, "3T0089/IN2" = channel 2), whatever the module numbers.
 - the **analysis worker** fits each pass, per ROI and per channel (binning
   window and Kalman observer per ROI and channel), and runs **one PI per
-  ROI**: the DAQ loop writes each ROI's own commands during that ROI's
-  scans.
-- the **protocol in volts** (the Protocol popup's *Setpoint in volts*
-  checkbox): the active protocol's setpoints are no longer the lifetime
-  the PI holds (ns) but the command voltage written as is (V), no PI.
-  - **Outputs:** the DAQ loop reads the protocol at each slot's start and
-    writes its value on Out 1 if controller 1 is on, Out 2 if controller 2
-    is (every ROI the same); off the protocol (before its delay, after its
-    repeats), 0 V.
-  - **Live:** the checkbox applies from the next slot, as the protocol's
-    edits do. The PI restarts from zero when the box is unchecked.
-  - **START** refuses a value outside 0 V–`command_max_v`. The frames
-    record the voltages as commands, with no lifetime setpoint.
-  - **Images:** in the Realtime in images, the protocol always gives the
-    command voltage.
+  ROI** with the excitation by the galvos (the DAQ loop writes each ROI's
+  own commands during that ROI's scans), **one PI for all ROIs** with the
+  excitation by image (on their pooled quantity, the photons of all of
+  them together; one command for the whole field). **Without an active
+  protocol, no PI and no 1064 nm** (0 V); off its schedule (before its
+  delay, after its repeats) as well.
+- the **setpoint menu** (the Protocol popup's *Setpoint*) says what the
+  active protocol's setpoints are; the popup's y axis takes its unit.
+  - **Voltage:** the command voltage written as is (V), no PI. The DAQ
+    loop reads the protocol at each slot's start and writes its value on
+    Out 1 if controller 1 is on, Out 2 if controller 2 is (every ROI the
+    same); off the protocol, 0 V. START refuses a value outside
+    0 V–`command_max_v`; the frames record the voltages as commands.
+  - **Lifetime Ch1 / Lifetime Ch2:** the channel's lifetime (ns), filtered
+    by its Kalman observer, as the PI's measure.
+  - **Ratio Ch1/Ch2 / Ratio Ch2/Ch1:** the ratio of the two channels'
+    photons (as the Channel ratio plot), filtered by its own observer per
+    ROI; pooled over the ROIs, the ratio of all their photons.
+  - **Ion concentration:** `(9.5/τ − 1)/0.025` of channel 1's filtered
+    lifetime (`CONCENTRATION_CHANNEL`; pooled, of the pooled lifetime).
+  - **Both controllers** regulate that one quantity, each with its own
+    gains, inversion and on/off. START refuses channel 2's lifetime and
+    the ratios with a single card (`[verification] series`).
+  - **Live:** the menu applies from the next pass, as the protocol's edits
+    do; another quantity restarts the PI from zero. The setpoint line is
+    drawn on the plot of that quantity (Lifetime, Channel ratio in the
+    same direction, Ion concentration). The protocol CSV keeps the kind
+    (a file of the former checkbox: Voltage when checked).
 
-**Realtime in images** (the Protocol panel's ROI toggle, *Galvos* /
-*Image masks*, or the SPC window's "Realtime: whole images" box: both set
-`[clamp] images`, from the next START): START acquires whole images instead of scanning the
-ROIs with the galvos — the microscope's scanner images (line and frame
-clocks on M1/M2), the galvos stay at 0 V, the gate P0.0 (and P0.1) stays
-high. Every "Images / block" images (`images_par_bloc`, consecutive
-blocks), the photons of each ROI's pixels make one histogram per ROI and
-channel (the ROIs as drawn on the ROI popup's image, of the scanner's
-size; ROI off or none drawn: the whole image), fit and shown like the
-passes, recorded the same way (Playback replays them). No PI: while the
-protocol is active, its value at each moment is the command voltage
-(0 V to `command_max_v`), on Out 1 if controller 1 is on, Out 2 if
-controller 2 is; 0 V otherwise.
+**Excitation / Detection** (the Protocol panel's two toggles under ROI,
+from the next START; on: by the galvos, off: by the scanner's images):
 
-**ROI off** (or no ROI drawn): the galvos stay still and the slots keep the
-same scan/pause rhythm; the routing lines carry code 1 during the scans
-(the whole field) and the reserved code during the pauses; each pass gives
-one histogram of every photon.
+- **Excitation**, the 1064 nm (`excitation_galvos`, saved with the app's
+  state): by the galvos, each ROI's spiral at that ROI's own command (one
+  PI per ROI), 0 V while the galvos move; by image, the whole run at one
+  command for the whole field (one PI for all ROIs).
+- **Detection**, the 850 nm and the photons (`[clamp] images` in
+  `config/spc.toml`, also the SPC window's "Detection: whole images" box):
+  by the galvos, the gate P0.0 and the ROI's routing code during each
+  spiral, the reserved code and the gate low while the galvos move — the
+  passes, one ROI each, in round-robin; by image, the gate high and the
+  no-ROI code the whole run, the microscope's scanner imaging (line and
+  frame clocks on M1/M2): every *Image averaging* images (`images_par_bloc`,
+  also the SPC window's "Images / block", consecutive blocks) the photons
+  of each ROI's pixels make one histogram per ROI and channel (the ROIs as
+  drawn on the ROI popup's image, of the scanner's size), fit and shown
+  like the passes, recorded the same way (Playback replays them).
+- The galvos spiral over the ROIs when either goes by the galvos; both by
+  image, they stay at 0 V and the slots only pace the commands. Excitation
+  by the galvos with detection by image: the galvos steer the 1064 nm onto
+  each ROI while the scanner images the whole field, the 850 nm on.
+- The Protocol panel fades (50 %) and locks the spinners the modes don't
+  use: *Spiral turns*, *Scan time* and *Shift time* when both go by image,
+  *Image averaging* when the detection goes by the galvos.
+- *Spiral turns* counts complete turns (5 by default); each spiral has
+  1000 points (`POINTS_PER_ROI`), spread evenly over the scan's samples.
 
-**ROI on**: the galvos scan the ROIs, one per slot, and P0.4–P0.7 carry the
-ROI's routing code: its drawn index `c` (1–15). The cards' routing inputs
+**ROI off** (or no ROI drawn): excitation and detection by image whatever
+the toggles — the galvos stay at 0 V, the whole image makes one histogram
+per block of *Image averaging* images, one PI (or the protocol's voltages)
+for the whole field.
+
+**ROI on**, detection by the galvos: the galvos scan the ROIs, one per
+slot, and P0.4–P0.7 carry the ROI's routing code: its drawn index `c` (1–15). The cards' routing inputs
 are active low, so the NI writes NOT(c) and the card reads `c`
 (`inverser_routage = true` in `config/spc.toml`). Code 0 — what the card
 reads when nothing drives the lines — is reserved: at most **15 ROIs**, and
@@ -447,7 +477,7 @@ How the frame is played and imaged:
 
 Clicking the button again (or closing the popup) stops the scan; the lines
 already scanned are still shown. START waits for the scan to end. The
-Realtime in images refuses ROIs drawn on a galvo scan, because they are in
+detection by image refuses ROIs drawn on a galvo scan, because they are in
 the galvos' coordinates rather than the scanner's. Lines missing from the
 image are reported as IMG-03.
 
@@ -635,6 +665,7 @@ The Realtime and Playback analysis worker (`start_realtime`):
 - Takes the SPC engine's passes (`FLIMCore.HistoClamp`, one per scan, cut at the cards' M0/M3 markers)
 - Finds each pass's ROI from the routing code its photons carry (`pass_roi`)
 - Per ROI and channel: sliding-window binning, MLE lifetime fit, Kalman observer; one PI per ROI
+  (excitation by the galvos) or one for all ROIs (excitation by image, `GlobalPi`)
 
 #### `runtime.jl`
 Background task lifecycle:
@@ -670,7 +701,7 @@ On button press → start_pressed()
   ↓
 SPC engine (Clamp) + DAQ loop slots + analysis worker (acquisition.jl)
   ↓
-Worker takes one pass per scan, fits lifetimes per ROI and channel, one PI per ROI
+Worker takes one pass per scan (or per ROI and block of images), fits lifetimes per ROI and channel, one PI per ROI or for all
   ↓
 Consumer updates Observables → Plots update reactively
   ↓

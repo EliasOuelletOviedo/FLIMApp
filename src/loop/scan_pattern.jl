@@ -44,8 +44,19 @@ commands and PWM running — under the reserved code (its photons thrown
 away): the light never stops. With ROIs it is the galvos' jump to the next
 ROI, lasers off as in any shift.
 
-The 1064 nm commands (AO 0, and the gate on AO 1) follow the gate P0.0:
-at their value wherever it is high, 0 V elsewhere (`prepare_slot!`).
+The excitation and the detection each go by the galvos or by the
+scanner's images (`ScanRequest.excitation_galvos`/`detection_galvos`, the
+Protocol panel's two toggles):
+
+- the 1064 nm commands (AO 0, and the gate on AO 1, `laser_1064`): by the
+  galvos, at the ROI's command during each scan, 0 V during the shift; by
+  the image, the whole slot (one command for the whole field);
+- the 850 nm gate P0.0 and the routing code: by the galvos, as above (the
+  ROI's code during each scan, the reserved code while the galvos move);
+  by the image, the gate high and the no-ROI code the whole slot — the
+  scanner's images give each photon's ROI (its mask);
+- the galvos spiral over the ROIs when either goes by the galvos; both by
+  image, they stay at 0 V and the slots only pace the commands.
 
 The ROI popup's galvo scan (`RasterRequest`) is one frame, one slot per
 line: the line's ramp (gate and pass signal high, `CODE_SANS_ROI`), then
@@ -89,7 +100,10 @@ Everything needed to produce any slot: per visiting position `k`, the
 galvo path (volts) and port-0 bytes of one slot, plus the entry move.
 `roi_order[k]` is the drawn index of the ROI at position `k` (0 when the
 galvos don't scan). `idle_lines`: the port-0 byte of the entry (the
-reserved routing code, everything else off).
+reserved routing code, everything else off). `laser_1064[j, k]`: where the
+1064 nm (AO 0 and its gate AO 1) is at its command — the spirals with the
+excitation by the galvos, the whole slot by the image —, 0 V elsewhere.
+`image_mode`: the galvos not used (excitation and detection by image).
 """
 struct ScanPattern
     sample_rate_hz::Float64
@@ -108,10 +122,16 @@ struct ScanPattern
     raster::Bool
     pwm_period::Int        # samples per period of the opto laser's PWM; 0: no PWM
     pwm_on::Int            # its opto phase, at the start of each period
+    laser_1064::BitMatrix  # same shape as `lines`
 end
 
+# Without its own mask, the 1064 nm where the gate P0.0 is high.
+gate_mask(lines::AbstractMatrix{UInt8}) = BitMatrix((lines .& do_bit(DO_BIT_GATE)) .!= 0)
 ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, image_mode = false, raster = false) =
     ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, image_mode, raster, 0, 0)
+ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, image_mode, raster, pwm_period, pwm_on) =
+    ScanPattern(rate, idle, scanning, order, n_scan, n_shift, n, entry_x, entry_y, x, y, lines, image_mode, raster,
+                pwm_period, pwm_on, gate_mask(lines))
 
 slots_per_cycle(p::ScanPattern) = size(p.x, 2)
 slot_position(p::ScanPattern, s::Integer) = mod(s, slots_per_cycle(p)) + 1
@@ -165,7 +185,11 @@ end
     build_scan_pattern(request, cfg)::ScanPattern
 
 Sample the slots of `request` at `cfg.sample_rate_hz`. Each spiral point is
-held for an equal share of the scan. Throws if the scan time is shorter
+held for an equal share of the scan. The detection sets the port-0 lines
+(by the galvos: the gate and the ROI's code during each scan, the reserved
+code during the shift; by image: the gate and the no-ROI code the whole
+slot), the excitation the 1064 nm (`laser_1064`: by the galvos, during
+each scan; by image, the whole slot). Throws if the scan time is shorter
 than a sample, if there are more ROIs than routing codes (`ROI_MAX`), if a
 scan, pause or entry is too short for the pass counter (2 samples), or if
 any galvo sample breaks the limits (`check_galvo_path`, loop/safety.jl) —
@@ -178,34 +202,33 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
     n_scan >= 1 || error("scan time of $(request.scan_time_ms) ms is shorter than one sample at $(rate) Hz")
     n_pulse = clamp(round(Int, cfg.sync_pulse_s * rate), 1, n_scan)
     n = n_scan + n_shift
-    scanning = request.roi_active && !isempty(request.rois)
+    scanning = galvos_used(request) && request.roi_active && !isempty(request.rois)
     if !isempty(cfg.pass_counter) && min(n_scan, n_shift) < 2
         throw(SafetyError("scan time, and a shift other than 0, must last at least 2 samples ($(2000 / rate) ms) for the pass counter"))
     end
     scan_bits = do_bit(DO_BIT_GATE) | do_bit(DO_BIT_ENABLE)
     off_roi = routing_byte(FLIMCore.CODE_HORS_ROI, request.invert_routing)
+    no_roi = routing_byte(FLIMCore.CODE_SANS_ROI, request.invert_routing)
     pwm_period, pwm_on = pwm_samples(request.pwm_hz, request.pwm_duty, rate)
-
-    if request.image_mode
-        # The Realtime in images: the microscope's scanner images; the galvos
-        # stay at 0 V and the gate (and enable) high the whole slot — no
-        # pause; the slots only pace the commands (the protocol's voltages).
-        lines = fill(routing_byte(FLIMCore.CODE_SANS_ROI, request.invert_routing) | scan_bits, n, 1)
-        lines[1:n_pulse, 1] .|= pulse_bits(true)
-        return ScanPattern(rate, off_roi, false, [0], n_scan, n_shift, n, zeros(n_shift), zeros(n_shift),
-                           zeros(n, 1), zeros(n, 1), lines, true, false, pwm_period, pwm_on)
-    end
+    # The 1064 nm: by the galvos, during each scan; by the image, the whole slot.
+    n_laser = request.excitation_galvos ? n_scan : n
 
     if !scanning
-        # Galvos still, same scan/pause rhythm: the no-ROI code during the
-        # scan, the reserved code during the pause.
+        # Galvos still, same scan/pause rhythm. Detection by the galvos: the
+        # no-ROI code during the scan, the reserved code during the pause; by
+        # image (the microscope's scanner images): the gate (and enable) high
+        # and the no-ROI code the whole slot — no pause. Both by image: the
+        # slots only pace the commands.
         lines = zeros(UInt8, n, 1)
-        lines[1:n_scan, 1] .= routing_byte(FLIMCore.CODE_SANS_ROI, request.invert_routing) | scan_bits
-        # No pause (shift 0): the lasers stay on through the pass signal's gap, its photons thrown away.
-        lines[n_scan+1:n, 1] .= off_roi | (request.shift_time_ms == 0 ? scan_bits : do_bit(DO_BIT_ENABLE))
+        lines[1:n_scan, 1] .= no_roi | scan_bits
+        lit_gap = request.shift_time_ms == 0        # no pause: the lasers on through the pass signal's gap
+        lines[n_scan+1:n, 1] .= !request.detection_galvos ? no_roi | scan_bits :
+                                off_roi | (lit_gap ? scan_bits : do_bit(DO_BIT_ENABLE))
         lines[1:n_pulse, 1] .|= pulse_bits(true)
+        laser = falses(n, 1)
+        laser[1:(lit_gap ? n : n_laser), 1] .= true
         return ScanPattern(rate, off_roi, false, [0], n_scan, n_shift, n, zeros(n_shift), zeros(n_shift),
-                           zeros(n, 1), zeros(n, 1), lines, false, false, pwm_period, pwm_on)
+                           zeros(n, 1), zeros(n, 1), lines, image_mode(request), false, pwm_period, pwm_on, laser)
     end
 
     length(request.rois) <= ROI_MAX ||
@@ -215,9 +238,13 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
     x = zeros(n, R)
     y = zeros(n, R)
     lines = zeros(UInt8, n, R)
+    laser = falses(n, R)
+    laser[1:n_laser, :] .= true
 
     for (k, segment) in enumerate(segments)
-        code = routing_byte(FLIMCore.code_routage(segment.roi_index), request.invert_routing)
+        # Detection by image: the scanner's images give each photon's ROI, the
+        # 850 nm on the whole slot — the galvos only steer the 1064 nm.
+        code = request.detection_galvos ? routing_byte(FLIMCore.code_routage(segment.roi_index), request.invert_routing) : no_roi
 
         n_points = length(segment.points)
         for j in 1:n_scan
@@ -231,7 +258,8 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
         next_center = segments[mod1(k + 1, R)].center
         half_cosine_move!(view(x, n_scan+1:n, k), x[n_scan, k], next_center[1] / 1000)
         half_cosine_move!(view(y, n_scan+1:n, k), y[n_scan, k], next_center[2] / 1000)
-        lines[n_scan+1:n, k] .= off_roi | do_bit(DO_BIT_ENABLE)     # the galvos move: reserved code
+        # The galvos move: the reserved code, the 850 nm off — kept on by image.
+        lines[n_scan+1:n, k] .= request.detection_galvos ? off_roi | do_bit(DO_BIT_ENABLE) : no_roi | scan_bits
     end
 
     first_center = segments[1].center
@@ -241,7 +269,7 @@ function build_scan_pattern(request::ScanRequest, cfg::BenchConfig)::ScanPattern
     check_galvo_path(vcat(vec(x), entry_x), vcat(vec(y), entry_y), cfg)
 
     return ScanPattern(rate, off_roi, true, [s.roi_index for s in segments], n_scan, n_shift, n,
-                       entry_x, entry_y, x, y, lines, false, false, pwm_period, pwm_on)
+                       entry_x, entry_y, x, y, lines, false, false, pwm_period, pwm_on, laser)
 end
 
 """Share of each galvo-scan line spent on the flyback to the next line's start (half-cosine move)."""
@@ -323,12 +351,12 @@ buffer_samples(b::SlotBuffers) = length(b.lines)
     prepare_slot!(buffers, pattern, s, command1_v, command2_v)
 
 Fill `buffers` with slot `s`: its ROI's galvo path and lines, the two
-command voltages wherever the gate P0.0 is high — during the scan, the
-whole slot in images, and the pass signal's gap of a 0 ms shift without
-ROIs — and 0 V elsewhere (the shift). With the opto laser's PWM
-(`pattern.pwm_period` > 0), the commands only during its opto phases, which
-carry the reserved routing code; 0 V during its acquisition phases. No
-allocation.
+command voltages wherever the pattern lights the 1064 nm (`laser_1064`:
+during the scan with the excitation by the galvos, the whole slot by the
+image, and the pass signal's gap of a 0 ms shift without ROIs) and 0 V
+elsewhere. With the opto laser's PWM (`pattern.pwm_period` > 0), the
+commands only during its opto phases, which carry the reserved routing
+code; 0 V during its acquisition phases. No allocation.
 """
 function prepare_slot!(buffers::SlotBuffers, pattern::ScanPattern, s::Integer, command1_v::Float64, command2_v::Float64)
     n = pattern.slot_samples
@@ -341,8 +369,9 @@ function prepare_slot!(buffers::SlotBuffers, pattern::ScanPattern, s::Integer, c
     period, opto = pattern.pwm_period, pattern.pwm_on
     slot_start = entry_samples(pattern) + s * n          # the run's sample count at the slot's start: the PWM runs on
     reserved = pattern.idle_lines & 0xf0                 # the reserved routing code (bits 4–7)
+    laser = pattern.laser_1064
     @inbounds for j in 1:n
-        on = (lines[j] & do_bit(DO_BIT_GATE)) != 0         # the 1064 nm where the gate P0.0 is high
+        on = laser[offset + j]                           # the 1064 nm: the spiral, or the whole slot by image
         if on && period > 0
             if mod(slot_start + j - 1, period) < opto    # opto: the 1064 nm on, its photons thrown away
                 commands[j], commands[n + j] = command1_v, command2_v

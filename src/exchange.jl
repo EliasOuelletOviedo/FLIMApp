@@ -135,14 +135,20 @@ end
 Everything the DAQ loop needs to build the slot pattern, copied from the
 GUI's state at START (the loop never reads `AppState`/`AppRun` itself).
 `order` is the ROI visiting order (`roi_visit_order`, roi_geometry.jl). The
-galvos scan the ROIs only when `roi_active` and `rois` isn't empty;
-otherwise they stay at 0 V with the same scan/pause rhythm.
-`invert_routing` (`[clamp] inverser_routage` in config/spc.toml): write
-NOT(code) on P0.4–P0.7 so the SPC card, whose routing inputs are active
-low, reads the code itself. `image_mode` (`[clamp] images`): the Realtime
-in images — the galvos don't move, the gate stays high, and the commands
-are the protocol's voltages (`image_mode_commands`), no PI. `pwm_hz` > 0:
-the opto laser's PWM (the Protocol panel's), the first `pwm_duty` (0–1) of
+galvos scan the ROIs only when they are used (`galvos_used`), `roi_active`
+and `rois` isn't empty; otherwise they stay at 0 V with the same
+scan/pause rhythm. `invert_routing` (`[clamp] inverser_routage` in
+config/spc.toml): write NOT(code) on P0.4–P0.7 so the SPC card, whose
+routing inputs are active low, reads the code itself.
+
+`excitation_galvos` (the Protocol panel's Excitation toggle): the 1064 nm
+during each spiral only, at its ROI's command; off, by the image: the
+whole slot. `detection_galvos` (Detection, `[clamp] images` off): the
+850 nm gate P0.0 and the ROI's routing code during each spiral, the
+reserved code while the galvos move; off, by the scanner's images: the
+gate high and the no-ROI code the whole slot (ROI masks in the images).
+Both off (`image_mode`): the galvos don't move. `pwm_hz` > 0:
+the opto laser's PWM (`PWM_FREQUENCY_HZ` from the GUI), the first `pwm_duty` (0–1) of
 each period the opto phase — the 1064 nm on, the reserved routing code —,
 the rest the acquisition with the 1064 nm off (`prepare_slot!`).
 """
@@ -160,15 +166,27 @@ struct ScanRequest
     shift_time_ms::Int
     image_size::Tuple{Int, Int}
     invert_routing::Bool
-    image_mode::Bool
+    excitation_galvos::Bool
+    detection_galvos::Bool
     pwm_hz::Float64
     pwm_duty::Float64
 end
 
+# `image_mode`: both by image (the galvos still); otherwise both by the galvos.
 ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_per_roi, spiral_turns,
             scan_time_ms, shift_time_ms, image_size, invert_routing = true, image_mode = false) =
     ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_per_roi, spiral_turns,
-                scan_time_ms, shift_time_ms, image_size, invert_routing, image_mode, 0.0, 0.0)
+                scan_time_ms, shift_time_ms, image_size, invert_routing, !image_mode, !image_mode, 0.0, 0.0)
+ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_per_roi, spiral_turns,
+            scan_time_ms, shift_time_ms, image_size, invert_routing, image_mode::Bool, pwm_hz::Real, pwm_duty::Real) =
+    ScanRequest(rois, order, roi_active, v_min_x, v_max_x, v_min_y, v_max_y, points_per_roi, spiral_turns,
+                scan_time_ms, shift_time_ms, image_size, invert_routing, !image_mode, !image_mode, pwm_hz, pwm_duty)
+
+"""Do the galvos serve this run — for the excitation, the detection or both? Neither: they stay at 0 V."""
+galvos_used(r::ScanRequest) = r.excitation_galvos || r.detection_galvos
+
+"""Both by image (the Realtime in images before the Excitation toggle): the galvos still, the gate high."""
+image_mode(r::ScanRequest) = !galvos_used(r)
 
 """
     RasterRequest

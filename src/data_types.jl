@@ -146,20 +146,65 @@ Base.@kwdef mutable struct ControllerSettings
 end
 
 """
+The opto laser's PWM frequency (Hz), fixed — no longer a Protocol panel
+field: at 10 kHz a period of 10 samples, so the duty cycle in steps of 10 %
+(`pwm_samples`, loop/scan_pattern.jl).
+"""
+const PWM_FREQUENCY_HZ = 1000
+
+"""
+The points of each ROI's spiral (`shape_spiral_points`), fixed — no longer
+a Protocol panel field. `build_scan_pattern` spreads them evenly over the
+scan's samples: each held for an equal share of the scan (950 ms at 10 kHz:
+9 or 10 samples), or, in a scan shorter than one sample per point, one point
+per sample, the spiral still covered end to end.
+"""
+const POINTS_PER_ROI = 1000
+
+"""
+What the protocol's setpoints are (`ProtocolSettings.setpoint_kind`, the
+Protocol popup's menu): the command voltage written as is ("Voltage", no
+PI), or the quantity the PI holds — a channel's lifetime (ns), the ratio
+of the two channels' photons, or the ion concentration
+(`ion_concentration` of channel `CONCENTRATION_CHANNEL`'s lifetime).
+"""
+const SETPOINT_KINDS = ["Voltage", "Lifetime Ch1", "Lifetime Ch2", "Ratio Ch1/Ch2", "Ratio Ch2/Ch1", "Ion concentration"]
+
+"""The channel whose lifetime gives the ion concentration the PI holds (channel 1 for now)."""
+const CONCENTRATION_CHANNEL = 1
+
+"""The ion concentration of a lifetime `τ` (ns): the sensor's calibration, as the Ion concentration plot shows it."""
+ion_concentration(τ::Real) = (9.5 / τ - 1) / 0.025
+
+"""
     ProtocolSettings
 
 Experimental protocol schedule: `times`/`setpoints` are parallel vectors of
-`PROTOCOL_STEP_COUNT` per-step durations and setpoints. A setpoint is the
-lifetime (ns) the PI holds; with `setpoints_in_volts` (the Protocol popup's
-checkbox), the command voltage written itself, no PI (`protocol_in_volts`) —
-as in the Realtime in images, where it always is.
+`PROTOCOL_STEP_COUNT` per-step durations and setpoints. `setpoint_kind`
+(`SETPOINT_KINDS`, the Protocol popup's menu) says what a setpoint is: the
+command voltage written itself ("Voltage", no PI, `protocol_in_volts`), or
+the quantity the PI holds — a channel's lifetime, a photon ratio, the ion
+concentration. Without an active protocol, no 1064 nm: no PI, the commands
+at 0 V. (A save from before the menu holds `setpoints_in_volts`, its
+checkbox: `migrate_saved!` turns it into the kind.)
 
-`points_per_roi`/`spiral_turns`/`scan_time`/`shift_time` are the
+`excitation_galvos` (the Protocol panel's Excitation toggle): the 1064 nm
+steered by the galvos onto each ROI, during its spiral, at that ROI's own
+command (one PI per ROI); off, by the image — the whole run, one command
+for the whole field (one PI for all ROIs, on their photon-weighted
+lifetime). The detection is `[clamp] images` (config/spc.toml, the
+Detection toggle): the 850 nm and the photons by the galvos (round-robin
+passes) or by the scanner's images (ROI masks, `images_par_bloc` images
+per block). Both by image: the galvos aren't used.
+
+`spiral_full_turns`/`scan_time`/`shift_time` are the
 ROI galvo-scan parameters (roi_geometry.jl, loop/scan_pattern.jl), editable from the Protocol panel
-(handlers_protocol.jl) — see `roi_scan_segments`/`roi_scan_waveform` in
-roi.jl for how they're used.
+(handlers_protocol.jl), each ROI's spiral of `POINTS_PER_ROI` points and
+`spiral_full_turns` complete turns — see `roi_scan_segments` in
+roi_geometry.jl for how they're used. (A save from before full turns holds
+`spiral_turns`, half turns: ignored, the default 5 instead.)
 
-`PWM_active`: the opto laser's PWM — every period of `PWM_frequency` (Hz),
+`PWM_active`: the opto laser's PWM — every period of `PWM_FREQUENCY_HZ`,
 its first `PWM_duty` % the 1064 nm laser (power and gate) at its command and
 no acquisition (its photons thrown away), the rest the acquisition with the
 1064 nm off, for the whole run (`prepare_slot!`, loop/scan_pattern.jl).
@@ -170,12 +215,11 @@ Base.@kwdef mutable struct ProtocolSettings
     delay::Int = 0
     times::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
     setpoints::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
-    setpoints_in_volts::Bool = false
-    PWM_frequency::Int = 1000
+    setpoint_kind::String = "Lifetime Ch1"
     PWM_duty::Int = 50
     PWM_active::Bool = false
-    points_per_roi::Int = 100
-    spiral_turns::Int = 10
+    excitation_galvos::Bool = true
+    spiral_full_turns::Int = 5
     scan_time::Int = 950
     shift_time::Int = 50
 end
