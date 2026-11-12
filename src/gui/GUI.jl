@@ -6,7 +6,7 @@ Makie-based graphical user interface for the FLIM application.
 Implements:
 - Main figure layout with grid system
 - Plotting axes for histograms, lifetimes, and ion concentration
-- Control panels (Layout, Controller, Protocol, Console)
+- Control panels (Layout, Controller, Protocol, ROI)
 - Interactive widgets (buttons, text boxes, menus, spinners)
 - Theme-aware styling and colors
 
@@ -130,7 +130,7 @@ function make_control_widgets!(button_grid, panelbtn_grid, app_run)
         :layout     => Button(panelbtn_grid[1, 1]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "Layout"))...),
         :controller => Button(panelbtn_grid[1, 2]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "Controller"))...),
         :protocol   => Button(panelbtn_grid[1, 3]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "Protocol"))...),
-        :console    => Button(panelbtn_grid[1, 4]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "Console"))...)
+        :roi        => Button(panelbtn_grid[1, 4]; merge(PANEL_ATTRS, Dict{Symbol, Any}(:label => "ROI"))...)
     )
 
     return (start_button=start, stop_button=stop, irf_path_textbox=irf_path, irf_button=irf_button,

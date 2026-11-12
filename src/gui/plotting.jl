@@ -394,7 +394,6 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol;
     if selection == "Command"
         add_setpoint_highlight!(axis, plot)
         series_line!(axis, plot, app_run.timestamps, app_run.command1; color=PLOT_COLOR_CH1, linewidth=PLOT_LINEWIDTH)
-        series_line!(axis, plot, app_run.timestamps, app_run.command2; color=PLOT_COLOR_CH2, linewidth=PLOT_LINEWIDTH)
     elseif selection == "Lifetime"
         add_setpoint_highlight!(axis, plot)
         draw_setpoint_line!(axis, plot, app_run, selection, app.protocol.setpoint_kind, show_ch1, show_ch2)

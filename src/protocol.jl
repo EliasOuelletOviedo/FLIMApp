@@ -103,7 +103,7 @@ end
 Whether the protocol, active, gives the command voltage (the Protocol
 popup's menu at "Voltage", `setpoint_kind`): its value at each moment is
 written as is on the outputs whose controller is on, no PI — the DAQ loop
-reads it slot by slot (`slot_commands`, `protocol_volts_commands`).
+reads it slot by slot (`slot_command`, `protocol_volts_command`).
 """
 protocol_in_volts(protocol::ProtocolSettings)::Bool = protocol.active && protocol.setpoint_kind == "Voltage"
 

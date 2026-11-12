@@ -198,7 +198,7 @@ DisplayState() = DisplayState(
 """
     reset_diagnostics!(d::DisplayState)
 
-Restart the §9 measurements (at START, and from the Console panel).
+Restart the §9 measurements (at START).
 """
 function reset_diagnostics!(d::DisplayState)
     d.tick_count = 0
@@ -269,9 +269,9 @@ Runtime state of the GUI thread. NOT serialized.
 - `ch1`/`ch2::ChannelSeries`: latest-frame snapshot (Histogram plot only)
 - `ch1_rois`/`ch2_rois::Vector{RoiChannelSeries}`: per-channel, per-ROI
   histories, one entry per drawn ROI in ROI mode (a single entry otherwise)
-- `timestamps`, `protocol_setpoint`, `command1`, `command2::Vector{Float64}`:
-  global per-frame histories — each frame's commands are its ROI's (one PI
-  per ROI): with several ROIs the Command plot interleaves them
+- `timestamps`, `protocol_setpoint`, `command1::Vector{Float64}`: global
+  per-frame histories — each frame's command is its ROI's (one PI per ROI):
+  with several ROIs the Command plot interleaves them
 - `i::Int`: latest frame index
 - `hist_time::Observable{Vector{Int64}}`: histogram time axis
 - `protocol::Observable{ProtocolSettings}`: normalized protocol (protocol popup preview)
@@ -325,7 +325,6 @@ mutable struct AppRun
     timestamps::Vector{Float64}
     protocol_setpoint::Vector{Float64}
     command1::Vector{Float64}
-    command2::Vector{Float64}
     i::Int
     hist_time::Observable{Vector{Int64}}
     protocol::Observable{ProtocolSettings}
@@ -356,7 +355,7 @@ function AppRun(cfg::BenchConfig = bench_config_from_dict(Dict{String, Any}(); s
         false, UInt64(0), false,
         ChannelSeries(), ChannelSeries(),
         [RoiChannelSeries()], [RoiChannelSeries()],
-        Float64[], Float64[], Float64[], Float64[], 0,
+        Float64[], Float64[], Float64[], 0,
         Observable(collect(1:DEFAULT_HISTOGRAM_RESOLUTION)),
         Observable(ProtocolSettings()),
         Observable(RoiCoordinates[]),

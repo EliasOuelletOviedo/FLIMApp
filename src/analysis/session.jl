@@ -523,7 +523,7 @@ function clamp_series_model(; basal_ns::AbstractVector{<:Real} = [2.45, 2.50, 2.
     times[1:2] .= (clamp_s, return_s)
     setpoints[1] = clamp_ns
     protocol = ProtocolSettings(active = true, delay = round(Int, basal_s), repeats = clamps, times = times, setpoints = setpoints)
-    controller = ControllerSettings(ch1_on = true, ch1_inv = true, P1 = 50.0, I1 = 5.0, ch2_on = false)
+    controller = ControllerSettings(ch1_on = true, ch1_inv = true, P1 = 50.0, I1 = 5.0)
     description = "clamp series on channel 1: $(basal_s) s basal ($(join(basal_ns, " / ")) ns by ROI), then $clamps × " *
                   "($(clamp_s) s clamped at $(clamp_ns) ns + $(return_s) s return); first order τ = $(tau_s) s, " *
                   "white noise σ = $(noise_ns) ns per pass; channel 2 constant at the basal level"

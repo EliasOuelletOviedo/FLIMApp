@@ -3,8 +3,8 @@ gui/debug_report.jl
 
 The debug report: one text file with what is needed to find what went
 wrong at the bench, to read or to send as it is. Written at the end of
-every run (`debug_report.txt` in its folder), when the app closes and with
-the Console panel's button (`<journal>/debug/`). Every section is written
+every run (`debug_report.txt` in its folder) and when the app closes
+(`<journal>/debug/`). Every section is written
 on its own: one that fails says so and the others are still there.
 
 Sections: versions and environment; the problems seen, with their codes and
@@ -84,7 +84,7 @@ function debug_report_text(app_run; app = nothing)::String
         kv("iteration max", "$(round(1000 * d.loop_iteration_max_s; digits = 2)) ms")
         kv("margin min", "$(round(1000 * d.loop_margin_min_s; digits = 2)) ms of $(round(1000 * d.loop_deadline_s; digits = 2)) ms")
         s = d.last_slot
-        s === nothing || kv("last slot", "slot $(s.slot), ROI $(s.roi), visit $(s.visit), commands $(s.command1_v) / $(s.command2_v) V")
+        s === nothing || kv("last slot", "slot $(s.slot), ROI $(s.roi), visit $(s.visit), 1064 nm command $(s.command1_v) V, gate $(s.command2_v) V")
         kv("journal", "$(pending_journal(app_run.exchange.journal)) pending, $(app_run.exchange.journal.dropped[]) dropped")
     end
 

@@ -75,7 +75,6 @@ struct AcquisitionSample
     ch1::ChannelFrame
     ch2::ChannelFrame
     command1::Float64
-    command2::Float64
     timestamps::Float64
     protocol_setpoint::Float64
     frame_index::UInt32
@@ -87,9 +86,9 @@ struct AcquisitionSample
     acquired_at::Float64
 end
 
-AcquisitionSample(ch1, ch2, command1, command2, timestamps, protocol_setpoint, frame_index, pass,
+AcquisitionSample(ch1, ch2, command1, timestamps, protocol_setpoint, frame_index, pass,
                   pass_start_s, pass_end_s, complete, acquired_at) =
-    AcquisitionSample(ch1, ch2, command1, command2, timestamps, protocol_setpoint, frame_index, pass,
+    AcquisitionSample(ch1, ch2, command1, timestamps, protocol_setpoint, frame_index, pass,
                       pass_start_s, pass_end_s, complete, "", acquired_at)
 
 # =============================================================================
@@ -123,11 +122,13 @@ end
 """
     ControllerSettings
 
-Hardware controller configuration for the two PI output channels. No `D`
-gain: the derivative term was dropped in favor of a Kalman observer
-(`KalmanState`/`kalman_update!`, smoothing.jl) feeding the P/I error terms a
-filtered lifetime instead of the raw fit — see `process_frame!`
-(acquisition.jl).
+The controller (the Protocol panel's "Controller"): the PI whose output is
+the 1064 nm power command (AO 0, `command1`), its inversion and on/off, its
+output and mode menus, and its gains. No `D` gain: the derivative term was
+dropped in favor of a Kalman observer (`KalmanState`/`kalman_update!`,
+smoothing.jl) feeding the P/I error terms a filtered measure instead of the
+raw fit — see `process_frame!` (acquisition.jl). (A save from before holds
+a second controller's `ch2_*`, `P2`, `I2`: ignored.)
 """
 Base.@kwdef mutable struct ControllerSettings
     ch1_inv::Bool = false
@@ -137,12 +138,6 @@ Base.@kwdef mutable struct ControllerSettings
     freq::Int = 1000
     P1::Float64 = 0.0
     I1::Float64 = 0.0
-    ch2_inv::Bool = false
-    ch2_on::Bool = false
-    ch2_out::String = "Out 2"
-    ch2_mode::String = "Digital"
-    P2::Float64 = 0.0
-    I2::Float64 = 0.0
 end
 
 """
@@ -242,7 +237,9 @@ end
 """
     ConsoleSettings
 
-Console/logging settings (no fields yet).
+Console/logging settings (no fields). Its panel is gone, but `AppState`
+keeps the field: the state file (~/.flimapp/AppState.jls) is shared with
+the other branches, whose `load_state` needs every top-level field.
 """
 Base.@kwdef mutable struct ConsoleSettings end
 
@@ -255,7 +252,7 @@ Base.@kwdef mutable struct ConsoleSettings end
 
 Persistent user preferences, serialized to `state_file_path()` to survive
 across sessions. `current_panel` is the active UI panel (:layout,
-:controller, :protocol, :console); the settings fields group the per-panel
+:controller, :protocol, :roi); the settings fields group the per-panel
 configuration.
 """
 mutable struct AppState

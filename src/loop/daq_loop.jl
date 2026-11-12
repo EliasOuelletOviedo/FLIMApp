@@ -202,37 +202,36 @@ function read_span!(hw::Hardware, readback::Matrix{Float64}, n::Integer, cfg::Be
 end
 
 """
-    slot_commands(pattern, s, ex, cfg) -> (command1, command2)
+    slot_command(pattern, s, ex, cfg)::Float64
 
-The commands slot `s` carries, in % of `command_full_scale_v` (the PI's
-unit): none in the galvo scan, whose commands and 1064 nm gate stay at 0 V;
-the protocol's voltages at the slot's start with the protocol in volts
-(the Protocol popup's checkbox, `protocol_in_volts`, read slot by slot) —
-no PI —; otherwise the latest PI commands of the ROI it scans (each ROI
-has its own controllers; ROI 1 without ROI scanning; with the excitation
-by image, the one PI's, the same for every ROI). Without an active
-protocol, the PI gives none: 0 V.
+The 1064 nm power command slot `s` carries, in % of `command_full_scale_v`
+(the PI's unit): none in the galvo scan, whose command and 1064 nm gate
+stay at 0 V; the protocol's voltage at the slot's start with the protocol
+in volts (the Protocol popup's "Voltage", `protocol_in_volts`, read slot by
+slot) — no PI —; otherwise the latest PI command of the ROI it scans (each
+ROI has its own PI; ROI 1 without ROI scanning; with the excitation by
+image, the one PI's, the same for every ROI). Without an active protocol,
+the PI gives none: 0 V.
 """
-function slot_commands(pattern::ScanPattern, s::Integer, ex::Exchange, cfg::BenchConfig)::NTuple{2, Float64}
-    pattern.raster && return (NaN, NaN)
+function slot_command(pattern::ScanPattern, s::Integer, ex::Exchange, cfg::BenchConfig)::Float64
+    pattern.raster && return NaN
     settings = current_settings(ex)
-    protocol_in_volts(settings.protocol) && return protocol_volts_commands(settings, slot_start_s(pattern, s), cfg)
-    return command_values(ex, max(1, slot_roi(pattern, s)))
+    protocol_in_volts(settings.protocol) && return protocol_volts_command(settings, slot_start_s(pattern, s), cfg)
+    return command_value(ex, max(1, slot_roi(pattern, s)))
 end
 
 """
     write_slot!(hw, buffers, pattern, s, cfg, ex, written_commands)
 
-Prepare slot `s` with its commands (`slot_commands`), check it, write it,
-and remember the command voltages it carries (for its summary, published
-once it has played).
+Prepare slot `s` with its command (`slot_command`), check it, write it,
+and remember the voltages it carries on AO 0 and AO 1 (for its summary,
+published once it has played).
 """
 function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s::Integer,
                      cfg::BenchConfig, ex::Exchange, written_commands::Matrix{Float64})
-    command1, command2 = slot_commands(pattern, s, ex, cfg)
-    command1_v = command_volts(command1, cfg)
-    # AO 1: the 1064 nm laser gate (`[limits] gate_1064_v`), open only while the laser is to emit — or PI command 2.
-    command2_v = cfg.gate_1064_v > 0 ? gate_1064_volts(command1_v, cfg) : command_volts(command2, cfg)
+    command1_v = command_volts(slot_command(pattern, s, ex, cfg), cfg)
+    # AO 1: the 1064 nm laser gate (`[limits] gate_1064_v`), open only while the laser is to emit; 0 V without a gate.
+    command2_v = cfg.gate_1064_v > 0 ? gate_1064_volts(command1_v, cfg) : 0.0
     prepare_slot!(buffers, pattern, s, command1_v, command2_v)
     check_slot(buffers, cfg)
     hw_write!(hw, buffers)
@@ -257,27 +256,26 @@ gate_1064_volts(command1_v::Real, cfg::BenchConfig)::Float64 = command1_v > 0 ? 
 slot_start_s(p::ScanPattern, s::Integer) = (entry_samples(p) + s * p.slot_samples) / p.sample_rate_hz
 
 """
-    protocol_volts_commands(settings, t, cfg) -> (command1, command2)
+    protocol_volts_command(settings, t, cfg)::Float64
 
 The Realtime with the protocol in volts (`protocol_in_volts`) has no PI:
 while the protocol is active, its value at `t` (s since the run started)
-is a voltage, written
-on the outputs whose controller is on (Out 1: `ch1_on`, Out 2: `ch2_on`);
-otherwise, and off the protocol (before its delay, after its repeats),
-0 V. In percent of `command_full_scale_v`, as the PI's commands, for
-`command_volts` — which keeps it within 0 V and `command_max_v`.
+is the 1064 nm power command's voltage, written while the controller is
+on (`ch1_on`); otherwise, and off the protocol (before its delay, after
+its repeats), 0 V. In percent of `command_full_scale_v`, as the PI's
+command, for `command_volts` — which keeps it within 0 V and
+`command_max_v`.
 """
-function protocol_volts_commands(settings::AnalysisSettings, t::Real, full_scale_v::Real)
+function protocol_volts_command(settings::AnalysisSettings, t::Real, full_scale_v::Real)::Float64
     p = settings.protocol
     volts = p.active ? protocol_setpoint_at(p, t) : NaN
     percent = isfinite(volts) ? 100 * volts / full_scale_v : NaN
-    c = settings.controller
-    return (c.ch1_on ? percent : NaN, c.ch2_on ? percent : NaN)
+    return settings.controller.ch1_on ? percent : NaN
 end
-protocol_volts_commands(settings::AnalysisSettings, t::Real, cfg::BenchConfig) = protocol_volts_commands(settings, t, cfg.command_full_scale_v)
+protocol_volts_command(settings::AnalysisSettings, t::Real, cfg::BenchConfig) = protocol_volts_command(settings, t, cfg.command_full_scale_v)
 
 # Below this, a garbage-collector pause (a few hundred ms have been measured
-# during heavy fitting, see the Console panel) can miss a slot.
+# during heavy fitting, see the debug report) can miss a slot.
 const SHORT_DEADLINE_S = 0.5
 
 """

@@ -21,8 +21,8 @@ With the detection by image, each block of images gives one pass per ROI
 (its mask's photons), all at once. Binning and the Kalman observer are per
 ROI and per channel (`ChannelFitState`). The PI holds the quantity the
 protocol's setpoint kind names (`SETPOINT_KINDS`: a channel's lifetime,
-the photon ratio, the ion concentration — `pi_input`), both controllers on
-its error with their own gains (`pi_commands`): one PI per ROI with the
+the photon ratio, the ion concentration — `pi_input`), the controller's
+gains on its error (`controller_command`): one PI per ROI with the
 excitation by the galvos (`RoiPi`) — the DAQ loop writes each ROI's own
 commands during its scan —, one for all ROIs with the excitation by image,
 which lights them all at once (`GlobalPi`, on their pooled quantity).
@@ -53,7 +53,7 @@ ROIs (`GlobalPi`), its commands the same for every ROI; otherwise one per
 ROI. `command_full_scale_v`: for the passes
 where the protocol is in volts (`protocol_in_volts`, the Protocol popup's
 checkbox) — no PI —, the commands recorded are its voltages the DAQ loop
-writes (`protocol_volts_commands`, in percent of this full scale); NaN:
+writes (`protocol_volts_command`, in percent of this full scale); NaN:
 recorded as NaN.
 """
 mutable struct AnalysisOutput
@@ -149,8 +149,8 @@ function emit_frame!(out::AnalysisOutput, sample::AcquisitionSample, roi_index::
     record = FrameRecord(sample, roi_index)
     publish!(out.exchange.frames, record)
     if out.drive_outputs
-        out.global_pi ? set_command_values!(out.exchange, sample.command1, sample.command2) :
-                        set_command_values!(out.exchange, roi_index, sample.command1, sample.command2)
+        out.global_pi ? set_command_value!(out.exchange, sample.command1) :
+                        set_command_value!(out.exchange, roi_index, sample.command1)
     end
     send_journal!(out.exchange.journal, JournalFrame(record))
     return nothing
@@ -199,17 +199,11 @@ end
 """
     pid_command_from_state(state, setpoint_ns, P, I, inv, on)::Float64
 
-Apply one controller's P/I gains to `state`'s current error terms (`state.
-old_error` holds the latest P_error, `state.I_error` the integral term —
-both just set by `process_frame!`). No `D` term: the derivative
-was dropped in favor of `state.pid_kalman` (a Kalman observer) filtering
-the lifetime that `P_error` is computed from — see
-`process_frame!`'s docstring. Split out from `process_frame!`
-so a single-card acquisition (no second SPC-150N in `[verification]
-series`) can still drive controller 2's output from channel 1's error
-dynamics with controller 2's own gains — this is exactly the original single-channel
-behavior (`command1`/`command2` were always two gain-weighted views of one
-shared error before channel 2 existed).
+Apply P/I gains to `state`'s current error terms (`state.old_error` holds
+the latest P_error, `state.I_error` the integral term — both just set by
+`process_frame!`). No `D` term: the derivative was dropped in favor of
+`state.pid_kalman` (a Kalman observer) filtering the lifetime that
+`P_error` is computed from — see `process_frame!`'s docstring.
 """
 pid_command_from_state(state::ChannelFitState, setpoint_ns::Float64, P::Float64, I::Float64, inv::Bool, on::Bool)::Float64 =
     pi_command(state.old_error, state.I_error, setpoint_ns, P, I, inv, on)
@@ -229,15 +223,14 @@ function pi_command(old_error::Float64, I_error::Float64, setpoint_ns::Float64, 
 end
 
 """
-    pi_commands(old_error, I_error, setpoint, controller) -> (command1, command2)
+    controller_command(old_error, I_error, setpoint, controller)::Float64
 
-Both controllers' outputs on one error — the quantity the setpoint kind
-names, the same for Out 1 and Out 2 for now —, each with its own gains,
-inversion and on/off.
+The controller's output on one error — the quantity the setpoint kind
+names —: its gains, inversion and on/off (`pi_command`); the 1064 nm power
+command (AO 0).
 """
-pi_commands(old_error::Float64, I_error::Float64, setpoint::Float64, c::ControllerSettings)::NTuple{2, Float64} =
-    (pi_command(old_error, I_error, setpoint, c.P1, c.I1, c.ch1_inv, c.ch1_on),
-     pi_command(old_error, I_error, setpoint, c.P2, c.I2, c.ch2_inv, c.ch2_on))
+controller_command(old_error::Float64, I_error::Float64, setpoint::Float64, c::ControllerSettings)::Float64 =
+    pi_command(old_error, I_error, setpoint, c.P1, c.I1, c.ch1_inv, c.ch1_on)
 
 """
     photon_ratio(kind, frames, channels)::Float64
@@ -381,16 +374,16 @@ function global_pi_update!(g::GlobalPi, setpoint::Float64, t_end::Float64)
 end
 
 """
-    global_pi_pass!(g, kind, roi, value, weight, complete, setpoint, t_end, controller) -> (command1, command2)
+    global_pi_pass!(g, kind, roi, value, weight, complete, setpoint, t_end, controller)::Float64
 
 The one PI's part of a pass (excitation by image): a complete pass gives
 its ROI's `pi_input` (`value`, `weight`), then steps the PI
 (`global_pi_update!`); one kept out of the PI (`complete` false) leaves it
-as it was. Another setpoint `kind` starts it over. The commands
-(`pi_commands`), the same for every ROI.
+as it was. Another setpoint `kind` starts it over. The command
+(`controller_command`), the same for every ROI.
 """
 function global_pi_pass!(g::GlobalPi, kind::AbstractString, roi::Int, value::Float64, weight::Float64, complete::Bool,
-                         setpoint::Float64, t_end::Float64, controller::ControllerSettings)::NTuple{2, Float64}
+                         setpoint::Float64, t_end::Float64, controller::ControllerSettings)::Float64
     if g.kind != kind
         empty!(g.latest)
         g.I_error, g.old_error, g.kind = 0.0, 0.0, String(kind)
@@ -399,7 +392,7 @@ function global_pi_pass!(g::GlobalPi, kind::AbstractString, roi::Int, value::Flo
         g.latest[roi] = (value, weight)
         global_pi_update!(g, setpoint, t_end)
     end
-    return pi_commands(g.old_error, g.I_error, setpoint, controller)
+    return controller_command(g.old_error, g.I_error, setpoint, controller)
 end
 
 """
@@ -411,10 +404,10 @@ end
 One (ROI, channel)'s work for one pass: sliding-window histogram binning
 over that ROI's passes, MLE lifetime fit (full or partial), and PI command
 computation — mutating `state` in place. The worker calls this once per
-channel per pass with that ROI and channel's own `ChannelFitState` and
-controller sub-config (P1/I1/ch1_inv/ch1_on vs P2/I2/ch2_inv/ch2_on), inside
-`with_fit_context` of that channel's IRF. `frame_time`: seconds since this
-ROI's previous pass.
+channel per pass with that ROI and channel's own `ChannelFitState`, inside
+`with_fit_context` of that channel's IRF, without a setpoint: the fit and
+its observer only, the PI being on the setpoint's quantity (`RoiPi`,
+`GlobalPi`). `frame_time`: seconds since this ROI's previous pass.
 
 The raw per-frame MLE-fit lifetime is filtered through `state.pid_kalman`
 (a constant-velocity Kalman observer, `kalman_update!`/smoothing.jl) before
@@ -640,26 +633,24 @@ function start_realtime(
             kind = settings.protocol.setpoint_kind
 
             frames = (ChannelFrame(), ChannelFrame())
-            commands = (NaN, NaN)
+            command = NaN
             channels = min(length(h.histogrammes), 2)
             for c in 1:channels
                 vector = analysis_histogram(pass_histogram(h.histogrammes[c], code))
                 state = state_for(roi, c)
                 frame_time = isnan(state.last_time) ? h.t_fin_s - h.t_debut_s : h.t_fin_s - state.last_time
                 state.last_time = h.t_fin_s
-                gains = c == 1 ? (controller.P1, controller.I1, controller.ch1_inv, controller.ch1_on) :
-                                 (controller.P2, controller.I2, controller.ch2_inv, controller.ch2_on)
                 ctx = channel_fit_context(c)
                 # Fit and filtered here (the Kalman observer: `control`); the PI below, on the setpoint's quantity.
                 frame, _ = with_fit_context(ctx) do
                     process_frame!(state, vector, length(vector), layout, ctx,
-                                   false, partial_fit_period, NaN, frame_time, gains...;
+                                   false, partial_fit_period, NaN, frame_time, 0.0, 0.0, false, false;
                                    control = complete)
                 end
                 frames = Base.setindex(frames, frame, c)
             end
 
-            # The PI on the quantity the setpoint kind names, both controllers on its error (`pi_commands`).
+            # The PI on the quantity the setpoint kind names, the controller's gains on its error.
             roi_pi = get!(RoiPi, roi_pis, roi)
             roi_pi.kind == kind || restart!(roi_pi, kind)
             dt = isnan(roi_pi.last_time) ? h.t_fin_s - h.t_debut_s : h.t_fin_s - roi_pi.last_time
@@ -669,14 +660,14 @@ function start_realtime(
                                               lifetime_smooth_level(layout)) : NaN
             value, weight = pi_input(kind, frames, ratio)
             if out.global_pi
-                commands = global_pi_pass!(global_state, kind, roi, value, weight, complete, setpoint, h.t_fin_s, controller)
+                command = global_pi_pass!(global_state, kind, roi, value, weight, complete, setpoint, h.t_fin_s, controller)
             else
                 complete && pi_step!(roi_pi, pi_measure(kind, value), setpoint, dt)
-                commands = pi_commands(roi_pi.old_error, roi_pi.I_error, setpoint, controller)
+                command = controller_command(roi_pi.old_error, roi_pi.I_error, setpoint, controller)
             end
 
-            # With the protocol in volts: no PI; the commands recorded are its voltages, which the DAQ loop writes.
-            in_volts && (commands = protocol_volts_commands(settings, timestamp, out.command_full_scale_v))
+            # With the protocol in volts: no PI; the command recorded is its voltage, which the DAQ loop writes.
+            in_volts && (command = protocol_volts_command(settings, timestamp, out.command_full_scale_v))
             for c in 1:channels
                 isnan(frames[c].lifetime) && Threads.atomic_add!(stats.fits_failed[c], 1)
             end
@@ -687,7 +678,7 @@ function start_realtime(
             n += UInt32(1)
             running[] || break
 
-            sample = AcquisitionSample(frames[1], frames[2], commands[1], commands[2], timestamp, setpoint,
+            sample = AcquisitionSample(frames[1], frames[2], command, timestamp, setpoint,
                                        n, h.passe, h.t_debut_s, h.t_fin_s, complete, join(h.motifs, "; "), time())
             emit_frame!(out, sample, roi)
         end
@@ -697,7 +688,7 @@ function start_realtime(
         rethrow()
     finally
         running[] = false
-        out.drive_outputs && set_command_values!(out.exchange, NaN, NaN)
+        out.drive_outputs && set_command_value!(out.exchange, NaN)
         out.excluded_passes > 0 &&
             @warn "Some passes were kept out of the PI (lost records, FIFO overflow or wrong length): shown only" passes=out.excluded_passes
         out.unmatched_passes > 0 &&

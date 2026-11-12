@@ -922,7 +922,7 @@ function spc_update_widgets!(view::SpcView, state::Symbol)
     return nothing
 end
 
-"""SPC line of the Console panel's diagnostics."""
+"""SPC line of the diagnostics (debug report)."""
 function spc_diagnostics_text(view::SpcView)::String
     engine = view.engine
     engine === nothing && return "SPC engine: not running"

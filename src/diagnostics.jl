@@ -7,7 +7,7 @@ becomes "PASS-02 on card 1":
 - a catalog of problems (`PROBLEMS`), each with a stable code — DAQ-04,
   PASS-02, ROUTE-01… —, what it means and what to check. Every warning or
   error the app raises about the bench carries its code (`report_problem!`):
-  in the top bar, the Console panel, the debug log and the debug report;
+  in the top bar, the debug log and the debug report;
 - a debug log (`DebugLogger`): every log record of every thread — time,
   level, thread, source line, values, full stack trace — in one file per
   app session (`<journal>/debug/`), the last ones also kept in memory for
@@ -64,9 +64,9 @@ const PROBLEM_LIST = Problem[
     Problem("DAQ-04", "Pass counter task failed",
             "channels.passes (X6321/ctr1), passes_terminal (\"\" = PFI13, CTR 1 OUT) and channels.clock in config/bench.toml; no other task may use that counter."),
     Problem("DAQ-05", "Missed deadline: the card ran out of written samples",
-            "Longer slots or a larger timing.lead_slots (config/bench.toml); the Console panel shows the iteration time, the margin and the garbage-collector pauses."),
+            "Longer slots or a larger timing.lead_slots (config/bench.toml); the debug report gives the iteration time, the margin and the garbage-collector pauses."),
     Problem("DAQ-06", "Readback fell behind the card",
-            "As DAQ-05: the loop was late reading; check the CPU load and the Console panel."),
+            "As DAQ-05: the loop was late reading; check the CPU load and the debug report."),
     Problem("DAQ-07", "Scan refused before reaching the card",
             "The message says which limit: galvo range (ROI popup X/Y min/max), more than 15 ROIs, a scan or pause shorter than 2 samples."),
     Problem("DAQ-08", "DAQ error during a scan: outputs zeroed (FAULT)",
@@ -114,7 +114,7 @@ const PROBLEM_LIST = Problem[
     Problem("PASS-05", "Pass length M3 − M0 differs from the programmed scan",
             "If it equals the pause, the edges are swapped (M0 must be the rising edge, M3 the falling one); otherwise check the pass counter's clock and the sample rate."),
     Problem("PASS-06", "Passes don't pair between the two cards",
-            "One card misses markers the other gets: compare their M0 counts (Console panel, debug report)."),
+            "One card misses markers the other gets: compare their M0 counts (debug report)."),
     Problem("PASS-07", "Pass signal seen on M1/M2 instead of M0/M3",
             "The pass signal is wired to the line or frame clock inputs: move it to M0 (and M3 with fin_par_m3 = true)."),
     Problem("PASS-08", "Many photons with a ROI code outside the passes",
@@ -205,7 +205,7 @@ const PROBLEM_LOG = ProblemLog(ReentrantLock(), Dict{String, ProblemRecord}(), T
 Record problem `id` (any thread): logged with its code and what to check —
 and `exception`, `(e, catch_backtrace())`, with its stack trace — again
 only when its text changes or after `quiet_s`; counted, and shown by the
-GUI (top bar, Console panel, debug report). `key` tells instances apart
+GUI (top bar, debug report). `key` tells instances apart
 ("PASS-02/card 0"). Returns the text.
 """
 function report_problem!(id::AbstractString, detail::AbstractString = ""; level::Symbol = :warn,
@@ -257,7 +257,7 @@ function problem_records()::Vector{ProblemRecord}
 end
 copy_record(r::ProblemRecord) = ProblemRecord(r.id, r.key, r.text, r.level, r.first_t, r.last_t, r.logged_t, r.count)
 
-"""One line per problem seen, latest first, for the Console panel and the debug report."""
+"""One line per problem seen, latest first, for the debug report."""
 function problem_lines(; limit::Integer = typemax(Int), with_check::Bool = false)::Vector{String}
     lines = String[]
     for r in Iterators.take(problem_records(), limit)
@@ -629,7 +629,7 @@ function diagnose_passes(state::FLIMCore.EtatClamp; daq_slots::Union{Nothing, In
     return out
 end
 
-"""One line per card of an `EtatClamp`, for the Console panel and the debug report."""
+"""One line per card of an `EtatClamp`, for the debug report."""
 function pass_status_lines(state::FLIMCore.EtatClamp)::Vector{String}
     lines = [@sprintf("Realtime counters at %.1f s%s: %d pass(es) published, codes written %s, scan %s ms, %s",
                       state.duree_s, state.fin ? " (end)" : "", state.publiees, string(state.codes), ms_text(state.scan_s),

@@ -50,10 +50,9 @@ function accumulate_frame!(app, app_run, record::FrameRecord)
     accumulate_roi_sample!(app, app_run.ch1_rois[index], sample.ch1, sample.timestamps)
     accumulate_roi_sample!(app, app_run.ch2_rois[index], sample.ch2, sample.timestamps)
     push!(app_run.protocol_setpoint, sample.protocol_setpoint)
-    on = (isfinite(sample.command1) && sample.command1 > 0) || (isfinite(sample.command2) && sample.command2 > 0)
+    on = isfinite(sample.command1) && sample.command1 > 0
     push!(app_run.stimulation, on ? 1.0 : NaN)
     push!(app_run.command1, sample.command1)
-    push!(app_run.command2, sample.command2)
     push!(app_run.timestamps, sample.timestamps)
     app_run.i = Int(sample.frame_index)
     return nothing
@@ -115,7 +114,6 @@ function reset_acquisition_state!(app, app_run; n_rois::Union{Nothing, Int} = no
     empty!(app_run.protocol_setpoint)
     empty!(app_run.stimulation)
     empty!(app_run.command1)
-    empty!(app_run.command2)
     empty!(app_run.timestamps)
     app_run.i = 0
     return nothing
@@ -612,7 +610,7 @@ function prepare_run_display!(app, app_run, blocks; n_rois::Int)
     state_display.last_frame_count_time_ns = time_ns()
     state_display.frame_rate_hz = NaN
     publish_analysis_settings!(app, app_run; force=true)
-    set_command_values!(ex, NaN, NaN)
+    set_command_value!(ex, NaN)
     app_run.worker_output = nothing
     # Fresh diagnostics: the previous run's pass and analysis problems are history.
     clear_problems!()

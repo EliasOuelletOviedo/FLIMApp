@@ -55,7 +55,7 @@ FLIMApp/
 │   ├── handlers_layout.jl      # Layout panel controls
 │   ├── handlers_controller.jl  # Controller panel controls
 │   ├── handlers_protocol.jl    # Protocol panel controls
-│   ├── handlers_console.jl     # Console panel controls
+│   ├── handlers_roi.jl         # ROI panel controls
 │   ├── handlers.jl             # Event handler orchestrator
 │   ├── GUI.jl                  # Makie GUI construction
 │   ├── io/
@@ -288,7 +288,7 @@ nothing depends on a software deadline. START requires the DAQ loop READY
 (the app tries CONNECT at launch) and the SPC engine ready, then runs three
 parts together until STOP or until one of them stops (DAQ fault, SPC error):
 
-- the **DAQ loop** plays slots of `Scan time` then `Shift time` (Protocol
+- the **DAQ loop** plays slots of `Scan time` then `Shift time` (ROI
   panel), all on the AO sample clock. A `Shift time` of 0 means no pause:
   2 samples (0.2 ms) still separate the scans, the pass signal's shortest
   low, which delimits the passes: the galvos' jump to the next ROI, the
@@ -315,9 +315,8 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
   above 0 V — where the slot lights the 1064 nm (each scan with the
   excitation by the galvos, the whole slot by image, see *Excitation /
   Detection* below); 0 V otherwise, so closed whenever the command is 0 V
-  (controller 1 off, no active protocol, a protocol at 0 V, PI at 0 %).
-  AO 0 stays PI command 1 (0–1 V). `gate_1064_v = 0` makes AO 1 PI
-  command 2 again.
+  (controller off, no active protocol, a protocol at 0 V, PI at 0 %). AO 0
+  is the PI's command (0–1 V); `gate_1064_v = 0` leaves AO 1 at 0 V.
 - the **opto PWM** at 1000 Hz, fixed (`PWM_FREQUENCY_HZ`; Protocol panel:
   the *Duty cycle* in % with its toggle) alternates opto and acquisition,
   for the whole run (from the next START), in Realtime and in Realtime in
@@ -366,9 +365,9 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
   active protocol's setpoints are; the popup's y axis takes its unit.
   - **Voltage:** the command voltage written as is (V), no PI. The DAQ
     loop reads the protocol at each slot's start and writes its value on
-    Out 1 if controller 1 is on, Out 2 if controller 2 is (every ROI the
-    same); off the protocol, 0 V. START refuses a value outside
-    0 V–`command_max_v`; the frames record the voltages as commands.
+    AO 0 while the controller is on (every ROI the same); off the
+    protocol, 0 V. START refuses a value outside 0 V–`command_max_v`; the
+    frames record the voltages as commands.
   - **Lifetime Ch1 / Lifetime Ch2:** the channel's lifetime (ns), filtered
     by its Kalman observer, as the PI's measure.
   - **Ratio Ch1/Ch2 / Ratio Ch2/Ch1:** the ratio of the two channels'
@@ -376,16 +375,17 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
     ROI; pooled over the ROIs, the ratio of all their photons.
   - **Ion concentration:** `(9.5/τ − 1)/0.025` of channel 1's filtered
     lifetime (`CONCENTRATION_CHANNEL`; pooled, of the pooled lifetime).
-  - **Both controllers** regulate that one quantity, each with its own
-    gains, inversion and on/off. START refuses channel 2's lifetime and
-    the ratios with a single card (`[verification] series`).
+  - **The controller** (the Controller panel's) regulates that one
+    quantity with its gains, inversion and on/off. START refuses channel
+    2's lifetime and the ratios with a single card (`[verification]
+    series`).
   - **Live:** the menu applies from the next pass, as the protocol's edits
     do; another quantity restarts the PI from zero. The setpoint line is
     drawn on the plot of that quantity (Lifetime, Channel ratio in the
     same direction, Ion concentration). The protocol CSV keeps the kind
     (a file of the former checkbox: Voltage when checked).
 
-**Excitation / Detection** (the Protocol panel's two toggles under ROI,
+**Excitation / Detection** (the ROI panel's two toggles,
 from the next START; on: by the galvos, off: by the scanner's images):
 
 - **Excitation**, the 1064 nm (`excitation_galvos`, saved with the app's
@@ -407,7 +407,7 @@ from the next START; on: by the galvos, off: by the scanner's images):
   image, they stay at 0 V and the slots only pace the commands. Excitation
   by the galvos with detection by image: the galvos steer the 1064 nm onto
   each ROI while the scanner images the whole field, the 850 nm on.
-- The Protocol panel fades (50 %) and locks the spinners the modes don't
+- The ROI panel fades (50 %) and locks the spinners the modes don't
   use: *Spiral turns*, *Scan time* and *Shift time* when both go by image,
   *Image averaging* when the detection goes by the galvos.
 - *Spiral turns* counts complete turns (5 by default); each spiral has
@@ -564,11 +564,10 @@ connection failed" and the button becomes **RECONNECT**.
 ## Debugging at the bench
 
 Every problem the app identifies carries a code (`DAQ-04`, `PASS-02`,
-`ROUTE-01`…): the latest one in the top bar, the last ones in the Console
-panel, all of them in the **debug log** (`<journal>/debug/<date>_debug.log`:
-every message of every thread with its source line and stack trace) and in
-the **debug report** (written at the end of every run in its folder, when
-the app closes, and with the Console panel's **Debug report** button).
+`ROUTE-01`…): the latest one in the top bar, all of them in the **debug
+log** (`<journal>/debug/<date>_debug.log`: every message of every thread
+with its source line and stack trace) and in the **debug report** (written
+at the end of every run in its folder and when the app closes).
 During Realtime and Playback, the app diagnoses every second what the cards
 received — photons, M0–M3 markers, pass lengths, routing codes — so a
 missing or swapped pass signal, or an unplugged, inverted or stuck routing
@@ -615,7 +614,7 @@ module FLIMApp
         ↓
     protocol_popup.jl   roi_popup.jl
         ↓
-    handlers_layout.jl  handlers_controller.jl  handlers_protocol.jl  handlers_console.jl
+    handlers_layout.jl  handlers_controller.jl  handlers_protocol.jl  handlers_roi.jl
         ↓
     handlers.jl
         ↓
@@ -677,7 +676,7 @@ Background task lifecycle:
 #### `GUI.jl` & `gui_themes.jl`
 Makie-based user interface:
 - Real-time histogram and fitted curve plots
-- Control panels (Layout, Controller, Protocol, Console) — see `handlers_*.jl`
+- Control panels (Layout, Controller, Protocol, ROI) — see `handlers_*.jl`
   for each panel's own controls
 - Button handlers for START/CLEAR operations
 - Theme switching (dark/light modes)
@@ -753,7 +752,7 @@ AppState
     controller::ControllerSettings  # Hardware config
     protocol::ProtocolSettings      # Experiment settings
     roi::RoiSettings                # ROI settings
-    console::ConsoleSettings        # Logging settings
+    console::ConsoleSettings        # Empty (its panel is gone; kept for the saved state)
 
 AppRun
     channel::Channel                # Worker→Consumer communication

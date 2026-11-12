@@ -1,8 +1,8 @@
 # Debugging at the bench
 
 Every problem the app can identify carries a **code** — `DAQ-04`, `PASS-02`,
-`ROUTE-01`… — shown in the top bar (the latest one), in the Console panel
-(the last ones), in the debug log and in the debug report. To report a
+`ROUTE-01`… — shown in the top bar (the latest one), in the debug log and
+in the debug report. To report a
 problem, give its code and the line that comes with it ("PASS-02 on card 1:
 2346 photons but no M0 edge in 3.0 s"), or send the debug report.
 
@@ -11,9 +11,8 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 | What | Where |
 |---|---|
 | Latest problem | top bar of the main window (`⚠ [CODE] …`) |
-| Last problems, DAQ loop timing, what the cards received, analysis counters | Console panel (refreshed every second) |
-| **Debug log**: every message of every thread, with time, thread, source line and full stack traces | `<journal>/debug/<date>_debug.log` (journal: `[journal] directory` in `config/bench.toml`, `~/FLIMApp_journal` by default); its path is in the Console panel |
-| **Debug report**: everything in one file (problems with what to check, DAQ, SPC cards and settings applied, alerts, Realtime counters and their diagnosis, analysis, IRF, settings, both config files, the last 300 log records) | end of every run: `debug_report.txt` in the run's folder; Console panel → **Debug report**; when the app closes: `<journal>/debug/<date>_report.txt` |
+| **Debug log**: every message of every thread, with time, thread, source line and full stack traces | `<journal>/debug/<date>_debug.log` (journal: `[journal] directory` in `config/bench.toml`, `~/FLIMApp_journal` by default); its path is in the debug report |
+| **Debug report**: everything in one file (problems with what to check, DAQ, SPC cards and settings applied, alerts, Realtime counters and their diagnosis, analysis, IRF, settings, both config files, the last 300 log records) | end of every run: `debug_report.txt` in the run's folder; when the app closes: `<journal>/debug/<date>_report.txt` |
 | A run's own record | `<recording folder>/sessions/<date>/`: `log.txt`, `frames.csv` (column `excluded_because`), `spc/*_acquisition.ini` (counts of thrown photons, passes off, unpaired) |
 
 ## What the app checks by itself
@@ -67,8 +66,8 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 | DAQ-02 | NI device reset or zeroing failed | Another program (NI MAX test panel, LabVIEW) may hold the device: close it, then RECONNECT. |
 | DAQ-03 | NI task could not be created or configured | The message names the task, its channels and the DAQmx call: check those channels in config/bench.toml and in NI MAX. |
 | DAQ-04 | Pass counter task failed | channels.passes (X6321/ctr1), passes_terminal ("" = PFI13, CTR 1 OUT) and channels.clock in config/bench.toml; no other task may use that counter. |
-| DAQ-05 | Missed deadline: the card ran out of written samples | Longer slots or a larger timing.lead_slots (config/bench.toml); the Console panel shows the iteration time, the margin and the garbage-collector pauses. |
-| DAQ-06 | Readback fell behind the card | As DAQ-05: the loop was late reading; check the CPU load and the Console panel. |
+| DAQ-05 | Missed deadline: the card ran out of written samples | Longer slots or a larger timing.lead_slots (config/bench.toml); the debug report gives the iteration time, the margin and the garbage-collector pauses. |
+| DAQ-06 | Readback fell behind the card | As DAQ-05: the loop was late reading; check the CPU load and the debug report. |
 | DAQ-07 | Scan refused before reaching the card | The message says which limit: galvo range (ROI popup X/Y min/max), more than 15 ROIs, a scan or pause shorter than 2 samples. |
 | DAQ-08 | DAQ error during a scan: outputs zeroed (FAULT) | The message gives the step and the DAQmx code; RESET acknowledges it. The debug log has the full DAQmx message. |
 | DAQ-09 | DAQ connection failed | The message gives the step and the reason; RECONNECT once fixed. |
@@ -106,7 +105,7 @@ problem, give its code and the line that comes with it ("PASS-02 on card 1:
 | PASS-03 | M0 markers but no M3 marker (end of pass) | Only with [clamp] fin_par_m3 = true: M3 isn't wired (QC-104: pin 10, the same PFI13 as pin 12). Without access to M3, set fin_par_m3 = false (M0 only). |
 | PASS-04 | Pass markers lost or extra | M0 and M3 counts differ, or (M0 only) M0 missing or off the slot cadence (glitches, ignored): a marginal TTL on the marker inputs (one output feeds every card): ground, cable length, connector. |
 | PASS-05 | Pass length M3 − M0 differs from the programmed scan | If it equals the pause, the edges are swapped (M0 must be the rising edge, M3 the falling one); otherwise check the pass counter's clock and the sample rate. |
-| PASS-06 | Passes don't pair between the two cards | One card misses markers the other gets: compare their M0 counts (Console panel, debug report). |
+| PASS-06 | Passes don't pair between the two cards | One card misses markers the other gets: compare their M0 counts (debug report). |
 | PASS-07 | Pass signal seen on M1/M2 instead of M0/M3 | The pass signal is wired to the line or frame clock inputs: move it to M0 (and M3 with fin_par_m3 = true). |
 | PASS-08 | Many photons with a ROI code outside the passes | The routing code and the pass signal are offset in time; normally only a few photons at the edges. |
 | PASS-09 | No pass signal generated: the DAQ loop played no slot during the measurement | The DAQ loop must be RUNNING during a Realtime measurement: see its state and any DAQ-0x problem (scan refused, task creation, fault). |

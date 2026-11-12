@@ -54,7 +54,7 @@ end
 
 JournalWriter(root::AbstractString) = JournalWriter(String(root), nothing, nothing, nothing, nothing, nothing, nothing, 0, String[], NaN, 0, 0)
 
-const FRAMES_CSV_HEADER = "frame_index,pass,roi_index,pass_start_s,pass_end_s,timestamp_s,complete,excluded_because,acquired_unix_s,protocol_setpoint_ns,command1,command2,photons_ch1,lifetime_ch1_ns,lifetime_kalman_ch1_ns,concentration_ch1,photons_ch2,lifetime_ch2_ns,lifetime_kalman_ch2_ns,concentration_ch2"
+const FRAMES_CSV_HEADER = "frame_index,pass,roi_index,pass_start_s,pass_end_s,timestamp_s,complete,excluded_because,acquired_unix_s,protocol_setpoint_ns,command1,photons_ch1,lifetime_ch1_ns,lifetime_kalman_ch1_ns,concentration_ch1,photons_ch2,lifetime_ch2_ns,lifetime_kalman_ch2_ns,concentration_ch2"
 const VISITS_CSV_HEADER = "slot,roi,visit,first_sample,command1_v,command2_v,iteration_ms,margin_ms"
 
 """
@@ -188,7 +188,7 @@ function write_entry!(writer::JournalWriter, entry::JournalFrame)
     println(io, csv_line(
         Int(s.frame_index), s.pass, entry.record.roi_index,
         s.pass_start_s, s.pass_end_s, s.timestamps, Int(s.complete), s.excluded_because, s.acquired_at,
-        s.protocol_setpoint, s.command1, s.command2,
+        s.protocol_setpoint, s.command1,
         s.ch1.photons, s.ch1.lifetime, s.ch1.lifetime_kalman, s.ch1.concentration,
         s.ch2.photons, s.ch2.lifetime, s.ch2.lifetime_kalman, s.ch2.concentration
     ))

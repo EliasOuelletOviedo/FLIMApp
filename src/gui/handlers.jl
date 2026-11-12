@@ -5,7 +5,7 @@ Event handlers and callbacks for the FLIM GUI.
 
 Wires up:
 - Panel switching (delegates to handlers_layout.jl / handlers_controller.jl /
-  handlers_protocol.jl / handlers_console.jl for each panel's own controls)
+  handlers_protocol.jl / handlers_roi.jl for each panel's own controls)
 - START/PAUSE/RESUME/STOP button actions
 - IRF (.sdt of a Single) and Playback session selection, DAQ
   connect/reconnect/disconnect/acknowledge
@@ -163,12 +163,23 @@ function clear_runtime_plots!(app, app_run, blocks)
 end
 
 """
+    initial_panel(saved, panels)::Symbol
+
+The panel to show at start-up: the one saved, if it still exists (the
+`:rois` of a short-lived version is the ROI panel); anything else — the
+Console panel, gone — the Layout panel.
+"""
+function initial_panel(saved::Symbol, panels)::Symbol
+    saved == :rois && return :roi
+    return saved in panels ? saved : :layout
+end
+
+"""
     make_handlers(app, app_run, blocks)
 
 Attach all GUI event handlers: panel switching (one function per panel,
 see handlers_layout.jl / handlers_controller.jl / handlers_protocol.jl /
-handlers_console.jl), START/PAUSE/RESUME/STOP, and path/DAQ-connect
-buttons.
+handlers_roi.jl), START/PAUSE/RESUME/STOP, and path/DAQ-connect buttons.
 """
 function make_handlers(app, app_run, blocks::GuiBlocks)
     panel = blocks.panel_buttons
@@ -180,8 +191,8 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
     panel_handlers = Dict{Symbol, Function}(
         :layout     => (;force=false) -> layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force=force),
         :controller => (;force=false) -> controller_panel_pressed!(app, app_run, blocks, panel, panel_grid; force=force),
-        :protocol   => (;force=false) -> protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid, protocol_popup_screen, roi_popup_screen; force=force),
-        :console    => (;force=false) -> console_panel_pressed!(app, app_run, blocks, panel, panel_grid; force=force)
+        :protocol   => (;force=false) -> protocol_panel_pressed!(app, app_run, blocks, panel, panel_grid, protocol_popup_screen; force=force),
+        :roi        => (;force=false) -> roi_panel_pressed!(app, app_run, blocks, panel, panel_grid, roi_popup_screen; force=force)
     )
 
     update_start_button_label!(app_run, blocks)
@@ -295,6 +306,8 @@ function make_handlers(app, app_run, blocks::GuiBlocks)
         end
     end
 
+    # A panel saved by an older version may be gone (the Console panel).
+    app.current_panel = initial_panel(app.current_panel, keys(panel_handlers))
     panel_handlers[app.current_panel](force = true)
 
     return nothing

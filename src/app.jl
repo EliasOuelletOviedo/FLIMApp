@@ -126,7 +126,7 @@ function dummy_frame_record()::FrameRecord
     n = DEFAULT_HISTOGRAM_RESOLUTION
     histogram = [exp(-(i - 20) / 40) * (i > 20) for i in 1:n]
     frame = ChannelFrame(histogram, copy(histogram), sum(histogram), 3.0, 1.0)
-    sample = AcquisitionSample(frame, ChannelFrame(), 10.0, NaN, 1.0, NaN, UInt32(1), 1, 0.0, 1.0, true, time())
+    sample = AcquisitionSample(frame, ChannelFrame(), 10.0, 1.0, NaN, UInt32(1), 1, 0.0, 1.0, true, time())
     return FrameRecord(sample, 1)
 end
 

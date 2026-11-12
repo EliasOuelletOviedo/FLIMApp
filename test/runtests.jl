@@ -152,7 +152,7 @@ end
     app.layout.plot1 = "Histogram"
     app.controller.P1 = 1.25
     app.protocol.times[1] = 12.0
-    app.current_panel = :controller
+    app.current_panel = :roi
 
     dir = mktempdir()
     path = joinpath(dir, "state.jls")
@@ -161,7 +161,15 @@ end
     loaded = load_state(path)
     @test loaded isa AppState
     @test loaded.dark
-    @test loaded.current_panel == :controller
+    @test loaded.current_panel == :roi
+    # A panel saved by an older version: the Console panel is gone (Layout instead), `:rois` is the ROI panel.
+    panels = (:layout, :controller, :protocol, :roi)
+    @test FLIMApp.initial_panel(:controller, panels) == :controller && FLIMApp.initial_panel(:roi, panels) == :roi
+    @test FLIMApp.initial_panel(:console, panels) == :layout && FLIMApp.initial_panel(:rois, panels) == :roi
+    # A save of the second controller (removed since): its settings ignored, the controller's kept.
+    saved = FLIMApp.struct_to_dict(ControllerSettings(P1 = 3.0))
+    saved[:P2], saved[:ch2_on] = 7.0, true
+    @test FLIMApp.dict_to_struct(ControllerSettings, saved).P1 == 3.0 && !hasfield(ControllerSettings, :P2)
     @test loaded.layout.binning == 7
     @test loaded.layout.plot1 == "Histogram"
     @test loaded.controller.P1 == 1.25
@@ -290,7 +298,7 @@ end
     @test isnan(app_run.ch2_rois[1].lifetime[1])          # absent-channel sentinel
 
     # A whole analyzed histogram goes to its ROI's series and the global ones.
-    sample = AcquisitionSample(frame, ChannelFrame(), 12.0, NaN, 1.0, 4.0, UInt32(7), 6, 0.05, 1.0, true, 0.0)
+    sample = AcquisitionSample(frame, ChannelFrame(), 12.0, 1.0, 4.0, UInt32(7), 6, 0.05, 1.0, true, 0.0)
     FLIMApp.accumulate_frame!(app, app_run, FLIMApp.FrameRecord(sample, 1))
     @test app_run.command1 == [12.0] && app_run.protocol_setpoint == [4.0] && app_run.i == 7
     @test app_run.stimulation == [1.0]                   # a command above 0: stimulating
@@ -491,15 +499,15 @@ end
     @test images.image_mode && FLIMApp.slots_per_cycle(images) == 1 && FLIMApp.slot_duration_s(images) ≈ 0.1
     @test all(==(0.0), buffers.galvos) && all(==(1), gate) && all(==(0.75), buffers.commands[1:images.slot_samples])   # the whole slot
     @test FLIMApp.slot_start_s(images, 2) ≈ (FLIMApp.entry_samples(images) + 2 * images.slot_samples) / cfg.sample_rate_hz
-    # The protocol in volts: its voltages (no PI) on the outputs whose controller is on; 0 V off the protocol.
+    # The protocol in volts: its voltage (no PI) on AO 0 while the controller is on; 0 V off the protocol.
     protocol = ProtocolSettings(active = true, delay = 10, times = [30.0, 30.0], setpoints = [0.75, 0.0], repeats = 1)
-    commands(t; on1 = true, on2 = false, active = true) =
-        FLIMApp.protocol_volts_commands(FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = on1, ch2_on = on2),
-                                                             (p = deepcopy(protocol); p.active = active; p)), t, cfg)
-    @test commands(20.0)[1] ≈ 0.75 / cfg.command_full_scale_v * 100 && isnan(commands(20.0)[2])
-    @test FLIMApp.command_volts(commands(20.0)[1], cfg) ≈ 0.75 && FLIMApp.command_volts(commands(50.0)[1], cfg) == 0.0
-    @test FLIMApp.command_volts(commands(5.0)[1], cfg) == 0.0 && FLIMApp.command_volts(commands(80.0)[1], cfg) == 0.0   # delay, repeats over
-    @test all(isnan, commands(20.0; active = false)) && commands(20.0; on2 = true)[2] ≈ commands(20.0)[1]
+    command(t; on = true, active = true) =
+        FLIMApp.protocol_volts_command(FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = on),
+                                                            (p = deepcopy(protocol); p.active = active; p)), t, cfg)
+    @test command(20.0) ≈ 0.75 / cfg.command_full_scale_v * 100
+    @test FLIMApp.command_volts(command(20.0), cfg) ≈ 0.75 && FLIMApp.command_volts(command(50.0), cfg) == 0.0
+    @test FLIMApp.command_volts(command(5.0), cfg) == 0.0 && FLIMApp.command_volts(command(80.0), cfg) == 0.0   # delay, repeats over
+    @test isnan(command(20.0; active = false)) && isnan(command(20.0; on = false))
 
     # More ROIs than routing codes (4 lines, code 0 reserved: 15 ROIs): refused.
     many = [square_roi(10.0 * k, 10.0 * k) for k in 1:16]
@@ -545,7 +553,7 @@ end
     @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, cfg)         # not on AO 0: 1 V at most
     no_gate = test_bench_config(Dict{String, Any}("limits" => Dict{String, Any}("gate_1064_v" => 0.0)))
     FLIMApp.prepare_slot!(buffers, pattern, 0, 0.5, 5.0)
-    @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, no_gate)     # PI command 2 again: 1 V at most
+    @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, no_gate)     # no gate: AO 1 within 1 V
 end
 
 @testset "Opto PWM: the 1064 nm during the duty cycle, the acquisition outside it" begin
@@ -746,12 +754,12 @@ end
     @test FLIMApp.pi_input("Ion concentration", two, NaN) == (2.0, 200.0) && FLIMApp.pi_measure("Ion concentration", 2.0) ≈ 150.0
     @test all(isnan, FLIMApp.pi_input("Voltage", two, NaN)) && FLIMApp.pi_measure("Lifetime Ch1", 2.0) == 2.0
     # A ROI's PI: its own error terms, held without a measure, both controllers on its error; another kind, from zero.
-    controller = ControllerSettings(P1 = 10.0, I1 = 1.0, ch1_on = true, P2 = 2.0, I2 = 0.0, ch2_on = true)
+    controller = ControllerSettings(P1 = 10.0, I1 = 1.0, ch1_on = true)
     pi = FLIMApp.pi_step!(FLIMApp.RoiPi(), 2.0, 4.0, 0.5)
     @test pi.old_error == 2.0 && pi.I_error == 1.0
     FLIMApp.pi_step!(pi, NaN, 4.0, 0.5)
     @test pi.old_error == 2.0 && pi.I_error == 1.0                                   # a failed fit: held
-    @test all(FLIMApp.pi_commands(pi.old_error, pi.I_error, 4.0, controller) .≈ (21.0, 4.0))
+    @test FLIMApp.controller_command(pi.old_error, pi.I_error, 4.0, controller) ≈ 21.0
     @test FLIMApp.restart!(pi, "Ratio Ch1/Ch2").kind == "Ratio Ch1/Ch2" && pi.I_error == 0.0 && pi.old_error == 0.0
 
     # The one PI (excitation by image): on the ROIs' pooled quantity, the same command for every ROI.
@@ -760,23 +768,23 @@ end
     g = FLIMApp.GlobalPi()
     step!(roi, value, weight, t; complete = true, setpoint = 4.0, kind = "Lifetime Ch1") =
         FLIMApp.global_pi_pass!(g, kind, roi, value, weight, complete, setpoint, t, controller)
-    @test all(step!(1, 2.0, 100.0, 1.0) .≈ (20.0, 4.0))                    # P only: 10 × (4 − 2), and 2 × (4 − 2)
-    @test all(step!(2, 4.0, 300.0, 1.0) .≈ (5.0, 1.0))                      # same block (same end): the error refined
+    @test step!(1, 2.0, 100.0, 1.0) ≈ 20.0                                 # P only: 10 × (4 − 2)
+    @test step!(2, 4.0, 300.0, 1.0) ≈ 5.0                                  # same block (same end): the error refined
     @test g.I_error == 0.0 && g.measured ≈ 3.5
-    @test step!(1, 2.0, 100.0, 2.0)[1] ≈ 5.5 && g.I_error ≈ 0.5              # 1 s later: the held error integrated
-    @test step!(1, 9.0, 100.0, 3.0; complete = false)[1] ≈ 5.5               # kept out of the PI: as it was
-    @test all(isnan, step!(1, 2.0, 100.0, 4.0; setpoint = NaN)) && g.I_error == 0.0     # no protocol
+    @test step!(1, 2.0, 100.0, 2.0) ≈ 5.5 && g.I_error ≈ 0.5              # 1 s later: the held error integrated
+    @test step!(1, 9.0, 100.0, 3.0; complete = false) ≈ 5.5               # kept out of the PI: as it was
+    @test isnan(step!(1, 2.0, 100.0, 4.0; setpoint = NaN)) && g.I_error == 0.0     # no protocol
     # Another kind, another quantity: from zero — here the concentration of the pooled lifetime.
     step!(1, 2.0, 100.0, 5.0; kind = "Ion concentration", setpoint = 100.0)
     @test length(g.latest) == 1 && g.measured ≈ FLIMApp.ion_concentration(2.0) && g.I_error == 0.0 && g.old_error ≈ -50.0
     ex = FLIMApp.Exchange()
-    sample = FLIMApp.AcquisitionSample(FLIMApp.ChannelFrame(), FLIMApp.ChannelFrame(), 25.0, NaN, 1.0, 4.0, UInt32(1), 1,
+    sample = FLIMApp.AcquisitionSample(FLIMApp.ChannelFrame(), FLIMApp.ChannelFrame(), 25.0, 1.0, 4.0, UInt32(1), 1,
                                        0.0, 1.0, true, "", time())
     FLIMApp.emit_frame!(FLIMApp.AnalysisOutput(ex; roi_order = [1, 2, 3], global_pi = true), sample, 2)
-    @test all(k -> FLIMApp.command_values(ex, k)[1] == 25.0, 1:3)
+    @test all(k -> FLIMApp.command_value(ex, k) == 25.0, 1:3)
     FLIMApp.emit_frame!(FLIMApp.AnalysisOutput(ex; roi_order = [1, 2, 3]), FLIMApp.AcquisitionSample(FLIMApp.ChannelFrame(),
-        FLIMApp.ChannelFrame(), 30.0, NaN, 1.0, 4.0, UInt32(2), 2, 1.0, 2.0, true, "", time()), 2)
-    @test FLIMApp.command_values(ex, 2)[1] == 30.0 && FLIMApp.command_values(ex, 1)[1] == 25.0     # one PI per ROI
+        FLIMApp.ChannelFrame(), 30.0, 1.0, 4.0, UInt32(2), 2, 1.0, 2.0, true, "", time()), 2)
+    @test FLIMApp.command_value(ex, 2) == 30.0 && FLIMApp.command_value(ex, 1) == 25.0     # one PI per ROI
 
     # The spiral: `turns` complete turns (2π each), from the center out.
     xs, ys = [1000 * cos(t) for t in range(0, 2π; length = 65)[1:64]], [1000 * sin(t) for t in range(0, 2π; length = 65)[1:64]]
@@ -824,9 +832,9 @@ end
     rois = [square_roi(100.0, 100.0), square_roi(600.0, 300.0)]
     pattern = FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(rois, FLIMApp.roi_visit_order(rois), true, -1000, 1000, -1000, 1000,
                                                              20, 3, 950, 50, (1024, 1024)), cfg)
-    FLIMApp.set_command_values!(ex, 40.0, NaN)
+    FLIMApp.set_command_value!(ex, 40.0)
     publish(p) = FLIMApp.publish_settings!(ex, FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = true), p))
-    volts(s) = FLIMApp.command_volts(FLIMApp.slot_commands(pattern, s, ex, cfg)[1], cfg)
+    volts(s) = FLIMApp.command_volts(FLIMApp.slot_command(pattern, s, ex, cfg), cfg)
     publish(protocol)
     @test volts(15) ≈ 0.75 && volts(45) ≈ 0.25 && volts(5) == 0.0 && volts(75) == 0.0
     FLIMApp.publish_settings!(ex, FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = false), protocol))
@@ -837,7 +845,7 @@ end
     @test volts(15) == FLIMApp.command_volts(40.0, cfg)
     publish(protocol)
     raster = FLIMApp.build_scan_pattern(FLIMApp.RasterRequest(-1000, 1000, -500, 700, 64, 48, 2.4, true), cfg)
-    @test all(isnan, FLIMApp.slot_commands(raster, 3, ex, cfg))                         # the galvo scan: never
+    @test isnan(FLIMApp.slot_command(raster, 3, ex, cfg))                               # the galvo scan: never
 
     # START: values the 1064 nm command can take.
     @test FLIMApp.protocol_volts_problem(protocol, cfg.command_max_v) == ""
@@ -870,8 +878,8 @@ end
     request = FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 45, 5, (1024, 1024))
     FLIMApp.send_journal!(ex.journal, FLIMApp.JournalRunStart(time(), FLIMApp.new_run_dir(FLIMApp.journal_root(cfg), time()),
                                                               Dict{String, Any}("mode" => "test"), Matrix{Float64}[]))
-    FLIMApp.set_command_values!(ex, 40.0, NaN)                 # every ROI
-    FLIMApp.set_command_values!(ex, order[2], 60.0, NaN)       # one PI per ROI
+    FLIMApp.set_command_value!(ex, 40.0)                       # every ROI
+    FLIMApp.set_command_value!(ex, order[2], 60.0)             # one PI per ROI
     FLIMApp.send_command!(ex, FLIMApp.StartCommand(request))
     @test await(() -> state() == FLIMApp.LOOP_RUNNING)
     summaries = FLIMApp.SlotSummary[]
@@ -975,7 +983,7 @@ end
     FLIMApp.send_command!(ex, FLIMApp.ConnectCommand())
     @test await(() -> FLIMApp.loop_status(ex).state == FLIMApp.LOOP_READY)
     @test FLIMApp.lead_slots(pattern, cfg) == 21
-    FLIMApp.set_command_values!(ex, 80.0, 80.0)               # left over from a run: not for the galvo scan
+    FLIMApp.set_command_value!(ex, 80.0)                      # left over from a run: not for the galvo scan
     FLIMApp.send_command!(ex, FLIMApp.StartCommand(request))
     @test await(() -> FLIMApp.loop_status(ex) == FLIMApp.LoopStatus(FLIMApp.LOOP_READY, "galvo scan finished"))
     summaries = FLIMApp.SlotSummary[]
@@ -1454,17 +1462,17 @@ end
     ex = FLIMApp.Exchange()
     frame = ChannelFrame([1.0], [1.0], 10.0, 3.0, 1.0, 2.9)
     out = FLIMApp.AnalysisOutput(ex; roi_order=[1, 2])
-    FLIMApp.emit_frame!(out, AcquisitionSample(frame, ChannelFrame(), 25.0, 30.0, 0.9, NaN, UInt32(1), 3, 0.05, 0.9, true, 0.0), 2)
+    FLIMApp.emit_frame!(out, AcquisitionSample(frame, ChannelFrame(), 25.0, 0.9, NaN, UInt32(1), 3, 0.05, 0.9, true, 0.0), 2)
     records = FLIMApp.FrameRecord[]
     FLIMApp.take_new!(records, ex.frames, 0)
     @test only(records).roi_index == 2 && only(records).sample.pass == 3
-    @test FLIMApp.command_values(ex, 2) == (25.0, 30.0) && all(isnan, FLIMApp.command_values(ex, 1))
+    @test FLIMApp.command_value(ex, 2) == 25.0 && isnan(FLIMApp.command_value(ex, 1))
     @test FLIMApp.pending_journal(ex.journal) == 1 && only(records).sample.ch1.lifetime_kalman == 2.9
     @test isnan(ChannelFrame([1.0], [1.0], 1.0, 1.0, 1.0).lifetime_kalman)
     # Playback: the PI outputs are only simulated, never written for the DAQ loop.
     replay = FLIMApp.AnalysisOutput(ex; roi_order=[1, 2], drive_outputs=false)
-    FLIMApp.emit_frame!(replay, AcquisitionSample(frame, ChannelFrame(), 70.0, 80.0, 1.9, NaN, UInt32(2), 4, 1.05, 1.9, true, 0.0), 1)
-    @test all(isnan, FLIMApp.command_values(ex, 1)) && FLIMApp.command_values(ex, 2) == (25.0, 30.0)
+    FLIMApp.emit_frame!(replay, AcquisitionSample(frame, ChannelFrame(), 70.0, 1.9, NaN, UInt32(2), 4, 1.05, 1.9, true, 0.0), 1)
+    @test isnan(FLIMApp.command_value(ex, 1)) && FLIMApp.command_value(ex, 2) == 25.0
 end
 
 @testset "Realtime worker: per ROI and channel, lossy passes kept out of the PI" begin
@@ -1510,7 +1518,7 @@ end
         @test all(k -> rows.command1[k] ≈ clamp(4.0 - rows.lifetime_kalman_ch1[k], 0, 100), [1, 2, 3, 4, 6])
         # The lossy pass (ROI 1): shown, but no observer update, command held.
         @test isnan(rows.lifetime_kalman_ch1[5]) && rows.command1[5] == rows.command1[3]
-        @test all(isnan, FLIMApp.command_values(ex, 1))                     # cleared when the worker ends
+        @test isnan(FLIMApp.command_value(ex, 1))                           # cleared when the worker ends
     finally
         for (c, v) in zip((FLIMApp.RUNTIME[], FLIMApp.RUNTIME_CH2[]), saved)
             c.irf, c.irf_bin_size, c.tcspc_window_size = v
@@ -1658,7 +1666,7 @@ end
         @test !isempty(sprint(io -> FLIMApp.TOML.print(io, info; sorted = true)))
         rows = published(app_run.exchange)
         @test length(rows.pass) == 9 && rows.roi_index == repeat(s.roi_order, 3) && all(rows.complete)
-        @test all(isnan, FLIMApp.command_values(app_run.exchange, s.roi_order[1]))      # simulated PI: no output
+        @test isnan(FLIMApp.command_value(app_run.exchange, s.roi_order[1]))            # simulated PI: no output
         @test all(k -> abs(rows.lifetime_ch1[k] - (1.95 + 0.25 * rows.roi_index[k])) < 0.35, 1:9)
     finally
         for (c, v) in zip((FLIMApp.RUNTIME[], FLIMApp.RUNTIME_CH2[]), saved)

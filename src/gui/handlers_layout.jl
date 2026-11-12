@@ -100,6 +100,59 @@ end
 end
 
 """
+    panel_spinner!(panel_grid, row, value, range, current, commit!; enabled=Ref(true)) -> (box, textbox, up, down)
+
+An integer spinner of the Protocol and ROI panels, in columns 4–6 of
+`row`: a box, a text box showing `value`, and ▲▼ stepping through
+`range = (min, max)` (`smart_next`/`smart_prev`). A typed value is clamped
+to the range; `commit!(value)::Bool` keeps it — false (refused): the text
+box back to `current()`. While `enabled[]` is false, its edits are refused
+and its text box doesn't keep the focus (`set_spinner_enabled!`).
+"""
+function panel_spinner!(panel_grid, row::Int, value, range::Tuple{Int, Int}, current::Function, commit!::Function;
+                        enabled::Base.RefValue{Bool} = Ref(true))
+    min_value, max_value = range
+    box = Box(panel_grid[row, 4:6]; SPINNER_BOX_ATTRS...)
+    textbox = Textbox(panel_grid[row, 4:6]; merge(SPINNER_TEXT_ATTRS, Dict(:displayed_string => string(value), :stored_string => string(value)))...)
+    up_button = Button(panel_grid[row, 4:6]; SPINNER_UP_ATTRS...)
+    down_button = Button(panel_grid[row, 4:6]; SPINNER_DOWN_ATTRS...)
+
+    function show!(shown)
+        textbox.displayed_string[] = string(shown)
+        textbox.stored_string[] = string(shown)            # its handler keeps the value
+    end
+    on(up_button.clicks) do _
+        enabled[] || return
+        parsed_value = tryparse(Int, textbox.stored_string[])
+        show!(parsed_value === nothing ? min_value : smart_next(parsed_value, min_value, max_value, Int))
+    end
+    on(down_button.clicks) do _
+        enabled[] || return
+        parsed_value = tryparse(Int, textbox.stored_string[])
+        show!(parsed_value === nothing ? min_value : smart_prev(parsed_value, min_value, max_value, Int))
+    end
+    on(textbox.stored_string) do new_string
+        parsed_value = tryparse(Int, new_string)
+        parsed_value === nothing && return
+        kept = string(current())
+        if !enabled[]
+            new_string == kept || show!(kept)              # unused by the current modes: back to its value
+            return
+        end
+        clamped_value = clamp(parsed_value, min_value, max_value)
+        if commit!(clamped_value)
+            textbox.displayed_string[] = string(clamped_value)
+        else
+            show!(kept)                                    # refused (e.g. the SPC setting's check): back to its value
+        end
+    end
+    on(textbox.focused) do focused
+        focused && !enabled[] && (textbox.focused[] = false)
+    end
+    return box, textbox, up_button, down_button
+end
+
+"""
     layout_panel_pressed!(app, app_run, blocks, panel, panel_grid; force=false)
 
 Render the Layout panel (time range/binning/smoothing spinners, Plot 1/Plot 2

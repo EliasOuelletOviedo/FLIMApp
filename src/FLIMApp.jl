@@ -108,7 +108,7 @@ include("gui/spc_window.jl")
 include("gui/handlers_layout.jl")
 include("gui/handlers_controller.jl")
 include("gui/handlers_protocol.jl")
-include("gui/handlers_console.jl")
+include("gui/handlers_roi.jl")
 include("gui/handlers.jl")
 include("gui/GUI.jl")
 

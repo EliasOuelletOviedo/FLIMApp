@@ -387,7 +387,7 @@ end
 
 Queue feeding the journal thread. `send_journal!` never waits: past
 `capacity` pending entries it drops the new one and increments `dropped`
-(shown in the Console panel — the plan's target is zero).
+(in the debug report — the plan's target is zero).
 """
 struct JournalQueue
     lock::ReentrantLock
@@ -450,7 +450,7 @@ struct Exchange
     status::StatusBox
     commands::Channel{LoopCommand}
     stop::Threads.Atomic{Bool}
-    command_values::NTuple{2, Vector{Threads.Atomic{Float64}}}
+    command_values::Vector{Threads.Atomic{Float64}}
     settings::SettingsBox
     journal::JournalQueue
     shutdown::Threads.Atomic{Bool}
@@ -464,7 +464,7 @@ function Exchange(; frame_capacity::Integer = 16_384, slot_capacity::Integer = 1
         StatusBox(LoopStatus(LOOP_DISCONNECTED, "")),
         Channel{LoopCommand}(LOOP_COMMAND_CAPACITY),
         Threads.Atomic{Bool}(false),
-        Tuple([Threads.Atomic{Float64}(NaN) for _ in 1:FLIMCore.ROI_MAX] for _ in 1:2),
+        [Threads.Atomic{Float64}(NaN) for _ in 1:FLIMCore.ROI_MAX],
         SettingsBox(AnalysisSettings()),
         JournalQueue(journal_capacity),
         Threads.Atomic{Bool}(false)
@@ -502,26 +502,26 @@ blocks (every `block_ms`), stops the tasks and zeroes every output.
 request_stop!(ex::Exchange) = (ex.stop[] = true; nothing)
 
 """
-    set_command_values!(ex, roi, command1, command2)
-    set_command_values!(ex, command1, command2)
+    set_command_value!(ex, roi, command)
+    set_command_value!(ex, command)
 
-Latest PI commands of ROI `roi` (its drawn index; 1 without ROIs), in
-percent (`NaN` = controller off), for the DAQ loop: it writes them into
-the next slot that scans that ROI. Without `roi`: every ROI.
+Latest PI command of ROI `roi` (its drawn index; 1 without ROIs), in
+percent (`NaN` = controller off), for the DAQ loop: it writes it into the
+next slot that scans that ROI (AO 0, the 1064 nm power). Without `roi`:
+every ROI.
 """
-function set_command_values!(ex::Exchange, roi::Integer, command1::Real, command2::Real)
-    ex.command_values[1][roi][] = Float64(command1)
-    ex.command_values[2][roi][] = Float64(command2)
+function set_command_value!(ex::Exchange, roi::Integer, command::Real)
+    ex.command_values[roi][] = Float64(command)
     return nothing
 end
 
-function set_command_values!(ex::Exchange, command1::Real, command2::Real)
-    foreach(roi -> set_command_values!(ex, roi, command1, command2), 1:FLIMCore.ROI_MAX)
+function set_command_value!(ex::Exchange, command::Real)
+    foreach(roi -> set_command_value!(ex, roi, command), 1:FLIMCore.ROI_MAX)
     return nothing
 end
 
-"""PI commands (percent) the DAQ loop writes into a slot of ROI `roi` (1 without ROIs)."""
-command_values(ex::Exchange, roi::Integer) = (ex.command_values[1][roi][], ex.command_values[2][roi][])
+"""The PI command (percent) the DAQ loop writes into a slot of ROI `roi` (1 without ROIs)."""
+command_value(ex::Exchange, roi::Integer)::Float64 = ex.command_values[roi][]
 
 current_settings(ex::Exchange)::AnalysisSettings = @atomic ex.settings.value
 publish_settings!(ex::Exchange, settings::AnalysisSettings) = (@atomic ex.settings.value = settings; nothing)
