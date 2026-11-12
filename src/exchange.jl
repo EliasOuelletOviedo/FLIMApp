@@ -148,7 +148,7 @@ whole slot. `detection_galvos` (Detection, `[clamp] images` off): the
 reserved code while the galvos move; off, by the scanner's images: the
 gate high and the no-ROI code the whole slot (ROI masks in the images).
 Both off (`image_mode`): the galvos don't move. `pwm_hz` > 0:
-the opto laser's PWM (`PWM_FREQUENCY_HZ` from the GUI), the first `pwm_duty` (0–1) of
+the opto laser's PWM (the Controller panel's Gate frequency), the first `pwm_duty` (0–1) of
 each period the opto phase — the 1064 nm on, the reserved routing code —,
 the rest the acquisition with the 1064 nm off (`prepare_slot!`).
 """

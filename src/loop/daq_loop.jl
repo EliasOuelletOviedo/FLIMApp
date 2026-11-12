@@ -223,15 +223,16 @@ end
 """
     write_slot!(hw, buffers, pattern, s, cfg, ex, written_commands)
 
-Prepare slot `s` with its command (`slot_command`), check it, write it,
-and remember the voltages it carries on AO 0 and AO 1 (for its summary,
-published once it has played).
+Prepare slot `s` with its command (`slot_command`, at most the Controller
+panel's Max voltage), check it, write it, and remember the voltages it
+carries on AO 0 and AO 1 (for its summary, published once it has played).
 """
 function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s::Integer,
                      cfg::BenchConfig, ex::Exchange, written_commands::Matrix{Float64})
-    command1_v = command_volts(slot_command(pattern, s, ex, cfg), cfg)
-    # AO 1: the 1064 nm laser gate (`[limits] gate_1064_v`), open only while the laser is to emit; 0 V without a gate.
-    command2_v = cfg.gate_1064_v > 0 ? gate_1064_volts(command1_v, cfg) : 0.0
+    controller = current_settings(ex).controller
+    command1_v = command_volts(slot_command(pattern, s, ex, cfg), cfg, command_ceiling_v(controller, cfg))
+    # AO 1: the 1064 nm laser gate at the Controller panel's Gate voltage, open only while the laser is to emit.
+    command2_v = gate_1064_volts(command1_v, gate_level_v(controller, cfg))
     prepare_slot!(buffers, pattern, s, command1_v, command2_v)
     check_slot(buffers, cfg)
     hw_write!(hw, buffers)
@@ -242,15 +243,16 @@ function write_slot!(hw::Hardware, buffers::SlotBuffers, pattern::ScanPattern, s
 end
 
 """
-    gate_1064_volts(command1_v, cfg)::Float64
+    gate_1064_volts(command1_v, gate_v)::Float64
 
 The 1064 nm laser gate on AO 1 for a slot whose 1064 nm power command (AO 0)
-is `command1_v`: `gate_1064_v` while the laser is to emit — a command above
-0 V — and 0 V when it is to be off (controller 1 off, no protocol or a
-protocol at 0 V, a PI at 0 %). `prepare_slot!` then puts it on the samples
-where the pattern lights the 1064 nm (`laser_1064`), 0 V elsewhere.
+is `command1_v`: `gate_v` (the Controller panel's Gate voltage,
+`gate_level_v`) while the laser is to emit — a command above 0 V — and 0 V
+when it is to be off (controller off, no protocol or a protocol at 0 V, a
+PI at 0 %). `prepare_slot!` then puts it on the samples where the pattern
+lights the 1064 nm (`laser_1064`), 0 V elsewhere.
 """
-gate_1064_volts(command1_v::Real, cfg::BenchConfig)::Float64 = command1_v > 0 ? cfg.gate_1064_v : 0.0
+gate_1064_volts(command1_v::Real, gate_v::Real)::Float64 = command1_v > 0 ? Float64(gate_v) : 0.0
 
 """Time of slot `s`'s first sample from the start of the run's first sample (the entry first)."""
 slot_start_s(p::ScanPattern, s::Integer) = (entry_samples(p) + s * p.slot_samples) / p.sample_rate_hz
@@ -261,14 +263,14 @@ slot_start_s(p::ScanPattern, s::Integer) = (entry_samples(p) + s * p.slot_sample
 The Realtime with the protocol in volts (`protocol_in_volts`) has no PI:
 while the protocol is active, its value at `t` (s since the run started)
 is the 1064 nm power command's voltage, written while the controller is
-on (`ch1_on`); otherwise, and off the protocol (before its delay, after
-its repeats), 0 V. In percent of `command_full_scale_v`, as the PI's
-command, for `command_volts` — which keeps it within 0 V and
-`command_max_v`.
+on (`ch1_on`), at most its Max voltage; otherwise, and off the protocol
+(before its delay, after its repeats), 0 V. In percent of
+`command_full_scale_v`, as the PI's command, for `command_volts` — which
+keeps it within 0 V and `command_max_v`.
 """
 function protocol_volts_command(settings::AnalysisSettings, t::Real, full_scale_v::Real)::Float64
     p = settings.protocol
-    volts = p.active ? protocol_setpoint_at(p, t) : NaN
+    volts = p.active ? min(protocol_setpoint_at(p, t), settings.controller.max_voltage) : NaN
     percent = isfinite(volts) ? 100 * volts / full_scale_v : NaN
     return settings.controller.ch1_on ? percent : NaN
 end

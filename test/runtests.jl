@@ -541,8 +541,25 @@ end
     # AO 1 is the 1064 nm gate ([limits] gate_1064_v): 0–5 V there, synchronized with the gate P0.0.
     @test cfg.gate_1064_v == 5.0 && FLIMApp.command_channel_pair("S6110/ao0:1") == ("S6110/ao0", "S6110/ao1")
     # Closed whenever the 1064 nm laser is to be off: its power command at 0 V (controller off, no protocol, PI at 0 %).
-    @test FLIMApp.gate_1064_volts(0.3, cfg) == 5.0 && FLIMApp.gate_1064_volts(0.0, cfg) == 0.0
-    @test FLIMApp.gate_1064_volts(FLIMApp.command_volts(NaN, cfg), cfg) == 0.0
+    @test FLIMApp.gate_1064_volts(0.3, 5.0) == 5.0 && FLIMApp.gate_1064_volts(0.0, 5.0) == 0.0
+    @test FLIMApp.gate_1064_volts(FLIMApp.command_volts(NaN, cfg), 5.0) == 0.0
+    # The Controller panel's voltages: the command's ceiling and the gate's level, each within the bench's limit.
+    panel = ControllerSettings(max_voltage = 0.4, gate_voltage = 3.3)
+    @test FLIMApp.command_ceiling_v(panel, cfg) == 0.4 && FLIMApp.gate_level_v(panel, cfg) == 3.3
+    @test FLIMApp.command_volts(80.0, cfg, FLIMApp.command_ceiling_v(panel, cfg)) ≈ 0.4      # 0.8 V asked, 0.4 V at most
+    @test FLIMApp.command_volts(30.0, cfg, 0.4) ≈ 0.3 && FLIMApp.command_volts(80.0, cfg) ≈ 0.8
+    @test FLIMApp.command_ceiling_v(ControllerSettings(max_voltage = 9.0), cfg) == cfg.command_max_v   # never beyond the bench
+    @test FLIMApp.gate_level_v(ControllerSettings(gate_voltage = 12.0), cfg) == cfg.gate_1064_v
+    @test FLIMApp.gate_level_v(ControllerSettings(gate_voltage = NaN), cfg) == 0.0
+    @test FLIMApp.command_ceiling_v(ControllerSettings(), cfg) == 1.0 && FLIMApp.gate_level_v(ControllerSettings(), cfg) == 5.0
+    # The PI's output stops at the Max voltage, in % of the full scale (without it, the DAQ loop's ceiling only).
+    pi_panel = ControllerSettings(P1 = 1.0, ch1_on = true, max_voltage = 0.4)
+    @test FLIMApp.controller_command(80.0, 0.0, 4.0, pi_panel; full_scale_v = 1.0) ≈ 40.0
+    @test FLIMApp.controller_command(80.0, 0.0, 4.0, pi_panel) ≈ 80.0
+    # The protocol in volts, at most the Max voltage too.
+    volts_protocol = ProtocolSettings(active = true, times = [30.0], setpoints = [0.75], repeats = 1, setpoint_kind = "Voltage")
+    @test FLIMApp.protocol_volts_command(FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = true, max_voltage = 0.5),
+                                                                  volts_protocol), 10.0, cfg) ≈ 50.0
     @test_throws ErrorException FLIMApp.command_channel_pair("S6110/ao0")
     FLIMApp.prepare_slot!(buffers, pattern, 0, 0.5, cfg.gate_1064_v)
     @test FLIMApp.check_slot(buffers, cfg) === nothing                         # 5 V on AO 1 only
@@ -551,9 +568,11 @@ end
     @test buffers.commands[n_slot+1:2n_slot] == ifelse.(gate .== 1, 5.0, 0.0)  # high exactly with P0.0
     buffers.commands[1] = 5.0
     @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, cfg)         # not on AO 0: 1 V at most
-    no_gate = test_bench_config(Dict{String, Any}("limits" => Dict{String, Any}("gate_1064_v" => 0.0)))
+    # AO 1 is always the gate (no second PI command since the TriggerBox): its range above 0 V, the gate within it.
+    @test_throws ErrorException test_bench_config(Dict{String, Any}("limits" => Dict{String, Any}("gate_1064_v" => 0.0)))
+    low_gate = test_bench_config(Dict{String, Any}("limits" => Dict{String, Any}("gate_1064_v" => 3.3)))
     FLIMApp.prepare_slot!(buffers, pattern, 0, 0.5, 5.0)
-    @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, no_gate)     # no gate: AO 1 within 1 V
+    @test_throws FLIMApp.SafetyError FLIMApp.check_slot(buffers, low_gate)    # 5 V on a 3.3 V gate
 end
 
 @testset "Opto PWM: the 1064 nm during the duty cycle, the acquisition outside it" begin
@@ -601,23 +620,34 @@ end
     @test !app.protocol.PWM_active && app.protocol.PWM_duty == 50 && FLIMApp.scan_request(app, app_run, Int[]).pwm_hz == 0.0
     app.protocol.PWM_active, app.protocol.PWM_duty = true, 30
     r = FLIMApp.scan_request(app, app_run, Int[])
-    @test (r.pwm_hz, r.pwm_duty) == (1000.0, 0.3) && r.points_per_roi == 1000      # both fixed (PWM_FREQUENCY_HZ, POINTS_PER_ROI)
+    @test (r.pwm_hz, r.pwm_duty) == (1000.0, 0.3) && r.points_per_roi == 1000      # the Gate frequency's default; POINTS_PER_ROI
     @test FLIMApp.pwm_opto_fraction(app.protocol, cfg.sample_rate_hz) ≈ 0.3 && FLIMApp.clamp_command(app, app_run, Int[], mktempdir()).opto ≈ 0.3
     @test FLIMApp.pwm_text(app.protocol, cfg.sample_rate_hz) == "PWM 1000.0 Hz, opto 30.0 % (3 of 10 samples)"
     @test FLIMApp.images_command(FLIMApp.RoiCoordinates[], Int[], (100, 48), FLIMCore.Reglages(), ""; pwm = true).jeter_hors_roi
     @test !FLIMApp.images_command(FLIMApp.RoiCoordinates[], Int[], (100, 48), FLIMCore.Reglages(), "").jeter_hors_roi
     @test FLIMApp.pwm_refusal(app.protocol, cfg.sample_rate_hz) == ""
-    @test occursin("2000 Hz at least", FLIMApp.pwm_refusal(app.protocol, 1000.0))   # 1000 Hz: 2 samples per period at least
+    @test occursin("at most 500 Hz", FLIMApp.pwm_refusal(app.protocol, 1000.0))     # 1000 Hz: 2 samples per period at least
     @test FLIMApp.pwm_played(app.protocol, 1000.0) == (0, 0)
-    app.protocol.PWM_active = false
+    # The Gate frequency (the Controller panel's): the period it plays, within what the NI can switch.
+    app.protocol.PWM_frequency = 500
+    @test FLIMApp.scan_request(app, app_run, Int[]).pwm_hz == 500.0 && FLIMApp.pwm_played(app.protocol, cfg.sample_rate_hz) == (20, 6)
+    app.protocol.PWM_frequency = 6000
+    @test occursin("at most 5000 Hz", FLIMApp.pwm_refusal(app.protocol, cfg.sample_rate_hz))
+    app.protocol.PWM_frequency = 0
+    @test occursin("at least 1 Hz", FLIMApp.pwm_refusal(app.protocol, cfg.sample_rate_hz))
+    app.protocol.PWM_active, app.protocol.PWM_frequency = false, 1000
     @test FLIMApp.pwm_refusal(app.protocol, 1000.0) == "" && FLIMApp.pwm_text(app.protocol, cfg.sample_rate_hz) == ""
-    # A state saved before the duty cycle existed: its defaults, the rest kept; the PWM frequency and the
-    # points per ROI it still has (fixed since), ignored.
+    # A state saved before the duty cycle existed: its defaults, the rest kept; the points per ROI it still has
+    # (fixed since), ignored.
     old = FLIMApp.struct_to_dict(ProtocolSettings(scan_time = 400))
-    delete!(old, :PWM_duty); delete!(old, :PWM_active)
-    old[:PWM_frequency], old[:points_per_roi] = 10, 100
+    delete!(old, :PWM_duty); delete!(old, :PWM_active); delete!(old, :PWM_frequency)
+    old[:points_per_roi] = 100
     restored = FLIMApp.dict_to_struct(ProtocolSettings, old)
-    @test restored.PWM_duty == 50 && !restored.PWM_active && restored.scan_time == 400
+    @test restored.PWM_duty == 50 && !restored.PWM_active && restored.scan_time == 400 && restored.PWM_frequency == 1000
+    # The controller's TriggerBox settings (output, mode, frequency) in an old save: ignored.
+    saved = FLIMApp.struct_to_dict(ControllerSettings(P1 = 2.0))
+    saved[:ch1_out], saved[:ch1_mode], saved[:freq] = "Out 2", "Analog", 500
+    @test FLIMApp.dict_to_struct(ControllerSettings, saved).P1 == 2.0 && !hasfield(ControllerSettings, :ch1_out)
 end
 
 @testset "Shift time 0: no pause — the pass signal's 2-sample gap, the light on without ROIs" begin
@@ -838,7 +868,7 @@ end
     publish(protocol)
     @test volts(15) ≈ 0.75 && volts(45) ≈ 0.25 && volts(5) == 0.0 && volts(75) == 0.0
     FLIMApp.publish_settings!(ex, FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = false), protocol))
-    @test volts(15) == 0.0                                                              # controller 1 off: Out 1 at 0 V
+    @test volts(15) == 0.0                                                              # the controller off: AO 0 at 0 V
     publish(lifetimes)
     @test volts(15) == FLIMApp.command_volts(40.0, cfg)
     publish(off)
@@ -1734,6 +1764,12 @@ end
         app.protocol.setpoint_kind = "Ion concentration"                           # channel 1's lifetime
         @test FLIMApp.realtime_start_refusal(app, app_run) == ""
         app_run.spc.settings.series = series
+        # The protocol in volts, within the Controller panel's Max voltage (itself within the bench's).
+        app.protocol.setpoint_kind, app.protocol.setpoints = "Voltage", [0.75, NaN]
+        app.controller.max_voltage = 0.5
+        @test occursin("0.75 V is outside 0–0.5 V (the Controller panel's Max voltage)", FLIMApp.realtime_start_refusal(app, app_run))
+        app.controller.max_voltage = 1.0
+        @test FLIMApp.realtime_start_refusal(app, app_run) == ""
         app.protocol.active, app.protocol.setpoint_kind = false, "Lifetime Ch1"
 
         order = FLIMApp.roi_visit_order(app_run.rois[])
@@ -2415,3 +2451,32 @@ end
 end
 
 end # @testset FLIMApp
+
+@testset "Indicator: presets, type, conversion to a concentration" begin
+    # MQAE: Stern–Volmer on the lifetime, its values fixed and its type FLIM; SCLm: no calibration yet (0).
+    p = ProtocolSettings()
+    @test p.indicator_preset == "MQAE" && FLIMApp.indicator(p) == FLIMApp.Indicator()
+    @test FLIMApp.ion_concentration(2.0) ≈ 150.0 && FLIMApp.ion_concentration(2.0, FLIMApp.indicator(p)) ≈ 150.0
+    p.indicator_type = "Ratio"
+    FLIMApp.apply_indicator_preset!(p, "SCLm")
+    @test p.indicator_type == "Ratio" && p.indicator_tau0 == 0.0 && p.indicator_ksv == 0.0 && p.indicator_kd == 0.0
+    FLIMApp.apply_indicator_preset!(p, "MQAE")
+    @test p.indicator_type == "FLIM" && p.indicator_tau0 == 9.5 && p.indicator_ksv == 0.025
+    p.indicator_tau0 = 7.0
+    FLIMApp.apply_indicator_preset!(p, "Manual")
+    @test p.indicator_preset == "Manual" && p.indicator_tau0 == 7.0                  # Manual keeps the values, to edit
+    @test FLIMApp.indicator_editable("MQAE") == (false, false, false)
+    @test FLIMApp.indicator_editable("SCLm") == (true, false, true) && FLIMApp.indicator_editable("Manual") == (true, true, true)
+    # Ratio: on the photon ratio Ch1/Ch2, the PI's measure and its input.
+    ratio = FLIMApp.Indicator(type = "Ratio", rmin = 0.5, rmax = 3.0, kd = 2.0, beta = 1.5)
+    @test FLIMApp.ratio_concentration(1.0, ratio) ≈ 2.0 * 1.5 * 0.5 / 2.0
+    two = (FLIMApp.ChannelFrame(Float64[], Float64[], 200.0, 2.1, NaN, 2.0), FLIMApp.ChannelFrame(Float64[], Float64[], 50.0, 3.1, NaN, 3.0))
+    @test FLIMApp.photon_ratio("Ion concentration", two, 2, ratio) == 4.0 && isnan(FLIMApp.photon_ratio("Ion concentration", two, 2))
+    @test FLIMApp.pi_input("Ion concentration", two, 3.9, ratio) == (3.9, 50.0)
+    @test FLIMApp.pi_measure("Ion concentration", 1.0, ratio) ≈ FLIMApp.ratio_concentration(1.0, ratio)
+    @test FLIMApp.pi_measure("Ion concentration", 2.0) ≈ 150.0                      # FLIM (MQAE) by default
+    # The worker's published settings carry the indicator.
+    p.indicator_type, p.indicator_kd = "Hybrid", 4.0
+    q = FLIMApp.normalize_protocol_config(p)
+    @test q.indicator_type == "Hybrid" && q.indicator_kd == 4.0 && q.indicator_tau0 == 7.0
+end

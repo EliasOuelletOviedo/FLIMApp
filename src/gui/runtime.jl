@@ -185,8 +185,8 @@ end
 
 Snapshot of everything the DAQ loop needs for this run's slots: how it
 excites and detects (`modes`), each ROI's spiral of `POINTS_PER_ROI`
-points, the opto laser's PWM included (at `PWM_FREQUENCY_HZ`, the Protocol
-panel's duty cycle, while its toggle is on).
+points, the opto laser's PWM included (the Controller panel's Gate
+frequency and Duty cycle, while its toggle is on).
 """
 function scan_request(app, app_run, order::Vector{Int}; modes::Tuple{Bool, Bool} = run_modes(app, app_run))::ScanRequest
     p = app.protocol
@@ -196,7 +196,7 @@ function scan_request(app, app_run, order::Vector{Int}; modes::Tuple{Bool, Bool}
         app.roi.v_min_x, app.roi.v_max_x, app.roi.v_min_y, app.roi.v_max_y,
         POINTS_PER_ROI, p.spiral_full_turns, p.scan_time, p.shift_time,
         app_run.imported_image_size, app_run.spc.settings.inverser_routage, excitation_galvos, detection_galvos,
-        p.PWM_active ? Float64(PWM_FREQUENCY_HZ) : 0.0, p.PWM_duty / 100
+        p.PWM_active ? Float64(p.PWM_frequency) : 0.0, p.PWM_duty / 100
     )
 end
 
@@ -205,12 +205,12 @@ end
 
 The opto laser's PWM as the DAQ loop plays it at `rate` (`pwm_samples`):
 the period and its opto phase, in whole samples; `(0, 0)` without PWM or at
-a rate too low for `PWM_FREQUENCY_HZ` (START refuses it, `pwm_refusal`).
+a frequency the NI can't switch (START refuses it, `pwm_refusal`).
 """
 function pwm_played(protocol::ProtocolSettings, rate::Real)::Tuple{Int, Int}
     protocol.PWM_active || return (0, 0)
     try
-        return pwm_samples(PWM_FREQUENCY_HZ, protocol.PWM_duty / 100, rate)
+        return pwm_samples(protocol.PWM_frequency, protocol.PWM_duty / 100, rate)
     catch
         return (0, 0)
     end
@@ -224,8 +224,8 @@ pwm_opto_fraction(protocol::ProtocolSettings, rate::Real)::Float64 =
     pwm_text(protocol, rate)::String
 
 The opto laser's PWM as the DAQ loop plays it — its frequency and duty
-cycle in whole samples, which can differ from `PWM_FREQUENCY_HZ` and the
-panel's duty cycle — for the status line and the log; "" without PWM.
+cycle in whole samples, which can differ from the panel's values — for the
+status line and the log; "" without PWM.
 """
 function pwm_text(protocol::ProtocolSettings, rate::Real)::String
     period, on = pwm_played(protocol, rate)
@@ -237,13 +237,15 @@ end
     pwm_refusal(protocol, rate)::String
 
 Why the opto laser's PWM can't run ("" if it can): the NI switches its
-outputs once per sample, so `PWM_FREQUENCY_HZ` needs a `rate` of twice that
-at least (`[timing] sample_rate_hz`, config/bench.toml).
+outputs once per sample, so the Gate frequency is at most `rate / 2`
+(`[timing] sample_rate_hz`, config/bench.toml), and 1 Hz at least.
 """
 function pwm_refusal(protocol::ProtocolSettings, rate::Real)::String
     protocol.PWM_active || return ""
-    PWM_FREQUENCY_HZ <= rate / 2 && return ""
-    return "PWM of $PWM_FREQUENCY_HZ Hz: a sample rate of $(2 * PWM_FREQUENCY_HZ) Hz at least ([timing] sample_rate_hz: $(round(Int, rate)) Hz), the NI switching its outputs once per sample"
+    f = protocol.PWM_frequency
+    0 < f <= rate / 2 && return ""
+    f <= 0 && return "Gate frequency of $f Hz: at least 1 Hz"
+    return "Gate frequency of $f Hz: at most $(round(Int, rate / 2)) Hz, the NI switching its outputs once per sample ($(round(Int, rate)) Hz)"
 end
 
 """
@@ -397,7 +399,7 @@ folder (`RECORDING_MIN_S` of recording at least), the DAQ loop (it plays
 the scans, the routing code and the pass signal), the SPC engine (it
 counts), and at most `ROI_MAX` ROIs (the routing code has 4 bits, code 0
 reserved), the opto PWM (`pwm_refusal`), with the protocol in volts its
-values within 0 V and `command_max_v` (`protocol_volts_problem`), and a
+values within 0 V and the Max voltage (`command_ceiling_v`, `protocol_volts_problem`), and a
 setpoint on channel 2 or the photon ratio (`needs_two_channels`) with a
 single card.
 """
@@ -419,8 +421,8 @@ function realtime_start_refusal(app, app_run)::String
     pwm = pwm_refusal(app.protocol, app_run.config.sample_rate_hz)
     isempty(pwm) || return pwm
     if protocol_in_volts(app.protocol)
-        problem = protocol_volts_problem(app.protocol, app_run.config.command_max_v)
-        isempty(problem) || return "Protocol in volts: " * problem
+        problem = protocol_volts_problem(app.protocol, command_ceiling_v(app.controller, app_run.config))
+        isempty(problem) || return "Protocol in volts: " * problem * " (the Controller panel's Max voltage)"
     end
     kind = app.protocol.setpoint_kind
     app.protocol.active && needs_two_channels(kind) && length(app_run.spc.settings.series) < 2 &&
@@ -489,6 +491,8 @@ function start_pressed(app, app_run, blocks)
     mode isa AbstractString || (mode = "Realtime")
     mode in (PLAYBACK_SESSION_MODE, PLAYBACK_CURRENT_MODE) && return start_playback!(app, app_run, blocks, mode)
 
+    # The opto laser's PWM goes with the controller: on whenever it is active.
+    app.protocol.PWM_active = app.controller.ch1_on
     excitation_galvos, detection_galvos = run_modes(app, app_run)
     images = !detection_galvos
     refusal = realtime_start_refusal(app, app_run)

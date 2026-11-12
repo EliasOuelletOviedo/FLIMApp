@@ -169,20 +169,17 @@ end
 """
     add_command_channels!(th, cfg)
 
-The command AO channels: AO 0, PI command 1, declared 0…`command_max_v`;
-AO 1 — the 1064 nm laser gate when `[limits] gate_1064_v` > 0 — declared
-0…`gate_1064_v` (otherwise PI command 2, 0…`command_max_v`). NI-DAQmx
-itself refuses any write outside (-200561), a second layer behind
-`check_slot`.
+The command AO channels: AO 0, the 1064 nm power command, declared
+0…`command_max_v`; AO 1, the 1064 nm laser gate, declared
+0…`[limits] gate_1064_v`. NI-DAQmx itself refuses any write outside
+(-200561), a second layer behind `check_slot`; the Controller panel's Max
+voltage and Gate voltage stay within them (`command_ceiling_v`,
+`gate_level_v`).
 """
 function add_command_channels!(th, cfg::BenchConfig)
-    if cfg.gate_1064_v > 0
-        ao0, ao1 = command_channel_pair(cfg.command_channels)
-        DAQmx.add_ao_voltage(th, ao0; minv = 0.0, maxv = cfg.command_max_v)
-        DAQmx.add_ao_voltage(th, ao1; minv = 0.0, maxv = cfg.gate_1064_v)
-    else
-        DAQmx.add_ao_voltage(th, cfg.command_channels; minv = 0.0, maxv = cfg.command_max_v)
-    end
+    ao0, ao1 = command_channel_pair(cfg.command_channels)
+    DAQmx.add_ao_voltage(th, ao0; minv = 0.0, maxv = cfg.command_max_v)
+    DAQmx.add_ao_voltage(th, ao1; minv = 0.0, maxv = cfg.gate_1064_v)
     return th
 end
 
@@ -218,8 +215,8 @@ function hw_prepare!(hw::NIHardware, buffer_samples::Integer; pass_ticks = nothi
             configure_output!(hw.lines, cfg, buffer_samples)
         end
 
-        with_context("creating the command AO task ($(cfg.command_channels): command 0…$(cfg.command_max_v) V" *
-                     (cfg.gate_1064_v > 0 ? ", 1064 nm gate 0…$(cfg.gate_1064_v) V)" : ")")) do
+        with_context("creating the command AO task ($(cfg.command_channels): command 0…$(cfg.command_max_v) V, " *
+                     "1064 nm gate 0…$(cfg.gate_1064_v) V)") do
             hw.commands = DAQmx.create_task("flimapp_commands")
             add_command_channels!(hw.commands, cfg)
             configure_output!(hw.commands, cfg, buffer_samples)
@@ -485,9 +482,9 @@ function hw_write!(hw::SimulatedHardware, buffers::SlotBuffers)
     for v in buffers.galvos
         abs(v) <= cfg.galvo_limit_v || throw(simulated_error(-200561, "galvo sample $v V outside the declared range"))
     end
-    # The declared ranges, as add_command_channels! makes them: AO 1 up to gate_1064_v when it is the 1064 nm gate.
+    # The declared ranges, as add_command_channels! makes them: AO 1, the 1064 nm gate, up to gate_1064_v.
     for (j, v) in enumerate(buffers.commands)
-        limit = j > n && cfg.gate_1064_v > 0 ? cfg.gate_1064_v : cfg.command_max_v
+        limit = j > n ? cfg.gate_1064_v : cfg.command_max_v
         0.0 <= v <= limit || throw(simulated_error(-200561, "command sample $v V outside the declared range"))
     end
     @inbounds for j in 1:n

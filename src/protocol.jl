@@ -93,7 +93,15 @@ function normalize_protocol_config(raw_protocol::ProtocolSettings)::ProtocolSett
         delay = max(raw_protocol.delay, 0),
         times = copy(raw_protocol.times),
         setpoints = copy(raw_protocol.setpoints),
-        setpoint_kind = raw_protocol.setpoint_kind
+        setpoint_kind = raw_protocol.setpoint_kind,
+        indicator_preset = raw_protocol.indicator_preset,
+        indicator_type = raw_protocol.indicator_type,
+        indicator_tau0 = raw_protocol.indicator_tau0,
+        indicator_ksv = raw_protocol.indicator_ksv,
+        indicator_rmin = raw_protocol.indicator_rmin,
+        indicator_rmax = raw_protocol.indicator_rmax,
+        indicator_kd = raw_protocol.indicator_kd,
+        indicator_beta = raw_protocol.indicator_beta
     )
 end
 

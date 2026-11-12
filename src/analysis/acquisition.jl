@@ -208,8 +208,9 @@ the latest P_error, `state.I_error` the integral term — both just set by
 pid_command_from_state(state::ChannelFitState, setpoint_ns::Float64, P::Float64, I::Float64, inv::Bool, on::Bool)::Float64 =
     pi_command(state.old_error, state.I_error, setpoint_ns, P, I, inv, on)
 
-"""The PI's output (0–100 %) from its error terms; NaN without a setpoint or with the controller off."""
-function pi_command(old_error::Float64, I_error::Float64, setpoint_ns::Float64, P::Float64, I::Float64, inv::Bool, on::Bool)::Float64
+"""The PI's output (0 % up to `ceiling`, 100 % by default) from its error terms; NaN without a setpoint or with the controller off."""
+function pi_command(old_error::Float64, I_error::Float64, setpoint_ns::Float64, P::Float64, I::Float64, inv::Bool, on::Bool,
+                    ceiling::Float64 = 100.0)::Float64
     if isnan(setpoint_ns)
         return NaN
     end
@@ -219,36 +220,43 @@ function pi_command(old_error::Float64, I_error::Float64, setpoint_ns::Float64, 
         command = -command
     end
 
-    return on ? clamp(command, 0.0, 100.0) : NaN
+    return on ? clamp(command, 0.0, ceiling) : NaN
 end
 
 """
-    controller_command(old_error, I_error, setpoint, controller)::Float64
+    controller_command(old_error, I_error, setpoint, controller; full_scale_v=NaN)::Float64
 
 The controller's output on one error — the quantity the setpoint kind
 names —: its gains, inversion and on/off (`pi_command`); the 1064 nm power
-command (AO 0).
+command (AO 0), at most its Max voltage (in percent of `full_scale_v`,
+`[limits] command_full_scale_v`; 100 % without it — the DAQ loop applies
+the ceiling anyway, `command_ceiling_v`).
 """
-controller_command(old_error::Float64, I_error::Float64, setpoint::Float64, c::ControllerSettings)::Float64 =
-    pi_command(old_error, I_error, setpoint, c.P1, c.I1, c.ch1_inv, c.ch1_on)
+function controller_command(old_error::Float64, I_error::Float64, setpoint::Float64, c::ControllerSettings;
+                            full_scale_v::Real = NaN)::Float64
+    ceiling = isfinite(full_scale_v) && full_scale_v > 0 && isfinite(c.max_voltage) ?
+              clamp(100 * c.max_voltage / full_scale_v, 0.0, 100.0) : 100.0
+    return pi_command(old_error, I_error, setpoint, c.P1, c.I1, c.ch1_inv, c.ch1_on, ceiling)
+end
 
 """
-    photon_ratio(kind, frames, channels)::Float64
+    photon_ratio(kind, frames, channels, ind=Indicator())::Float64
 
 A pass's ratio of the two channels' photons in the direction the setpoint
-`kind` names ("Ratio Ch1/Ch2", "Ratio Ch2/Ch1"); NaN for another kind,
-with a single channel, or without photons in the denominator.
+`kind` names ("Ratio Ch1/Ch2", "Ratio Ch2/Ch1"; Ch1/Ch2 for the Ion
+concentration of a Ratio indicator, `ind`); NaN for another kind, with a
+single channel, or without photons in the denominator.
 """
-function photon_ratio(kind::AbstractString, frames, channels::Int)::Float64
+function photon_ratio(kind::AbstractString, frames, channels::Int, ind::Indicator = Indicator())::Float64
     channels == 2 || return NaN
     p1, p2 = frames[1].photons, frames[2].photons
-    kind == "Ratio Ch1/Ch2" && return p2 > 0 ? p1 / p2 : NaN
+    (kind == "Ratio Ch1/Ch2" || (kind == "Ion concentration" && uses_ratio(ind))) && return p2 > 0 ? p1 / p2 : NaN
     kind == "Ratio Ch2/Ch1" && return p1 > 0 ? p2 / p1 : NaN
     return NaN
 end
 
 """
-    pi_input(kind, frames, ratio) -> (value, weight)
+    pi_input(kind, frames, ratio, ind=Indicator()) -> (value, weight)
 
 What a ROI's pass gives the PI for the setpoint `kind` (`SETPOINT_KINDS`),
 before `pi_measure`: a channel's filtered lifetime (Lifetime Ch1/Ch2, and
@@ -256,11 +264,13 @@ channel `CONCENTRATION_CHANNEL`'s for the Ion concentration) or the
 filtered photon ratio (`ratio`); and the photons that weigh it when the
 ROIs pool (the excitation by image, `GlobalPi`) — the channel's, the
 ratio's denominator's (the pooled ratio is then that of all the photons).
-NaN for "Voltage" (no PI).
+NaN for "Voltage" (no PI). The Ion concentration of a Ratio indicator
+(`ind`): the filtered ratio Ch1/Ch2.
 """
-function pi_input(kind::AbstractString, frames, ratio::Float64)::Tuple{Float64, Float64}
+function pi_input(kind::AbstractString, frames, ratio::Float64, ind::Indicator = Indicator())::Tuple{Float64, Float64}
     kind == "Lifetime Ch1" && return (frames[1].lifetime_kalman, frames[1].photons)
     kind == "Lifetime Ch2" && return (frames[2].lifetime_kalman, frames[2].photons)
+    kind == "Ion concentration" && uses_ratio(ind) && return (ratio, frames[2].photons)
     if kind == "Ion concentration"
         frame = frames[CONCENTRATION_CHANNEL]
         return (frame.lifetime_kalman, frame.photons)
@@ -270,8 +280,11 @@ function pi_input(kind::AbstractString, frames, ratio::Float64)::Tuple{Float64, 
     return (NaN, NaN)
 end
 
-"""The quantity the PI holds from `pi_input`'s (pooled) value: its ion concentration (`ion_concentration`), the value itself otherwise."""
-pi_measure(kind::AbstractString, value::Float64)::Float64 = kind == "Ion concentration" ? ion_concentration(value) : value
+"""The quantity the PI holds from `pi_input`'s (pooled) value: its ion concentration with the indicator `ind`, the value itself otherwise."""
+function pi_measure(kind::AbstractString, value::Float64, ind::Indicator = Indicator())::Float64
+    kind == "Ion concentration" || return value
+    return uses_ratio(ind) ? ratio_concentration(value, ind) : ion_concentration(value, ind)
+end
 
 """The weighted mean of the ROIs' latest values (`pi_input`'s), NaN if none has photons."""
 function weighted_mean(latest::Dict{Int, Tuple{Float64, Float64}})::Float64
@@ -360,10 +373,10 @@ block's first step adds to the integral, the others refine the error — a
 ROI without photons in a block (no pass) doesn't hold the PI back.
 Without a setpoint, the integral restarts from zero, as a ROI's PI does.
 """
-function global_pi_update!(g::GlobalPi, setpoint::Float64, t_end::Float64)
+function global_pi_update!(g::GlobalPi, setpoint::Float64, t_end::Float64, ind::Indicator = Indicator())
     dt = isnan(g.last_time) ? 0.0 : max(t_end - g.last_time, 0.0)
     g.last_time = t_end
-    g.measured = pi_measure(g.kind, weighted_mean(g.latest))
+    g.measured = pi_measure(g.kind, weighted_mean(g.latest), ind)
     if isnan(setpoint)
         g.I_error, g.old_error = 0.0, 0.0
     else
@@ -374,7 +387,7 @@ function global_pi_update!(g::GlobalPi, setpoint::Float64, t_end::Float64)
 end
 
 """
-    global_pi_pass!(g, kind, roi, value, weight, complete, setpoint, t_end, controller)::Float64
+    global_pi_pass!(g, kind, roi, value, weight, complete, setpoint, t_end, controller; full_scale_v=NaN)::Float64
 
 The one PI's part of a pass (excitation by image): a complete pass gives
 its ROI's `pi_input` (`value`, `weight`), then steps the PI
@@ -383,16 +396,17 @@ as it was. Another setpoint `kind` starts it over. The command
 (`controller_command`), the same for every ROI.
 """
 function global_pi_pass!(g::GlobalPi, kind::AbstractString, roi::Int, value::Float64, weight::Float64, complete::Bool,
-                         setpoint::Float64, t_end::Float64, controller::ControllerSettings)::Float64
+                         setpoint::Float64, t_end::Float64, controller::ControllerSettings; full_scale_v::Real = NaN,
+                         ind::Indicator = Indicator())::Float64
     if g.kind != kind
         empty!(g.latest)
         g.I_error, g.old_error, g.kind = 0.0, 0.0, String(kind)
     end
     if complete
         g.latest[roi] = (value, weight)
-        global_pi_update!(g, setpoint, t_end)
+        global_pi_update!(g, setpoint, t_end, ind)
     end
-    return controller_command(g.old_error, g.I_error, setpoint, controller)
+    return controller_command(g.old_error, g.I_error, setpoint, controller; full_scale_v)
 end
 
 """
@@ -631,6 +645,7 @@ function start_realtime(
             # Without an active protocol, no setpoint: no PI, no 1064 nm.
             setpoint, in_volts = pass_targets(settings.protocol, timestamp)
             kind = settings.protocol.setpoint_kind
+            ind = indicator(settings.protocol)
 
             frames = (ChannelFrame(), ChannelFrame())
             command = NaN
@@ -649,6 +664,11 @@ function start_realtime(
                 end
                 frames = Base.setindex(frames, frame, c)
             end
+            # The concentration shown: the indicator's, from each channel's lifetime — or, Ratio, the photon ratio Ch1/Ch2.
+            raw_ratio = channels == 2 && frames[2].photons > 0 ? frames[1].photons / frames[2].photons : NaN
+            frames = map(f -> ChannelFrame(f.histogram, f.fit, f.photons, f.lifetime,
+                                           uses_ratio(ind) ? ratio_concentration(raw_ratio, ind) : ion_concentration(f.lifetime, ind),
+                                           f.lifetime_kalman), frames)
 
             # The PI on the quantity the setpoint kind names, the controller's gains on its error.
             roi_pi = get!(RoiPi, roi_pis, roi)
@@ -656,14 +676,16 @@ function start_realtime(
             dt = isnan(roi_pi.last_time) ? h.t_fin_s - h.t_debut_s : h.t_fin_s - roi_pi.last_time
             roi_pi.last_time = h.t_fin_s
             # The photon ratio, filtered as the lifetimes are (its own observer per ROI).
-            ratio = complete ? kalman_update!(roi_pi.ratio, photon_ratio(kind, frames, channels), max(dt, eps(Float64)),
+            ratio = complete ? kalman_update!(roi_pi.ratio, photon_ratio(kind, frames, channels, ind), max(dt, eps(Float64)),
                                               lifetime_smooth_level(layout)) : NaN
-            value, weight = pi_input(kind, frames, ratio)
+            value, weight = pi_input(kind, frames, ratio, ind)
             if out.global_pi
-                command = global_pi_pass!(global_state, kind, roi, value, weight, complete, setpoint, h.t_fin_s, controller)
+                command = global_pi_pass!(global_state, kind, roi, value, weight, complete, setpoint, h.t_fin_s, controller;
+                                          full_scale_v = out.command_full_scale_v, ind)
             else
-                complete && pi_step!(roi_pi, pi_measure(kind, value), setpoint, dt)
-                command = controller_command(roi_pi.old_error, roi_pi.I_error, setpoint, controller)
+                complete && pi_step!(roi_pi, pi_measure(kind, value, ind), setpoint, dt)
+                command = controller_command(roi_pi.old_error, roi_pi.I_error, setpoint, controller;
+                                             full_scale_v = out.command_full_scale_v)
             end
 
             # With the protocol in volts: no PI; the command recorded is its voltage, which the DAQ loop writes.

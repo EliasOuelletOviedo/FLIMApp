@@ -309,18 +309,21 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
     the default; `routing_mode = 0x1900`, set by the engine). Without M3,
     `fin_par_m3 = false`: the pass lasts the programmed scan after M0
     (0x1100).
-- the **1064 nm laser gate**: AO 1 of the 6110 (`channels.commands`,
-  `[limits] gate_1064_v` = 5 V in config/bench.toml), on the same sample
-  clock, at 5 V while the laser is to emit — its power command on AO 0
-  above 0 V — where the slot lights the 1064 nm (each scan with the
-  excitation by the galvos, the whole slot by image, see *Excitation /
-  Detection* below); 0 V otherwise, so closed whenever the command is 0 V
-  (controller off, no active protocol, a protocol at 0 V, PI at 0 %). AO 0
-  is the PI's command (0–1 V); `gate_1064_v = 0` leaves AO 1 at 0 V.
-- the **opto PWM** at 1000 Hz, fixed (`PWM_FREQUENCY_HZ`; Protocol panel:
-  the *Duty cycle* in % with its toggle) alternates opto and acquisition,
-  for the whole run (from the next START), in Realtime and in Realtime in
-  images.
+- the **1064 nm laser gate**: AO 1 of the 6110 (`channels.commands`), on
+  the same sample clock, at the Controller panel's *Gate voltage* while
+  the laser is to emit — its power command on AO 0 above 0 V — where the
+  slot lights the 1064 nm (each scan with the excitation by the galvos, the
+  whole slot by image, see *Excitation / Detection* below); 0 V otherwise,
+  so closed whenever the command is 0 V (controller off, no active
+  protocol, a protocol at 0 V, PI at 0 %). AO 0 is the PI's command, at
+  most the Controller panel's *Max voltage*. Both apply live, each within
+  the bench's limit of its output — the range declared to NI-DAQmx
+  (`[limits] command_max_v` = 1 V, `gate_1064_v` = 5 V in
+  config/bench.toml).
+- the **opto PWM** (Controller panel: the *Duty cycle* in %, the *Gate
+  frequency* in Hz, 1000 by default; always on while the controller is
+  active) alternates opto and acquisition, for the whole run (from the next START), in Realtime and in
+  Realtime in images.
   - **Opto phase:** the first *Duty cycle* % of each period. The 1064 nm
     power (AO 0) and gate (AO 1) are at their command, and the photons are
     thrown away: the NI writes the reserved routing code.
@@ -330,10 +333,10 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
     each scan), so the 850 nm is on in both phases.
   - **Timing:** the periods run on from one slot to the next. The NI
     switches once per sample, so a period is a whole number of samples at
-    `[timing] sample_rate_hz`: at 10 kHz, 10 samples, so the duty cycle in
-    steps of one sample, 10 % (10 to 90 %). START refuses the PWM below
-    2000 Hz of sampling. The status line and `run.toml` (`daq.pwm_samples`)
-    give the PWM as played.
+    `[timing] sample_rate_hz`: at 10 kHz, at most 5000 Hz, and the duty
+    cycle in steps of one sample (10 % at 1000 Hz). START refuses a faster
+    PWM. The status line and `run.toml` (`daq.pwm_samples`) give the PWM as
+    played.
   - **SPC side:** with the detection by the galvos, the passes throw away
     the reserved code anyway. By image, the engine is told to
     (`ImagesROI(...; jeter_hors_roi)`). The routing diagnosis expects that
@@ -366,7 +369,7 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
   - **Voltage:** the command voltage written as is (V), no PI. The DAQ
     loop reads the protocol at each slot's start and writes its value on
     AO 0 while the controller is on (every ROI the same); off the
-    protocol, 0 V. START refuses a value outside 0 V–`command_max_v`; the
+    protocol, 0 V. START refuses a value outside 0 V–*Max voltage*; the
     frames record the voltages as commands.
   - **Lifetime Ch1 / Lifetime Ch2:** the channel's lifetime (ns), filtered
     by its Kalman observer, as the PI's measure.
@@ -376,7 +379,8 @@ parts together until STOP or until one of them stops (DAQ fault, SPC error):
   - **Ion concentration:** `(9.5/τ − 1)/0.025` of channel 1's filtered
     lifetime (`CONCENTRATION_CHANNEL`; pooled, of the pooled lifetime).
   - **The controller** (the Controller panel's) regulates that one
-    quantity with its gains, inversion and on/off. START refuses channel
+    quantity with its gains, inversion and on/off, its output at most the
+    *Max voltage*. START refuses channel
     2's lifetime and the ratios with a single card (`[verification]
     series`).
   - **Live:** the menu applies from the next pass, as the protocol's edits

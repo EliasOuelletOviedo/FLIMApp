@@ -166,7 +166,7 @@ function bench_config_from_dict(raw::AbstractDict; source::AbstractString = "dic
         command_full_scale_v = positive("limits", "command_full_scale_v"),
         command_max_v = positive("limits", "command_max_v"),
         gate_1064_v = (v = Float64(get_value("limits", "gate_1064_v"));
-                       0 <= v <= 10 ? v : error("bench config: limits.gate_1064_v must be within 0 and 10 V (0: AO 1 is PI command 2)")),
+                       0 < v <= 10 ? v : error("bench config: limits.gate_1064_v must be above 0 V and at most 10 V (AO 1, the 1064 nm gate)")),
         sync_pulse_s = positive("sync", "pulse_s"),
         watchdog_enabled = Bool(get_value("watchdog", "enabled")),
         watchdog_timeout_s = positive("watchdog", "timeout_s"),

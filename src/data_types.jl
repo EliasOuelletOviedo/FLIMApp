@@ -122,30 +122,27 @@ end
 """
     ControllerSettings
 
-The controller (the Protocol panel's "Controller"): the PI whose output is
-the 1064 nm power command (AO 0, `command1`), its inversion and on/off, its
-output and mode menus, and its gains. No `D` gain: the derivative term was
-dropped in favor of a Kalman observer (`KalmanState`/`kalman_update!`,
-smoothing.jl) feeding the P/I error terms a filtered measure instead of the
-raw fit — see `process_frame!` (acquisition.jl). (A save from before holds
-a second controller's `ch2_*`, `P2`, `I2`: ignored.)
+The controller (the Controller panel): the PI whose output is the 1064 nm
+power command (AO 0, `command1`), its on/off and inversion, its gains, and
+the 1064 nm's two voltages — `max_voltage`, the command's ceiling, and
+`gate_voltage`, AO 1's while the laser is to emit —, each at most the
+bench's limit of that output (`[limits] command_max_v`, `gate_1064_v`,
+config/bench.toml: the ranges declared to NI-DAQmx; `command_ceiling_v`,
+`gate_level_v`). No `D` gain: the derivative term was dropped in favor of a
+Kalman observer (`KalmanState`/`kalman_update!`, smoothing.jl) feeding the
+P/I error terms a filtered measure instead of the raw fit — see
+`process_frame!` (acquisition.jl). (A save from before holds a second
+controller's `ch2_*`, `P2`, `I2` and the TriggerBox's `ch1_out`,
+`ch1_mode`, `freq`: ignored.)
 """
 Base.@kwdef mutable struct ControllerSettings
     ch1_inv::Bool = false
     ch1_on::Bool = false
-    ch1_out::String = "Out 1"
-    ch1_mode::String = "Digital"
-    freq::Int = 1000
     P1::Float64 = 0.0
     I1::Float64 = 0.0
+    max_voltage::Float64 = 1.0
+    gate_voltage::Float64 = 5.0
 end
-
-"""
-The opto laser's PWM frequency (Hz), fixed — no longer a Protocol panel
-field: at 10 kHz a period of 10 samples, so the duty cycle in steps of 10 %
-(`pwm_samples`, loop/scan_pattern.jl).
-"""
-const PWM_FREQUENCY_HZ = 1000
 
 """
 The points of each ROI's spiral (`shape_spiral_points`), fixed — no longer
@@ -168,8 +165,41 @@ const SETPOINT_KINDS = ["Voltage", "Lifetime Ch1", "Lifetime Ch2", "Ratio Ch1/Ch
 """The channel whose lifetime gives the ion concentration the PI holds (channel 1 for now)."""
 const CONCENTRATION_CHANNEL = 1
 
-"""The ion concentration of a lifetime `τ` (ns): the sensor's calibration, as the Ion concentration plot shows it."""
-ion_concentration(τ::Real) = (9.5 / τ - 1) / 0.025
+"""
+    Indicator
+
+The ion indicator's conversion to a concentration (the Protocol panel's
+Indicator section, a snapshot of `ProtocolSettings`'s `indicator_*`):
+`type` "FLIM" — Stern–Volmer on the lifetime, `(tau0/τ − 1)/ksv` —,
+"Ratio" — on the photon ratio Ch1/Ch2 R, `kd·beta·(R − rmin)/(rmax − R)` —
+or "Hybrid" (the lifetime's for now). Defaults: the MQAE preset.
+"""
+Base.@kwdef struct Indicator
+    type::String = "FLIM"
+    tau0::Float64 = 9.5
+    ksv::Float64 = 0.025
+    rmin::Float64 = 0.0
+    rmax::Float64 = 0.0
+    kd::Float64 = 0.0
+    beta::Float64 = 0.0
+end
+
+"""The indicator presets (the Protocol panel's Preset menu; "Manual": every value editable). SCLm: no calibration yet, its values at 0."""
+const INDICATOR_PRESETS = Dict(
+    "MQAE" => Indicator(),
+    "SCLm" => Indicator(type = "FLIM", tau0 = 0.0, ksv = 0.0),
+)
+const INDICATOR_PRESET_NAMES = ["MQAE", "SCLm", "Manual"]
+const INDICATOR_TYPES = ["FLIM", "Ratio", "Hybrid"]
+
+"""Does the indicator read the photon ratio (Ratio), or the lifetime (FLIM, Hybrid for now)?"""
+uses_ratio(ind::Indicator)::Bool = ind.type == "Ratio"
+
+"""The ion concentration of a lifetime `τ` (ns), Stern–Volmer (`Indicator`; MQAE by default)."""
+ion_concentration(τ::Real, ind::Indicator = Indicator()) = (ind.tau0 / τ - 1) / ind.ksv
+
+"""The ion concentration of a photon ratio Ch1/Ch2 `R` (`Indicator`)."""
+ratio_concentration(R::Real, ind::Indicator) = ind.kd * ind.beta * (R - ind.rmin) / (ind.rmax - R)
 
 """
     ProtocolSettings
@@ -193,16 +223,20 @@ passes) or by the scanner's images (ROI masks, `images_par_bloc` images
 per block). Both by image: the galvos aren't used.
 
 `spiral_full_turns`/`scan_time`/`shift_time` are the
-ROI galvo-scan parameters (roi_geometry.jl, loop/scan_pattern.jl), editable from the Protocol panel
-(handlers_protocol.jl), each ROI's spiral of `POINTS_PER_ROI` points and
+ROI galvo-scan parameters (roi_geometry.jl, loop/scan_pattern.jl), editable from the ROI panel
+(handlers_roi.jl), each ROI's spiral of `POINTS_PER_ROI` points and
 `spiral_full_turns` complete turns — see `roi_scan_segments` in
 roi_geometry.jl for how they're used. (A save from before full turns holds
 `spiral_turns`, half turns: ignored, the default 5 instead.)
 
-`PWM_active`: the opto laser's PWM — every period of `PWM_FREQUENCY_HZ`,
-its first `PWM_duty` % the 1064 nm laser (power and gate) at its command and
-no acquisition (its photons thrown away), the rest the acquisition with the
-1064 nm off, for the whole run (`prepare_slot!`, loop/scan_pattern.jl).
+`PWM_active`: the opto laser's PWM, on whenever the controller is active
+(`ch1_on`, set at START; the Controller panel's Duty cycle and Gate
+frequency) — every period of `PWM_frequency` (Hz), its first
+`PWM_duty` % the 1064 nm laser (power and gate) at its command and no
+acquisition (its photons thrown away), the rest the acquisition with the
+1064 nm off, for the whole run (`prepare_slot!`, loop/scan_pattern.jl). A
+period is a whole number of samples: at 10 kHz and 1000 Hz, the duty cycle
+moves by 10 %.
 """
 Base.@kwdef mutable struct ProtocolSettings
     active::Bool = false
@@ -211,6 +245,15 @@ Base.@kwdef mutable struct ProtocolSettings
     times::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
     setpoints::Vector{Float64} = fill(NaN, PROTOCOL_STEP_COUNT)
     setpoint_kind::String = "Lifetime Ch1"
+    indicator_preset::String = "MQAE"
+    indicator_type::String = "FLIM"
+    indicator_tau0::Float64 = 9.5
+    indicator_ksv::Float64 = 0.025
+    indicator_rmin::Float64 = 0.0
+    indicator_rmax::Float64 = 0.0
+    indicator_kd::Float64 = 0.0
+    indicator_beta::Float64 = 0.0
+    PWM_frequency::Int = 1000
     PWM_duty::Int = 50
     PWM_active::Bool = false
     excitation_galvos::Bool = true
@@ -351,3 +394,24 @@ RoiCoordinates(name, xs, ys) = RoiCoordinates(name, xs, ys, -1)
 """How a ROI's lifetime was fitted in the ROI popup, for the session: "channel 1", "channel 2", "sum" or ""."""
 fit_channel_name(roi::RoiCoordinates) =
     roi.fit_channel == 1 ? "channel 1" : roi.fit_channel == 2 ? "channel 2" : roi.fit_channel == 0 ? "sum" : ""
+
+"""The indicator a protocol converts with (`Indicator`)."""
+indicator(p::ProtocolSettings) = Indicator(p.indicator_type, p.indicator_tau0, p.indicator_ksv, p.indicator_rmin,
+                                           p.indicator_rmax, p.indicator_kd, p.indicator_beta)
+
+"""
+    apply_indicator_preset!(p, preset)
+
+Set the protocol's indicator to `preset`'s values (`INDICATOR_PRESETS`);
+"Manual" keeps them, to edit. A preset's type stays the user's when the
+preset allows several (SCLm), FLIM for MQAE.
+"""
+function apply_indicator_preset!(p::ProtocolSettings, preset::AbstractString)
+    p.indicator_preset = String(preset)
+    ind = get(INDICATOR_PRESETS, preset, nothing)
+    ind === nothing && return p
+    preset == "MQAE" && (p.indicator_type = ind.type)
+    p.indicator_tau0, p.indicator_ksv = ind.tau0, ind.ksv
+    p.indicator_rmin, p.indicator_rmax, p.indicator_kd, p.indicator_beta = ind.rmin, ind.rmax, ind.kd, ind.beta
+    return p
+end

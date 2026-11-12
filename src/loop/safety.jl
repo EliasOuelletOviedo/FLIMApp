@@ -18,17 +18,26 @@ end
 Base.showerror(io::IO, e::SafetyError) = print(io, "refused: ", e.message)
 
 """
-    command_volts(command, cfg)::Float64
+    command_volts(command, cfg, ceiling_v=cfg.command_max_v)::Float64
 
 Output voltage for a PI command in percent: clamped to 0–100 %, scaled to
-`cfg.command_full_scale_v`, never above the declared `cfg.command_max_v`;
-a non-finite command (controller off, no setpoint) gives 0 V.
+`cfg.command_full_scale_v`, never above `ceiling_v` (the Controller panel's
+Max voltage, `command_ceiling_v`) nor the declared `cfg.command_max_v`; a
+non-finite command (controller off, no setpoint) gives 0 V.
 """
-function command_volts(command::Real, cfg::BenchConfig)::Float64
+function command_volts(command::Real, cfg::BenchConfig, ceiling_v::Real = cfg.command_max_v)::Float64
     isfinite(command) || return 0.0
     volts = clamp(Float64(command), 0.0, 100.0) / 100.0 * cfg.command_full_scale_v
-    return min(volts, cfg.command_max_v)
+    return min(volts, Float64(ceiling_v), cfg.command_max_v)
 end
+
+"""The 1064 nm command's ceiling (V): the Controller panel's Max voltage, within 0 V and `[limits] command_max_v` (the range declared to NI-DAQmx)."""
+command_ceiling_v(c::ControllerSettings, cfg::BenchConfig)::Float64 =
+    isfinite(c.max_voltage) ? clamp(c.max_voltage, 0.0, cfg.command_max_v) : 0.0
+
+"""The 1064 nm gate's voltage (V) while the laser is to emit: the Controller panel's Gate voltage, within 0 V and `[limits] gate_1064_v`."""
+gate_level_v(c::ControllerSettings, cfg::BenchConfig)::Float64 =
+    isfinite(c.gate_voltage) ? clamp(c.gate_voltage, 0.0, cfg.gate_1064_v) : 0.0
 
 """
     check_galvo_path(x, y, cfg)
@@ -51,10 +60,9 @@ end
     check_slot(buffers, cfg)
 
 Last check before a slot is written: finite values, galvos within
-`galvo_limit_v`, command 1 within 0…`command_max_v`, AO 1 within
-0…`gate_1064_v` when it is the 1064 nm gate (0…`command_max_v` when it is
-PI command 2). Throws a `SafetyError`; allocates nothing when the slot is
-fine.
+`galvo_limit_v`, the 1064 nm command (AO 0) within 0…`command_max_v`, its
+gate (AO 1) within 0…`gate_1064_v` — the ranges declared to NI-DAQmx.
+Throws a `SafetyError`; allocates nothing when the slot is fine.
 """
 function check_slot(buffers::SlotBuffers, cfg::BenchConfig)
     @inbounds for v in buffers.galvos
@@ -62,9 +70,9 @@ function check_slot(buffers::SlotBuffers, cfg::BenchConfig)
     end
     n = length(buffers.commands) ÷ 2
     @inbounds for (j, v) in enumerate(buffers.commands)
-        limit = j > n && cfg.gate_1064_v > 0 ? cfg.gate_1064_v : cfg.command_max_v
+        limit = j > n ? cfg.gate_1064_v : cfg.command_max_v
         (isfinite(v) && 0.0 <= v <= limit) ||
-            throw(SafetyError("$(j > n ? (cfg.gate_1064_v > 0 ? "1064 nm gate" : "command 2") : "command 1") sample $v V outside 0…$limit V"))
+            throw(SafetyError("$(j > n ? "1064 nm gate" : "1064 nm command") sample $v V outside 0…$limit V"))
     end
     return nothing
 end
