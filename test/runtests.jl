@@ -90,12 +90,32 @@ qc_bench_settings(; kw...) = FLIMCore.Reglages(; source = "qc104", series = ["3T
     @test normalized.repeats == 0
     @test normalized.delay == 0
     @test normalized.times !== raw.times
-    @test !normalized.setpoints_in_volts && !FLIMApp.protocol_in_volts(raw)
-    # The protocol in volts (the popup's checkbox) reaches the worker and the DAQ loop; only while active.
-    raw.setpoints_in_volts = true
-    @test FLIMApp.normalize_protocol_config(raw).setpoints_in_volts && FLIMApp.protocol_in_volts(raw)
+    @test normalized.setpoint_kind == "Lifetime Ch1" && !FLIMApp.protocol_in_volts(raw)
+    # The setpoint kind (the popup's menu) reaches the worker and the DAQ loop; in volts only while active.
+    raw.setpoint_kind = "Voltage"
+    @test FLIMApp.normalize_protocol_config(raw).setpoint_kind == "Voltage" && FLIMApp.protocol_in_volts(raw)
     raw.active = false
     @test !FLIMApp.protocol_in_volts(raw)
+    raw.setpoint_kind = "Ratio Ch2/Ch1"
+    @test FLIMApp.normalize_protocol_config(raw).setpoint_kind == "Ratio Ch2/Ch1"
+    # Channel 2's lifetime and the photon ratio need both channels; channel 1's and the concentration, one.
+    @test FLIMApp.needs_two_channels("Lifetime Ch2") && FLIMApp.needs_two_channels("Ratio Ch1/Ch2")
+    @test !FLIMApp.needs_two_channels("Lifetime Ch1") && !FLIMApp.needs_two_channels("Ion concentration")
+    @test !FLIMApp.needs_two_channels("Voltage")
+    # The popup's y label: the kind's unit.
+    @test FLIMApp.protocol_setpoint_label("Voltage") == "Setpoint [V]" && FLIMApp.protocol_setpoint_label("Lifetime Ch2") == "Setpoint [ns]"
+    @test FLIMApp.protocol_setpoint_label("Ratio Ch1/Ch2") == "Setpoint [Ch1/Ch2 photons]"
+    @test FLIMApp.protocol_setpoint_label("Ion concentration") == "Setpoint [ion concentration]"
+    # A save of the "Setpoint in volts" checkbox (before the menu): checked, Voltage; unchecked, Lifetime Ch1.
+    saved = FLIMApp.struct_to_dict(ProtocolSettings(delay = 12))
+    delete!(saved, :setpoint_kind)
+    saved[:setpoints_in_volts] = true
+    @test FLIMApp.dict_to_struct(ProtocolSettings, saved).setpoint_kind == "Voltage"
+    saved[:setpoints_in_volts] = false
+    @test FLIMApp.dict_to_struct(ProtocolSettings, saved).setpoint_kind == "Lifetime Ch1"
+    @test FLIMApp.settings_from_dict(ProtocolSettings, Dict{String, Any}("setpoints_in_volts" => true)).setpoint_kind == "Voltage"
+    saved[:setpoint_kind] = "Lifetime Ch9"                                         # no longer a kind: the default
+    @test FLIMApp.dict_to_struct(ProtocolSettings, saved).setpoint_kind == "Lifetime Ch1"
 end
 
 @testset "protocol CSV round-trip" begin
@@ -112,14 +132,18 @@ end
     @test imported.times[1:3] == times[1:3]
     @test imported.setpoints[1:3] == setpoints[1:3]
     @test all(isnan, imported.times[4:end])
-    @test imported.setpoints_in_volts === false
+    @test imported.setpoint_kind == "Lifetime Ch1"
 
-    # The setpoints in volts travel with the file; a file written before the checkbox says nothing.
-    FLIMApp.write_protocol_csv(csv_path; repeats=3, delay=7, times=times, setpoints=setpoints, setpoints_in_volts=true)
-    @test FLIMApp.read_protocol_csv(csv_path; step_count=FLIMApp.PROTOCOL_STEP_COUNT).setpoints_in_volts === true
+    # The setpoint kind travels with the file; a file of the checkbox gives its kind; one from before, nothing.
+    FLIMApp.write_protocol_csv(csv_path; repeats=3, delay=7, times=times, setpoints=setpoints, setpoint_kind="Ratio Ch1/Ch2")
+    @test FLIMApp.read_protocol_csv(csv_path; step_count=FLIMApp.PROTOCOL_STEP_COUNT).setpoint_kind == "Ratio Ch1/Ch2"
+    write(csv_path, "repeats,delay,setpoints_in_volts\n3,7,true\ntime,setpoint\n10,0.5\n")
+    @test FLIMApp.read_protocol_csv(csv_path; step_count=FLIMApp.PROTOCOL_STEP_COUNT).setpoint_kind == "Voltage"
+    write(csv_path, "repeats,delay,setpoint\n3,7,Lifetime Ch9\ntime,setpoint\n10,3.5\n")
+    @test FLIMApp.read_protocol_csv(csv_path; step_count=FLIMApp.PROTOCOL_STEP_COUNT).setpoint_kind === nothing
     write(csv_path, "repeats,delay\n3,7\ntime,setpoint\n10,3.5\n")
     old = FLIMApp.read_protocol_csv(csv_path; step_count=FLIMApp.PROTOCOL_STEP_COUNT)
-    @test old.setpoints_in_volts === nothing && old.repeats == 3 && old.times[1] == 10.0 && old.setpoints[1] == 3.5
+    @test old.setpoint_kind === nothing && old.repeats == 3 && old.times[1] == 10.0 && old.setpoints[1] == 3.5
 end
 
 @testset "state persistence round-trip" begin
@@ -271,7 +295,7 @@ end
     @test app_run.command1 == [12.0] && app_run.protocol_setpoint == [4.0] && app_run.i == 7
     @test app_run.stimulation == [1.0]                   # a command above 0: stimulating
 
-    # In images, the plots highlight the stimulation (no lifetime setpoint there).
+    # Without a lifetime setpoint in view (the protocol in volts), the plots highlight the stimulation.
     highlight = FLIMApp.PlotSlot()
     highlight.spans = FLIMApp.SetpointSpans(FLIMApp.Observable([NaN]), FLIMApp.Observable([NaN]))
     stored = (copy(app_run.timestamps), copy(app_run.protocol_setpoint), copy(app_run.stimulation))
@@ -279,11 +303,16 @@ end
     append!(empty!(app_run.protocol_setpoint), fill(NaN, 4))
     append!(empty!(app_run.stimulation), [NaN, 1.0, 1.0, NaN])
     FLIMApp.refresh_plot_slot!(app, app_run, highlight)
-    @test all(isnan, highlight.spans.starts[])                                    # clamp: only the setpoint counts
-    app_run.image_mode = true
-    FLIMApp.refresh_plot_slot!(app, app_run, highlight)
     @test !isempty(highlight.spans.starts[]) && first(highlight.spans.starts[]) == 2.0
-    app_run.image_mode = false
+    app_run.protocol_setpoint[3:4] .= 2.5                                         # a lifetime setpoint: only it counts
+    FLIMApp.refresh_plot_slot!(app, app_run, highlight)
+    @test highlight.spans.starts[] == [3.0]
+    # The setpoint line: on the plot of the setpoint's quantity.
+    @test FLIMApp.setpoint_drawn_on("Lifetime", "Lifetime Ch2", true, false) && !FLIMApp.setpoint_drawn_on("Lifetime", "Ratio Ch1/Ch2", true, false)
+    @test FLIMApp.setpoint_drawn_on("Ion concentration", "Ion concentration", false, true)
+    @test FLIMApp.setpoint_drawn_on(FLIMApp.RATIO_PLOT, "Ratio Ch1/Ch2", true, false)
+    @test !FLIMApp.setpoint_drawn_on(FLIMApp.RATIO_PLOT, "Ratio Ch1/Ch2", false, true)          # the plot shows ch2 / ch1
+    @test FLIMApp.setpoint_drawn_on(FLIMApp.RATIO_PLOT, "Ratio Ch2/Ch1", false, true) && !FLIMApp.setpoint_drawn_on("Command", "Voltage", true, true)
     append!(empty!(app_run.timestamps), stored[1]); append!(empty!(app_run.protocol_setpoint), stored[2])
     append!(empty!(app_run.stimulation), stored[3])
     @test length(series1.timestamps) == 2
@@ -454,7 +483,7 @@ end
     @test FLIMApp.routing_byte(FLIMCore.CODE_HORS_ROI, false) == 0x00
     @test FLIMApp.slots_per_cycle(idle) == 1 && FLIMApp.slot_duration_s(idle) ≈ 0.1
 
-    # The Realtime in images: galvos at 0 V, gate high the whole slot (no pause), even with ROIs drawn.
+    # Excitation and detection by image: galvos at 0 V, gate high the whole slot (no pause), even with ROIs drawn.
     images = FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(rois, order, false, -1000, 1000, -1000, 1000, 20, 3, 95, 5,
                                                             (1024, 1024), true, true), cfg)
     FLIMApp.prepare_slot!(buffers, images, 3, 0.75, 0.0)
@@ -462,10 +491,10 @@ end
     @test images.image_mode && FLIMApp.slots_per_cycle(images) == 1 && FLIMApp.slot_duration_s(images) ≈ 0.1
     @test all(==(0.0), buffers.galvos) && all(==(1), gate) && all(==(0.75), buffers.commands[1:images.slot_samples])   # the whole slot
     @test FLIMApp.slot_start_s(images, 2) ≈ (FLIMApp.entry_samples(images) + 2 * images.slot_samples) / cfg.sample_rate_hz
-    # Its commands: the protocol's voltages (no PI) on the outputs whose controller is on; 0 V off the protocol.
+    # The protocol in volts: its voltages (no PI) on the outputs whose controller is on; 0 V off the protocol.
     protocol = ProtocolSettings(active = true, delay = 10, times = [30.0, 30.0], setpoints = [0.75, 0.0], repeats = 1)
     commands(t; on1 = true, on2 = false, active = true) =
-        FLIMApp.image_mode_commands(FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = on1, ch2_on = on2),
+        FLIMApp.protocol_volts_commands(FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = on1, ch2_on = on2),
                                                              (p = deepcopy(protocol); p.active = active; p)), t, cfg)
     @test commands(20.0)[1] ≈ 0.75 / cfg.command_full_scale_v * 100 && isnan(commands(20.0)[2])
     @test FLIMApp.command_volts(commands(20.0)[1], cfg) ≈ 0.75 && FLIMApp.command_volts(commands(50.0)[1], cfg) == 0.0
@@ -562,22 +591,23 @@ end
     # The Protocol panel's PWM, taken at START: the request, the engine's commands, the checks, the texts.
     app, app_run = AppState(true), AppRun(cfg)
     @test !app.protocol.PWM_active && app.protocol.PWM_duty == 50 && FLIMApp.scan_request(app, app_run, Int[]).pwm_hz == 0.0
-    app.protocol.PWM_active, app.protocol.PWM_frequency, app.protocol.PWM_duty = true, 1000, 30
+    app.protocol.PWM_active, app.protocol.PWM_duty = true, 30
     r = FLIMApp.scan_request(app, app_run, Int[])
-    @test (r.pwm_hz, r.pwm_duty) == (1000.0, 0.3)
+    @test (r.pwm_hz, r.pwm_duty) == (1000.0, 0.3) && r.points_per_roi == 1000      # both fixed (PWM_FREQUENCY_HZ, POINTS_PER_ROI)
     @test FLIMApp.pwm_opto_fraction(app.protocol, cfg.sample_rate_hz) ≈ 0.3 && FLIMApp.clamp_command(app, app_run, Int[], mktempdir()).opto ≈ 0.3
     @test FLIMApp.pwm_text(app.protocol, cfg.sample_rate_hz) == "PWM 1000.0 Hz, opto 30.0 % (3 of 10 samples)"
     @test FLIMApp.images_command(FLIMApp.RoiCoordinates[], Int[], (100, 48), FLIMCore.Reglages(), ""; pwm = true).jeter_hors_roi
     @test !FLIMApp.images_command(FLIMApp.RoiCoordinates[], Int[], (100, 48), FLIMCore.Reglages(), "").jeter_hors_roi
-    app.protocol.PWM_frequency = 6000
-    @test occursin("at most 5000 Hz", FLIMApp.pwm_refusal(app.protocol, cfg.sample_rate_hz))
-    app.protocol.PWM_frequency = 0                                   # the toggle on, no PWM played: the opto the whole scan
-    @test occursin("at least 1 Hz", FLIMApp.pwm_refusal(app.protocol, cfg.sample_rate_hz))
+    @test FLIMApp.pwm_refusal(app.protocol, cfg.sample_rate_hz) == ""
+    @test occursin("2000 Hz at least", FLIMApp.pwm_refusal(app.protocol, 1000.0))   # 1000 Hz: 2 samples per period at least
+    @test FLIMApp.pwm_played(app.protocol, 1000.0) == (0, 0)
     app.protocol.PWM_active = false
-    @test FLIMApp.pwm_refusal(app.protocol, cfg.sample_rate_hz) == "" && FLIMApp.pwm_text(app.protocol, cfg.sample_rate_hz) == ""
-    # A state saved before the duty cycle existed: its defaults, the rest kept.
+    @test FLIMApp.pwm_refusal(app.protocol, 1000.0) == "" && FLIMApp.pwm_text(app.protocol, cfg.sample_rate_hz) == ""
+    # A state saved before the duty cycle existed: its defaults, the rest kept; the PWM frequency and the
+    # points per ROI it still has (fixed since), ignored.
     old = FLIMApp.struct_to_dict(ProtocolSettings(scan_time = 400))
     delete!(old, :PWM_duty); delete!(old, :PWM_active)
+    old[:PWM_frequency], old[:points_per_roi] = 10, 100
     restored = FLIMApp.dict_to_struct(ProtocolSettings, old)
     @test restored.PWM_duty == 50 && !restored.PWM_active && restored.scan_time == 400
 end
@@ -610,13 +640,13 @@ end
     pb = FLIMApp.SlotBuffers(paused.slot_samples)
     FLIMApp.prepare_slot!(pb, paused, 0, 0.4, 5.0)
     @test all(l -> l & 0x01 == 0x00, pb.lines[901:end]) && all(==(0.0), pb.commands[901:paused.slot_samples])
-    # The Realtime in images: the slots only pace the commands; a shift of 0 leaves the same 2 samples.
+    # Both by image: the slots only pace the commands; a shift of 0 leaves the same 2 samples.
     images = FLIMApp.build_scan_pattern(FLIMApp.ScanRequest(FLIMApp.RoiCoordinates[], Int[], false, -1000, 1000, -1000, 1000,
                                                             20, 3, 90, 0, (1024, 1024), true, true), cfg)
     @test images.shift_samples == 2 && all(l -> l & 0x01 == 0x01, images.lines)
 end
 
-@testset "Realtime in images: the engine's command, START's checks, no PI" begin
+@testset "Detection in images: the engine's command, START's checks, the PI's scope" begin
     roi = FLIMApp.RoiCoordinates("square", [10.0, 20.0, 20.0, 10.0], [5.0, 5.0, 15.0, 15.0])
     settings = FLIMCore.Reglages(images = true, images_par_bloc = 5)
     c = FLIMApp.images_command([roi], [1], (100, 48), settings, "/session")
@@ -624,31 +654,169 @@ end
     @test sort(c.rois[1]) == sort(FLIMApp.roi_pixel_mask(roi.xs, roi.ys, 100, 48)) && length(c.rois[1]) == 100
     @test isempty(FLIMApp.images_command([roi], Int[], (100, 48), settings, "").rois)        # without ROIs: the whole image
 
+    # The setpoints are lifetimes unless the protocol is in volts (checked for every mode, realtime_start_refusal).
     app, app_run = AppState(true), AppRun(test_bench_config())
     app.protocol.active, app.protocol.setpoints = true, [0.5, 1.5, NaN]
-    @test occursin("1.5 V is outside 0–1.0 V", FLIMApp.images_start_refusal(app, app_run))      # [limits] command_max_v
-    app.protocol.setpoints = [0.5, 1.0, NaN]
     @test FLIMApp.images_start_refusal(app, app_run) == ""
 
-    out = FLIMApp.AnalysisOutput(FLIMApp.Exchange(); roi_order = [1, 2], image_full_scale_v = 5.0)
-    @test FLIMApp.image_mode(out) && !out.drive_outputs                       # the DAQ loop writes the protocol, not the worker
-    @test !FLIMApp.image_mode(FLIMApp.AnalysisOutput(FLIMApp.Exchange())) && FLIMApp.AnalysisOutput(FLIMApp.Exchange()).drive_outputs
+    # The excitation by image: one PI for all ROIs, whose commands the worker writes for every ROI.
+    out = FLIMApp.AnalysisOutput(FLIMApp.Exchange(); roi_order = [1, 2], global_pi = true)
+    @test out.global_pi && out.drive_outputs
+    @test !FLIMApp.AnalysisOutput(FLIMApp.Exchange()).global_pi && FLIMApp.AnalysisOutput(FLIMApp.Exchange()).drive_outputs
+end
+
+@testset "Excitation / Detection: by the galvos or by image, a PI per ROI or one for all" begin
+    cfg = test_bench_config()
+    rois = [square_roi(100.0, 100.0), square_roi(600.0, 300.0)]
+    order = FLIMApp.roi_visit_order(rois)
+    request(excitation, detection; pwm = 0.0) =
+        FLIMApp.ScanRequest(rois, order, true, -1000, 1000, -1000, 1000, 20, 3, 95, 5, (1024, 1024), true,
+                            excitation, detection, pwm, 0.3)
+    gate(lines) = (lines .>> FLIMApp.DO_BIT_GATE) .& 0x01
+    codes(lines) = lines .>> FLIMApp.DO_ROI_CODE_SHIFT
+    code_of(c) = FLIMApp.routing_byte(c, true) >> FLIMApp.DO_ROI_CODE_SHIFT
+    no_roi, reserved = code_of(FLIMCore.CODE_SANS_ROI), code_of(FLIMCore.CODE_HORS_ROI)
+
+    # Excitation by the galvos, detection by image: the galvos spiral, the 1064 nm on each spiral only (0 V while
+    # they move); the 850 nm on and the no-ROI code the whole slot — the scanner's images give each photon's ROI.
+    mixed = FLIMApp.build_scan_pattern(request(true, false), cfg)
+    n, n_scan = mixed.slot_samples, mixed.scan_samples
+    b = FLIMApp.SlotBuffers(n)
+    FLIMApp.prepare_slot!(b, mixed, 1, 0.6, 5.0)
+    @test mixed.scanning && !mixed.image_mode && any(!=(0.0), b.galvos)
+    @test all(==(1), gate(b.lines)) && all(==(no_roi), codes(b.lines))
+    @test all(==(0.6), b.commands[1:n_scan]) && all(==(0.0), b.commands[n_scan+1:n])
+    @test all(==(5.0), b.commands[n+1:n+n_scan]) && all(==(0.0), b.commands[n+n_scan+1:2n])
+    # With the PWM, its opto phases carry the reserved code on the spirals only, where the 1064 nm shines.
+    FLIMApp.prepare_slot!(b, FLIMApp.build_scan_pattern(request(true, false; pwm = 1000.0), cfg), 1, 0.6, 5.0)
+    @test any(==(reserved), codes(b.lines[1:n_scan])) && all(==(no_roi), codes(b.lines[n_scan+1:n]))
+    FLIMApp.check_slot(b, cfg)
+
+    # Excitation by image, detection by the galvos: each spiral with its ROI's code and the 850 nm, the reserved code
+    # and the gate low while the galvos move — the 1064 nm the whole slot.
+    other = FLIMApp.build_scan_pattern(request(false, true), cfg)
+    FLIMApp.prepare_slot!(b, other, 1, 0.6, 5.0)
+    @test other.scanning && all(==(1), gate(b.lines[1:n_scan])) && all(==(0), gate(b.lines[n_scan+1:n]))
+    @test all(==(code_of(FLIMCore.code_routage(FLIMApp.slot_roi(other, 1)))), codes(b.lines[1:n_scan]))
+    @test all(==(reserved), codes(b.lines[n_scan+1:n]))
+    @test all(==(0.6), b.commands[1:n]) && all(==(5.0), b.commands[n+1:2n])
+    # Both by the galvos: as before, the 1064 nm exactly with the gate; both by image: the galvos unused.
+    both = FLIMApp.build_scan_pattern(request(true, true), cfg)
+    @test both.laser_1064 == FLIMApp.gate_mask(both.lines)
+    still = FLIMApp.build_scan_pattern(request(false, false), cfg)
+    @test still.image_mode && !still.scanning && all(still.laser_1064) && all(==(0.0), still.x)
+
+    # START: with ROIs to scan, the two toggles; without (ROI off, or none drawn), both by image — the whole image.
+    app, app_run = AppState(true), AppRun(cfg)
+    @test app.protocol.excitation_galvos && app.protocol.spiral_full_turns == 5
+    @test FLIMApp.run_modes(app, app_run) == (false, false)
+    app.roi.active = true
+    @test FLIMApp.run_modes(app, app_run) == (false, false)
+    app_run.rois[] = copy(rois)
+    @test FLIMApp.run_modes(app, app_run) == (true, !app_run.spc.settings.images)
+    app.protocol.excitation_galvos = false
+    r = FLIMApp.scan_request(app, app_run, order)
+    @test !r.excitation_galvos && r.detection_galvos == !app_run.spc.settings.images && r.spiral_turns == 5
+    @test FLIMApp.run_modes_text(true, true, 17, false) == ""
+    @test FLIMApp.run_modes_text(false, false, 17, true) == " (whole image, 17 images per block)"
+    @test FLIMApp.run_modes_text(true, false, 10, false) == " (excitation galvos, detection images, 10 images per block)"
+    @test FLIMApp.run_modes_text(false, true, 10, false) == " (excitation image, detection galvos)"
+    app_run.run_rois = copy(rois)
+    info = FLIMApp.run_info(app, app_run, order)
+    @test info["roi"]["excitation"] == "image" && info["roi"]["spiral_full_turns"] == 5
+    @test info["roi"]["detection"] == (app_run.spc.settings.images ? "images" : "galvos")
+    @test startswith(info["pi_outputs"], "applied, one PI for all ROIs")
+    app.roi.active = false
+    info = FLIMApp.run_info(app, app_run, Int[])
+    @test info["roi"]["detection"] == "images" && info["spc"]["images"]               # ROI off: the whole image
+
+    # Playback: a session's modes; before the Excitation toggle, both by image exactly in images.
+    session(info) = FLIMApp.Session("", info, FLIMApp.RoiCoordinates[], Int[], (0, 0), Matrix{Float64}[], Dict{String, Any}())
+    @test FLIMApp.session_modes(session(Dict{String, Any}())) == (true, true)
+    @test FLIMApp.session_modes(session(Dict{String, Any}("spc" => Dict{String, Any}("images" => true)))) == (false, false)
+    @test FLIMApp.session_modes(session(Dict{String, Any}("spc" => Dict{String, Any}("images" => true),
+                                                          "roi" => Dict{String, Any}("excitation" => "galvos")))) == (true, false)
+
+    # The PI's quantity, by setpoint kind: a channel's filtered lifetime, the filtered photon ratio, the concentration.
+    two = (FLIMApp.ChannelFrame(Float64[], Float64[], 200.0, 2.1, NaN, 2.0), FLIMApp.ChannelFrame(Float64[], Float64[], 50.0, 3.1, NaN, 3.0))
+    @test FLIMApp.pi_input("Lifetime Ch1", two, NaN) == (2.0, 200.0) && FLIMApp.pi_input("Lifetime Ch2", two, NaN) == (3.0, 50.0)
+    @test FLIMApp.photon_ratio("Ratio Ch1/Ch2", two, 2) == 4.0 && FLIMApp.photon_ratio("Ratio Ch2/Ch1", two, 2) == 0.25
+    @test isnan(FLIMApp.photon_ratio("Ratio Ch1/Ch2", two, 1)) && isnan(FLIMApp.photon_ratio("Lifetime Ch1", two, 2))
+    @test FLIMApp.pi_input("Ratio Ch1/Ch2", two, 3.9) == (3.9, 50.0) && FLIMApp.pi_input("Ratio Ch2/Ch1", two, 0.3) == (0.3, 200.0)
+    @test FLIMApp.pi_input("Ion concentration", two, NaN) == (2.0, 200.0) && FLIMApp.pi_measure("Ion concentration", 2.0) ≈ 150.0
+    @test all(isnan, FLIMApp.pi_input("Voltage", two, NaN)) && FLIMApp.pi_measure("Lifetime Ch1", 2.0) == 2.0
+    # A ROI's PI: its own error terms, held without a measure, both controllers on its error; another kind, from zero.
+    controller = ControllerSettings(P1 = 10.0, I1 = 1.0, ch1_on = true, P2 = 2.0, I2 = 0.0, ch2_on = true)
+    pi = FLIMApp.pi_step!(FLIMApp.RoiPi(), 2.0, 4.0, 0.5)
+    @test pi.old_error == 2.0 && pi.I_error == 1.0
+    FLIMApp.pi_step!(pi, NaN, 4.0, 0.5)
+    @test pi.old_error == 2.0 && pi.I_error == 1.0                                   # a failed fit: held
+    @test all(FLIMApp.pi_commands(pi.old_error, pi.I_error, 4.0, controller) .≈ (21.0, 4.0))
+    @test FLIMApp.restart!(pi, "Ratio Ch1/Ch2").kind == "Ratio Ch1/Ch2" && pi.I_error == 0.0 && pi.old_error == 0.0
+
+    # The one PI (excitation by image): on the ROIs' pooled quantity, the same command for every ROI.
+    @test FLIMApp.weighted_mean(Dict(1 => (2.0, 100.0), 2 => (4.0, 300.0), 3 => (NaN, 50.0))) ≈ 3.5
+    @test isnan(FLIMApp.weighted_mean(Dict{Int, Tuple{Float64, Float64}}()))
+    g = FLIMApp.GlobalPi()
+    step!(roi, value, weight, t; complete = true, setpoint = 4.0, kind = "Lifetime Ch1") =
+        FLIMApp.global_pi_pass!(g, kind, roi, value, weight, complete, setpoint, t, controller)
+    @test all(step!(1, 2.0, 100.0, 1.0) .≈ (20.0, 4.0))                    # P only: 10 × (4 − 2), and 2 × (4 − 2)
+    @test all(step!(2, 4.0, 300.0, 1.0) .≈ (5.0, 1.0))                      # same block (same end): the error refined
+    @test g.I_error == 0.0 && g.measured ≈ 3.5
+    @test step!(1, 2.0, 100.0, 2.0)[1] ≈ 5.5 && g.I_error ≈ 0.5              # 1 s later: the held error integrated
+    @test step!(1, 9.0, 100.0, 3.0; complete = false)[1] ≈ 5.5               # kept out of the PI: as it was
+    @test all(isnan, step!(1, 2.0, 100.0, 4.0; setpoint = NaN)) && g.I_error == 0.0     # no protocol
+    # Another kind, another quantity: from zero — here the concentration of the pooled lifetime.
+    step!(1, 2.0, 100.0, 5.0; kind = "Ion concentration", setpoint = 100.0)
+    @test length(g.latest) == 1 && g.measured ≈ FLIMApp.ion_concentration(2.0) && g.I_error == 0.0 && g.old_error ≈ -50.0
+    ex = FLIMApp.Exchange()
+    sample = FLIMApp.AcquisitionSample(FLIMApp.ChannelFrame(), FLIMApp.ChannelFrame(), 25.0, NaN, 1.0, 4.0, UInt32(1), 1,
+                                       0.0, 1.0, true, "", time())
+    FLIMApp.emit_frame!(FLIMApp.AnalysisOutput(ex; roi_order = [1, 2, 3], global_pi = true), sample, 2)
+    @test all(k -> FLIMApp.command_values(ex, k)[1] == 25.0, 1:3)
+    FLIMApp.emit_frame!(FLIMApp.AnalysisOutput(ex; roi_order = [1, 2, 3]), FLIMApp.AcquisitionSample(FLIMApp.ChannelFrame(),
+        FLIMApp.ChannelFrame(), 30.0, NaN, 1.0, 4.0, UInt32(2), 2, 1.0, 2.0, true, "", time()), 2)
+    @test FLIMApp.command_values(ex, 2)[1] == 30.0 && FLIMApp.command_values(ex, 1)[1] == 25.0     # one PI per ROI
+
+    # The spiral: `turns` complete turns (2π each), from the center out.
+    xs, ys = [1000 * cos(t) for t in range(0, 2π; length = 65)[1:64]], [1000 * sin(t) for t in range(0, 2π; length = 65)[1:64]]
+    points = FLIMApp.shape_spiral_points(2000, xs, ys; center = (0.0, 0.0), turns = 3)
+    angles = [atan(y, x) for (x, y) in points]
+    @test sum(d -> mod(d + π, 2π) - π, diff(angles)) ≈ 2π * 3 * 1999 / 2000 atol = 0.05
+    # A save from before the full turns holds `spiral_turns` (half turns): ignored, 5 full turns instead.
+    old = FLIMApp.struct_to_dict(ProtocolSettings(scan_time = 400))
+    delete!(old, :spiral_full_turns); delete!(old, :excitation_galvos)
+    old[:spiral_turns] = 10
+    restored = FLIMApp.dict_to_struct(ProtocolSettings, old)
+    @test restored.spiral_full_turns == 5 && restored.excitation_galvos && restored.scan_time == 400
+
+    # The Protocol panel: the galvo scan's spinners with the galvos, the image averaging with the detection by image.
+    @test FLIMApp.spinners_in_use(true, true, true) == (true, false)
+    @test FLIMApp.spinners_in_use(true, false, false) == (false, true)
+    @test FLIMApp.spinners_in_use(true, true, false) == (true, true)
+    @test FLIMApp.spinners_in_use(true, false, true) == (true, false)
+    @test FLIMApp.spinners_in_use(false, true, true) == (false, true)                    # ROI off: both by image
+    color, textbox = FLIMApp.Observable{Any}(FLIMApp.COLOR_1), (focused = FLIMApp.Observable(true),)
+    fades = [(color, FLIMApp.COLOR_1, FLIMApp.faded(FLIMApp.COLOR_1))]
+    FLIMApp.set_spinner_enabled!(fades, textbox, false)
+    @test color[].alpha ≈ 0.5 && !textbox.focused[]                                     # faded, no focus
+    FLIMApp.set_spinner_enabled!(fades, textbox, true)
+    @test color[] == FLIMApp.COLOR_1 && FLIMApp.faded(:white).alpha ≈ 0.5
 end
 
 @testset "Protocol in volts: the setpoints as the command voltage, no PI" begin
     cfg = test_bench_config()
     protocol = ProtocolSettings(active = true, delay = 10, times = [30.0, 30.0], setpoints = [0.75, 0.25], repeats = 1,
-                                setpoints_in_volts = true)
-    lifetimes = deepcopy(protocol); lifetimes.setpoints_in_volts = false
+                                setpoint_kind = "Voltage")
+    lifetimes = deepcopy(protocol); lifetimes.setpoint_kind = "Lifetime Ch1"
     off = deepcopy(protocol); off.active = false
 
     # The worker: no PI and no lifetime setpoint plotted; the commands it records are the protocol's voltages.
-    @test isequal(FLIMApp.pass_targets(protocol, 20.0, false), (NaN, NaN, true))
-    @test FLIMApp.pass_targets(lifetimes, 20.0, false) == (0.75, 0.75, false)            # unchecked: the lifetime the PI holds
-    @test isequal(FLIMApp.pass_targets(off, 20.0, false), (4.0, NaN, false))             # inactive: the PI's fallback, as before
-    @test isequal(FLIMApp.pass_targets(protocol, 20.0, true), (NaN, NaN, false))         # images: volts anyway (image_mode)
+    @test isequal(FLIMApp.pass_targets(protocol, 20.0), (NaN, true))
+    @test FLIMApp.pass_targets(lifetimes, 20.0) == (0.75, false)                         # unchecked: the lifetime the PI holds
+    @test isequal(FLIMApp.pass_targets(off, 20.0), (NaN, false))                         # inactive: no PI, no 1064 nm
     out = FLIMApp.AnalysisOutput(FLIMApp.Exchange(); command_full_scale_v = cfg.command_full_scale_v)
-    @test out.drive_outputs && !FLIMApp.image_mode(out) && out.command_full_scale_v == cfg.command_full_scale_v
+    @test out.drive_outputs && !out.global_pi && out.command_full_scale_v == cfg.command_full_scale_v
 
     # The DAQ loop: each slot, the protocol's voltage at its start (1 s slots after a 50 ms entry), whatever the PI
     # wrote; 0 V before its delay and after its repeats. Unchecked or inactive: the PI's commands again.
@@ -675,11 +843,11 @@ end
     @test FLIMApp.protocol_volts_problem(protocol, cfg.command_max_v) == ""
     protocol.setpoints = [0.75, 1.5]
     @test FLIMApp.protocol_volts_problem(protocol, cfg.command_max_v) == "1.5 V is outside 0–$(cfg.command_max_v) V"
-    # A state saved before the checkbox: lifetimes, the rest kept.
+    # A state saved before the checkbox and the menu: lifetimes, the rest kept.
     saved = FLIMApp.struct_to_dict(ProtocolSettings(delay = 12))
-    delete!(saved, :setpoints_in_volts)
+    delete!(saved, :setpoint_kind)
     restored = FLIMApp.dict_to_struct(ProtocolSettings, saved)
-    @test !restored.setpoints_in_volts && restored.delay == 12
+    @test restored.setpoint_kind == "Lifetime Ch1" && restored.delay == 12
 end
 
 @testset "DAQ loop on the simulated cards" begin
@@ -1317,8 +1485,10 @@ end
         end
 
         ex = FLIMApp.Exchange()
+        # The PI's setpoint: an active protocol at 4 ns the whole run (without one, no PI: no 1064 nm).
+        holding = ProtocolSettings(active = true, delay = 0, times = [100.0], setpoints = [4.0], repeats = 1)
         FLIMApp.publish_settings!(ex, FLIMApp.AnalysisSettings(LayoutSettings(), ControllerSettings(ch1_on = true, P1 = 1.0),
-                                                               ProtocolSettings()))
+                                                               holding))
         histograms = Channel{FLIMCore.HistoClamp}(16)
         codes = [1, 2, 1, 2, 1, 2]
         foreach(n -> put!(histograms, pass(n, codes[n]; pertes = n == 5 ? 3 : 0)), eachindex(codes))
@@ -1548,6 +1718,15 @@ end
         @test occursin("16 ROIs", FLIMApp.realtime_start_refusal(app, app_run))
         app_run.rois[] = [square_roi(100.0, 100.0), square_roi(600.0, 300.0), square_roi(300.0, 800.0)]
         @test FLIMApp.realtime_start_refusal(app, app_run) == ""
+        # A setpoint on channel 2 or the photon ratio needs two channels: refused with a single card.
+        series = copy(app_run.spc.settings.series)
+        app.protocol.active, app.protocol.setpoint_kind = true, "Ratio Ch2/Ch1"
+        app_run.spc.settings.series = series[1:1]
+        @test occursin("needs channel 2", FLIMApp.realtime_start_refusal(app, app_run))
+        app.protocol.setpoint_kind = "Ion concentration"                           # channel 1's lifetime
+        @test FLIMApp.realtime_start_refusal(app, app_run) == ""
+        app_run.spc.settings.series = series
+        app.protocol.active, app.protocol.setpoint_kind = false, "Lifetime Ch1"
 
         order = FLIMApp.roi_visit_order(app_run.rois[])
         dir = FLIMApp.new_run_dir(FLIMApp.journal_root(cfg), time())
@@ -2084,18 +2263,23 @@ end
 
 include("test_flimcore.jl")
 
-@testset "Galvos / Image masks: the Protocol panel's toggle and the SPC window's box on [clamp] images" begin
+@testset "Detection: the Protocol panel's toggle and the SPC window's box on [clamp] images, the averaging boxes" begin
     path = joinpath(mktempdir(), "spc.toml")
     FLIMCore.ecrire_reglages(path, FLIMCore.Reglages(source = "simulation", dossier = mktempdir()))
     view = FLIMApp.SpcView(path)
-    panel, box = (active = FLIMApp.Observable(false),), (active = FLIMApp.Observable(false),)
-    view.panel_images_toggle = panel
+    # The panel's Detection toggle is on for the galvos (`!images`), the window's box on for images.
+    panel, box = (active = FLIMApp.Observable(true),), (active = FLIMApp.Observable(false),)
+    text_box(value) = (focused = FLIMApp.Observable(false), displayed_string = FLIMApp.Observable(value),
+                       stored_string = FLIMApp.Observable(value))
+    block = string(view.settings.images_par_bloc)
+    panel_block, window_block = text_box(block), text_box(block)
+    view.panel_detection_toggle, view.panel_block_box = panel, panel_block
     @test FLIMApp.spc_edit_setting!(view, :images, true) && FLIMCore.lire_reglages(path).images    # either toggle: written
     FLIMApp.sync_images_toggles!(view, false)
-    @test !panel.active[]                                          # another panel shown: left alone
+    @test panel.active[]                                           # another panel shown: left alone
     FLIMApp.sync_images_toggles!(view, true)
-    @test panel.active[]
-    view.widgets = FLIMApp.SpcWindowWidgets(nothing, nothing, nothing, nothing, nothing, nothing, box)
+    @test !panel.active[]                                          # by image: off
+    view.widgets = FLIMApp.SpcWindowWidgets(nothing, nothing, nothing, nothing, nothing, nothing, box, window_block)
     FLIMApp.sync_images_toggles!(view, true)
     @test !box.active[]                                            # the SPC window closed
     view.window_open = true
@@ -2103,7 +2287,16 @@ include("test_flimcore.jl")
     @test box.active[]
     @test FLIMApp.spc_edit_setting!(view, :images, false)
     FLIMApp.sync_images_toggles!(view, true)
-    @test !panel.active[] && !box.active[] && !FLIMCore.lire_reglages(path).images
+    @test panel.active[] && !box.active[] && !FLIMCore.lire_reglages(path).images
+    # The image averaging: either box edits images_par_bloc, the other follows — unless being edited.
+    @test FLIMApp.spc_edit_setting!(view, :images_par_bloc, 10) && FLIMCore.lire_reglages(path).images_par_bloc == 10
+    window_block.focused[] = true
+    FLIMApp.sync_images_toggles!(view, true)
+    @test panel_block.stored_string[] == panel_block.displayed_string[] == "10" && window_block.stored_string[] == block
+    window_block.focused[] = false
+    FLIMApp.sync_images_toggles!(view, true)
+    @test window_block.stored_string[] == "10"
+    @test !FLIMApp.spc_edit_setting!(view, :images_par_bloc, 0) && view.settings.images_par_bloc == 10   # 1 image at least
 end
 
 @testset "SPC window state, without a window" begin
@@ -2142,7 +2335,7 @@ end
     @test await(() -> !isempty(card.rates[]))
     # The counts bar: each channel's card count rate, measuring or not; 1 (the bottom) once stale.
     @test FLIMApp.spc_channel_rates(view) == (view.cards[0].last_rates.cfd, view.cards[1].last_rates.cfd)
-    @test all(>(1.0), FLIMApp.spc_channel_rates(view)) && FLIMApp.spc_channel_rates(view; max_age_s = -1) == (1.0, 1.0)
+    @test all(>(10.0), FLIMApp.spc_channel_rates(view)) && FLIMApp.spc_channel_rates(view; max_age_s = -1) == (10.0, 10.0)
 
     # IRF: Singles on both channels at once, summed until each maximum passes the target; at its end
     # the sum is to be imported (`irf_acquisition_csv`: its CSV), a stopped one isn't.

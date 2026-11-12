@@ -35,7 +35,8 @@ const TEXT    = parse(RGB{Float64}, DARK_MODE_THEME[:text])
 const PLOT_COLOR_CH1 = Makie.wong_colors()[1]
 const PLOT_COLOR_CH2 = Makie.wong_colors()[2]
 const PLOT_COLOR_REF = Makie.wong_colors()[3]
-const PLOT_COLOR_IRF = Makie.wong_colors()[6]   # the IRF on the Histogram plot (both channels)
+const PLOT_COLOR_IRF_CH1 = Makie.wong_colors()[3]   # channel 1's IRF on the Histogram plot
+const PLOT_COLOR_IRF_CH2 = Makie.wong_colors()[6]   # channel 2's IRF on the Histogram plot
 
 # Line width for every plotted trace (data lines, ROI outlines, protocol
 # preview lines) — single source of truth so line thickness changes
@@ -334,7 +335,7 @@ AXIS_COUNTS_ATTRS = Dict{Symbol, Any}(
     :height             => nothing,
     :leftspinecolor     => COLOR_5,
     :leftspinevisible   => true,
-    :limits             => ((0, 1), (1, 1e7)),
+    :limits             => ((0, 1), (10, 1e8)),
     :panbutton          => Makie.Mouse.right,
     :rightspinecolor    => COLOR_5,
     :rightspinevisible  => true,
@@ -446,7 +447,7 @@ AXIS_COUNTS_ATTRS = Dict{Symbol, Any}(
     :yticklabelsize     => 16,
     :yticklabelspace    => Makie.automatic,
     :yticklabelsvisible => true,
-    :yticks             => LogTicks(0:7),
+    :yticks             => LogTicks(1:8),
     :yticksize          => 5,
     :yticksmirrored     => false,
     :yticksvisible      => true,
@@ -686,19 +687,6 @@ TOGGLE_ATTRS = Dict{Symbol, Any}(
     :toggleduration     => 0.15,
     :valign             => :center,
     :width              => 20
-)
-
-# A checkbox the size of the toggles, in their colors (the text boxes' border).
-CHECKBOX_ATTRS = Dict{Symbol, Any}(
-    :alignmode                     => Inside(),
-    :checkboxcolor_checked         => COLOR_5,
-    :checkboxcolor_unchecked       => COLOR_2,
-    :checkboxstrokecolor_checked   => COLOR_5,
-    :checkboxstrokecolor_unchecked => COLOR_5,
-    :checkmarkcolor_checked        => TEXT,
-    :halign                        => :center,
-    :size                          => 20,
-    :valign                        => :center
 )
 
 PATH_TEXT_ATTRS = Dict{Symbol, Any}(

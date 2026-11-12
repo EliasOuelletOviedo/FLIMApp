@@ -231,6 +231,28 @@ function protocol_setpoint_spans(
     return (starts, ends)
 end
 
+"""
+    setpoint_drawn_on(selection, kind, show_ch1, show_ch2)::Bool
+
+Does the plot `selection` show the quantity the protocol's setpoint `kind`
+names, and so its setpoint line: Lifetime for a lifetime, Ion concentration
+for the concentration, Channel ratio for a photon ratio in the direction
+its toggles pick (`ratio_series`: channel 1 the numerator when on).
+"""
+function setpoint_drawn_on(selection::AbstractString, kind::AbstractString, show_ch1::Bool, show_ch2::Bool)::Bool
+    selection == "Lifetime" && return startswith(kind, "Lifetime")
+    selection == "Ion concentration" && return kind == "Ion concentration"
+    selection == RATIO_PLOT && return (kind == "Ratio Ch1/Ch2" && show_ch1) || (kind == "Ratio Ch2/Ch1" && !show_ch1 && show_ch2)
+    return false
+end
+
+"""The protocol setpoint, the PI's target and not measured data, on the plot of its quantity (`setpoint_drawn_on`), whatever the channel toggles."""
+function draw_setpoint_line!(axis, plot::PlotSlot, app_run, selection, kind, show_ch1::Bool, show_ch2::Bool)
+    setpoint_drawn_on(selection, kind, show_ch1, show_ch2) || return nothing
+    series_line!(axis, plot, app_run.timestamps, app_run.protocol_setpoint; color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
+    return nothing
+end
+
 function add_setpoint_highlight!(ax, plot::PlotSlot)
     spans = SetpointSpans(Observable([NaN]), Observable([NaN]))
     vspan!(ax, spans.starts, spans.ends, color = (PLOT_COLOR_REF, 0.05))
@@ -247,8 +269,8 @@ end
 
 Each shown channel's counts as semi-transparent bars plus its fit as a line
 on top, all normalized (see above) so shapes are comparable regardless of
-photon counts; and the IRF of each shown channel (`PLOT_COLOR_IRF`; dashed
-for channel 2). Driven by the fixed-size `ChannelSeries` Observables the
+photon counts; and the IRF of each shown channel as a solid line
+(`PLOT_COLOR_IRF_CH1` / `PLOT_COLOR_IRF_CH2`). Driven by the fixed-size `ChannelSeries` Observables the
 refresh tick overwrites.
 """
 function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
@@ -259,8 +281,8 @@ function draw_histogram_plot!(axis, app_run, show_ch1::Bool, show_ch2::Bool)
         lines!(axis, app_run.hist_time, fit_normalized, color=color, linewidth=PLOT_LINEWIDTH)
         channel = series === app_run.ch1 ? 1 : 2
         irf_normalized = lift(fit -> normalized_irf_from_fit(fit, channel), series.fit)
-        lines!(axis, app_run.hist_time, irf_normalized, color=PLOT_COLOR_IRF, linewidth=PLOT_LINEWIDTH,
-               linestyle=channel == 1 ? :solid : :dash)
+        lines!(axis, app_run.hist_time, irf_normalized, color=channel == 1 ? PLOT_COLOR_IRF_CH1 : PLOT_COLOR_IRF_CH2,
+               linewidth=PLOT_LINEWIDTH)
     end
 
     return nothing
@@ -375,20 +397,20 @@ function render_plot!(app, app_run, blocks, plot_slot::Symbol;
         series_line!(axis, plot, app_run.timestamps, app_run.command2; color=PLOT_COLOR_CH2, linewidth=PLOT_LINEWIDTH)
     elseif selection == "Lifetime"
         add_setpoint_highlight!(axis, plot)
-        # The protocol setpoint is the PID target, not measured data: drawn
-        # regardless of the channel toggles.
-        series_line!(axis, plot, app_run.timestamps, app_run.protocol_setpoint; color=PLOT_COLOR_REF, linewidth=PLOT_LINEWIDTH)
+        draw_setpoint_line!(axis, plot, app_run, selection, app.protocol.setpoint_kind, show_ch1, show_ch2)
         draw_roi_metric_plot!(axis, plot, app_run, :lifetime, :lifetime_smooth, show_ch1, show_ch2)
     elseif selection == "Histogram"
         draw_histogram_plot!(axis, app_run, show_ch1, show_ch2)
     elseif selection == "Ion concentration"
         add_setpoint_highlight!(axis, plot)
+        draw_setpoint_line!(axis, plot, app_run, selection, app.protocol.setpoint_kind, show_ch1, show_ch2)
         draw_roi_metric_plot!(axis, plot, app_run, :concentration, :concentration_smooth, show_ch1, show_ch2)
     elseif selection == "Photon counts"
         add_setpoint_highlight!(axis, plot)
         draw_roi_metric_plot!(axis, plot, app_run, :photons, :photons_smooth, show_ch1, show_ch2)
     elseif selection == RATIO_PLOT
         add_setpoint_highlight!(axis, plot)
+        draw_setpoint_line!(axis, plot, app_run, selection, app.protocol.setpoint_kind, show_ch1, show_ch2)
         draw_ratio_plot!(axis, plot, app_run, show_ch1, show_ch2)
     elseif selection == "Readback"
         draw_readback_plot!(axis, plot, app_run)
@@ -416,11 +438,13 @@ function refresh_plot_slot!(app, app_run, plot::PlotSlot)
     end
 
     if plot.spans !== nothing
-        # Highlighted: the protocol's setpoint periods — in images, the stimulation (a command above 0 V).
-        marks = app_run.image_mode ? app_run.stimulation : app_run.protocol_setpoint
-        n = min(length(app_run.timestamps), length(marks))
+        # Highlighted: the protocol's setpoint periods — without a lifetime setpoint in view (the protocol
+        # in volts), the stimulation (a command above 0 V).
+        n = min(length(app_run.timestamps), length(app_run.protocol_setpoint), length(app_run.stimulation))
         start = isfinite(window_s) && n > 0 ? searchsortedfirst(view(app_run.timestamps, 1:n), app_run.timestamps[n] - window_s) : 1
-        starts, ends = protocol_setpoint_spans(view(app_run.timestamps, start:n), view(marks, start:n))
+        setpoints = view(app_run.protocol_setpoint, start:n)
+        marks = any(isfinite, setpoints) ? setpoints : view(app_run.stimulation, start:n)
+        starts, ends = protocol_setpoint_spans(view(app_run.timestamps, start:n), marks)
         if isempty(starts)
             starts, ends = [NaN], [NaN]
         end

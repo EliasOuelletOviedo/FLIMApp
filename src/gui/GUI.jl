@@ -82,7 +82,7 @@ function make_plot_axes!(left_grid, app, app_run)
     plot_2 = Axis(left_grid[3, 4]; merge(AXIS_PLOTS_ATTRS, Dict{Symbol, Any}(:title =>"Plot 2\n($(app.layout.plot2))"))...)
 
     for (series, color) in ((app_run.ch1, PLOT_COLOR_CH1), (app_run.ch2, PLOT_COLOR_CH2))
-        hspan!(counts_axis, 1, series.counts, color = (color, 0.1))
+        hspan!(counts_axis, 10, series.counts, color = (color, 0.1))
         hlines!(counts_axis, series.counts, color = color, linewidth = PLOT_LINEWIDTH)
     end
 

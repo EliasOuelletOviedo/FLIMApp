@@ -93,7 +93,7 @@ function normalize_protocol_config(raw_protocol::ProtocolSettings)::ProtocolSett
         delay = max(raw_protocol.delay, 0),
         times = copy(raw_protocol.times),
         setpoints = copy(raw_protocol.setpoints),
-        setpoints_in_volts = raw_protocol.setpoints_in_volts
+        setpoint_kind = raw_protocol.setpoint_kind
     )
 end
 
@@ -101,12 +101,15 @@ end
     protocol_in_volts(protocol)::Bool
 
 Whether the protocol, active, gives the command voltage (the Protocol
-popup's checkbox, `setpoints_in_volts`): its value at each moment is
+popup's menu at "Voltage", `setpoint_kind`): its value at each moment is
 written as is on the outputs whose controller is on, no PI — the DAQ loop
-reads it slot by slot (`slot_commands`). In the Realtime in images it
-always does (`image_mode_commands`).
+reads it slot by slot (`slot_commands`, `protocol_volts_commands`).
 """
-protocol_in_volts(protocol::ProtocolSettings)::Bool = protocol.active && protocol.setpoints_in_volts
+protocol_in_volts(protocol::ProtocolSettings)::Bool = protocol.active && protocol.setpoint_kind == "Voltage"
+
+"""Does the setpoint `kind` need the second channel: its lifetime, or the photon ratio of the two?"""
+needs_two_channels(kind::AbstractString)::Bool =
+    kind in ("Lifetime Ch2", "Ratio Ch1/Ch2", "Ratio Ch2/Ch1") || (kind == "Ion concentration" && CONCENTRATION_CHANNEL == 2)
 
 function sync_runtime_protocol!(app, app_run)
     app_run.protocol[] = normalize_protocol_config(app.protocol)

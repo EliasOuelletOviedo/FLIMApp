@@ -206,16 +206,17 @@ end
 
 The commands slot `s` carries, in % of `command_full_scale_v` (the PI's
 unit): none in the galvo scan, whose commands and 1064 nm gate stay at 0 V;
-the protocol's voltages at the slot's start in images, or with the
-protocol in volts (the Protocol popup's checkbox, `protocol_in_volts`,
-read slot by slot) — no PI —; otherwise the latest PI commands of the ROI
-it scans (each ROI has its own controllers; ROI 1 without ROI scanning).
+the protocol's voltages at the slot's start with the protocol in volts
+(the Protocol popup's checkbox, `protocol_in_volts`, read slot by slot) —
+no PI —; otherwise the latest PI commands of the ROI it scans (each ROI
+has its own controllers; ROI 1 without ROI scanning; with the excitation
+by image, the one PI's, the same for every ROI). Without an active
+protocol, the PI gives none: 0 V.
 """
 function slot_commands(pattern::ScanPattern, s::Integer, ex::Exchange, cfg::BenchConfig)::NTuple{2, Float64}
     pattern.raster && return (NaN, NaN)
     settings = current_settings(ex)
-    (pattern.image_mode || protocol_in_volts(settings.protocol)) &&
-        return image_mode_commands(settings, slot_start_s(pattern, s), cfg)
+    protocol_in_volts(settings.protocol) && return protocol_volts_commands(settings, slot_start_s(pattern, s), cfg)
     return command_values(ex, max(1, slot_roi(pattern, s)))
 end
 
@@ -248,7 +249,7 @@ The 1064 nm laser gate on AO 1 for a slot whose 1064 nm power command (AO 0)
 is `command1_v`: `gate_1064_v` while the laser is to emit — a command above
 0 V — and 0 V when it is to be off (controller 1 off, no protocol or a
 protocol at 0 V, a PI at 0 %). `prepare_slot!` then puts it on the samples
-where the gate P0.0 is high, 0 V elsewhere.
+where the pattern lights the 1064 nm (`laser_1064`), 0 V elsewhere.
 """
 gate_1064_volts(command1_v::Real, cfg::BenchConfig)::Float64 = command1_v > 0 ? cfg.gate_1064_v : 0.0
 
@@ -256,24 +257,24 @@ gate_1064_volts(command1_v::Real, cfg::BenchConfig)::Float64 = command1_v > 0 ? 
 slot_start_s(p::ScanPattern, s::Integer) = (entry_samples(p) + s * p.slot_samples) / p.sample_rate_hz
 
 """
-    image_mode_commands(settings, t, cfg) -> (command1, command2)
+    protocol_volts_commands(settings, t, cfg) -> (command1, command2)
 
-The Realtime in images (`[clamp] images`) has no PI, nor the Realtime with
-the protocol in volts (`protocol_in_volts`): while the protocol is
-active, its value at `t` (s since the run started) is a voltage, written
+The Realtime with the protocol in volts (`protocol_in_volts`) has no PI:
+while the protocol is active, its value at `t` (s since the run started)
+is a voltage, written
 on the outputs whose controller is on (Out 1: `ch1_on`, Out 2: `ch2_on`);
 otherwise, and off the protocol (before its delay, after its repeats),
 0 V. In percent of `command_full_scale_v`, as the PI's commands, for
 `command_volts` — which keeps it within 0 V and `command_max_v`.
 """
-function image_mode_commands(settings::AnalysisSettings, t::Real, full_scale_v::Real)
+function protocol_volts_commands(settings::AnalysisSettings, t::Real, full_scale_v::Real)
     p = settings.protocol
     volts = p.active ? protocol_setpoint_at(p, t) : NaN
     percent = isfinite(volts) ? 100 * volts / full_scale_v : NaN
     c = settings.controller
     return (c.ch1_on ? percent : NaN, c.ch2_on ? percent : NaN)
 end
-image_mode_commands(settings::AnalysisSettings, t::Real, cfg::BenchConfig) = image_mode_commands(settings, t, cfg.command_full_scale_v)
+protocol_volts_commands(settings::AnalysisSettings, t::Real, cfg::BenchConfig) = protocol_volts_commands(settings, t, cfg.command_full_scale_v)
 
 # Below this, a garbage-collector pause (a few hundred ms have been measured
 # during heavy fitting, see the Console panel) can miss a slot.

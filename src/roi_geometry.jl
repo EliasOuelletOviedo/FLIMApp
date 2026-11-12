@@ -82,7 +82,7 @@ function shape_spiral_points(N::Int, xs::AbstractVector{<:Real}, ys::AbstractVec
 
     for k in 1:N
         u = (k - 0.5) / N
-        θ = π * turns * u
+        θ = 2π * turns * u                       # `turns` complete turns
 
         R_θ = polygon_ray_distance(θ, xs, ys, x0, y0)
         R_θ = R_θ > 0 ? R_θ : R
@@ -320,8 +320,8 @@ end
 The galvo path for `request.rois` in `request.order`, in mV: one
 `(; roi_index, center, points)` per visit, where `points` is a
 uniform-density spiral scan of that ROI's shape (`shape_spiral_points`,
-`request.points_per_roi` points, `request.spiral_turns` turns) starting
-near `center`.
+`request.points_per_roi` points, `request.spiral_turns` complete turns)
+starting near `center`.
 
 The ROI coordinates are in `request.image_size`'s own pixel space, which
 can be shorter (in height) than `roi_voltage_calibration_size`'s 1024x1024

@@ -141,8 +141,10 @@ it's `Base.@kwdef`, as long as no inner constructor suppresses it — true for
 `Dict` is recursively reconstructed via the corresponding field's declared
 type.
 
-A field present in `T` but missing from `d` (a save file from before that
-field existed — e.g. `ProtocolSettings` gaining `points_per_roi` etc.) falls
+A key of `d` that `T` no longer has (a field since removed — e.g.
+`ProtocolSettings`' `PWM_frequency` and `points_per_roi`, now fixed) is
+ignored. A field present in `T` but missing from `d` (a save file from
+before that field existed — e.g. `ProtocolSettings` gaining `PWM_duty`) falls
 back to that field's value in a fresh `T()`, via `default_field_value`,
 instead of throwing: without this, adding a single field to any settings
 struct would `KeyError` on every old save file, and `load_state`'s
@@ -156,7 +158,27 @@ function dict_to_struct(::Type{T}, d::Dict) where T
             default_field_value(T, name)
         for name in fieldnames(T)
     )
-    return T(values...)
+    return migrate_saved!(T(values...), d)
+end
+
+"""
+    migrate_saved!(x, d) -> x
+
+What a setting saved under an older schema (`d`: a `struct_to_dict` dict,
+or a run.toml table for Playback) meant, where `x`'s fields can't take it
+as is; by default nothing. `ProtocolSettings`: the "Setpoint in volts"
+checkbox (`setpoints_in_volts`) of before the setpoint menu becomes its
+kind — checked "Voltage", unchecked "Lifetime Ch1" —, and a kind no longer
+in `SETPOINT_KINDS` the default.
+"""
+migrate_saved!(x, d::AbstractDict) = x
+function migrate_saved!(p::ProtocolSettings, d::AbstractDict)
+    saved(key::Symbol) = haskey(d, key) ? d[key] : get(d, String(key), nothing)
+    if saved(:setpoint_kind) === nothing && saved(:setpoints_in_volts) !== nothing
+        p.setpoint_kind = saved(:setpoints_in_volts) == true ? "Voltage" : "Lifetime Ch1"
+    end
+    p.setpoint_kind in SETPOINT_KINDS || (p.setpoint_kind = ProtocolSettings().setpoint_kind)
+    return p
 end
 
 """

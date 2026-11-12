@@ -1,7 +1,7 @@
 # Bench configuration, read once at startup (scripts/app.jl, run_app).
 #
 # Hardware wiring, timing, safety limits and journal settings. Everything
-# the GUI edits (scan/shift time, points per ROI, galvo voltage range,
+# the GUI edits (scan/shift time, spiral turns, galvo voltage range,
 # ROIs, controller gains...) stays in the saved AppState instead.
 # A missing key falls back to the value shown here.
 
